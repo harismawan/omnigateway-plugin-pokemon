@@ -8,6 +8,7 @@ import {
   EggMark,
   KeyCard,
   KeyId,
+  Lede,
   Numeric,
   Panel,
   RosterGrid,
@@ -48,9 +49,7 @@ export function KeyPicker({
   return (
     <Panel>
       <h2>Companion</h2>
-      <p>
-        <Dim>Each API key raises its own Pokémon on the tokens it spends. Pick a key.</Dim>
-      </p>
+      <Lede>Each API key raises its own Pokémon on the tokens it spends. Pick a key.</Lede>
 
       {keys.length > 0 ? (
         <RosterGrid>

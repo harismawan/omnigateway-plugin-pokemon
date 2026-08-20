@@ -124,6 +124,21 @@ export const Fact = styled(Dim)`
   margin-top: ${SPACE.sm};
 `;
 
+/**
+ * The line under a panel heading that says what the panel is for.
+ *
+ * A styled `p` rather than a bare one wrapping a `Dim`. A bare paragraph
+ * inherits whatever margin the console's own reset leaves it — a number this
+ * panel neither chose nor can see, and one that can change underneath it without
+ * anything here rendering differently in a test. Its bottom margin is the
+ * panel's `lg` step, so the roster starts at the same distance a section heading
+ * would.
+ */
+export const Lede = styled.p`
+  color: var(--ink-dim);
+  margin: ${SPACE.xs} 0 ${SPACE.lg};
+`;
+
 export const Notice = styled.p`
   color: var(--warn);
   background: var(--warn-wash);
