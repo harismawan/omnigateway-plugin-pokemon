@@ -549,6 +549,26 @@ test("an unaffordable purchase is refused and changes nothing", async () => {
   expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
 });
 
+test("the shop is listed cheapest first", async () => {
+  // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
+  // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed
+  // the same display bug; this is the assertion that keeps a later entry from
+  // being appended somewhere arbitrary again.
+  await boot();
+  spend(1_000);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { shop } = found.json as { shop: Array<{ price: number }> };
+  const prices = shop.map((offer) => offer.price);
+  expect(prices).toEqual([...prices].sort((a, b) => a - b));
+  // Every entry still present: a sort that dropped one would satisfy the above.
+  expect(prices).toHaveLength(6);
+});
+
 test("an unknown shop entry is refused before it can be priced", async () => {
   await boot();
   spend(10_000_000_000);

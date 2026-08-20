@@ -625,6 +625,21 @@ function hashSeed(input: string): number {
   return hash >>> 0;
 }
 
+/**
+ * The shop, cheapest first.
+ *
+ * Sorted rather than written in a good order, because the order this was written
+ * in *was* the declaration order — items by `ITEM_PRICES` key, then eggs — which
+ * put the 3B charm above the 1B egg and read as a pile rather than a price list.
+ * PokeTokenBar shipped exactly this bug and fixed it, and its note is worth
+ * carrying: the fix must not be "group the eggs together", because that pushes
+ * the 4B rare egg back above the charm and revives half of it. Price is the only
+ * ordering the reader can verify from the row itself.
+ *
+ * Sorting here rather than in the panel keeps one answer to "what is on sale and
+ * for how much" — a second ordering in the browser is a second thing to keep
+ * true when an entry is added.
+ */
 function shopCatalogue(): Array<{ entry: ShopEntry; price: number }> {
   return [
     ...ITEM_KINDS.map((item) => ({
@@ -637,7 +652,7 @@ function shopCatalogue(): Array<{ entry: ShopEntry; price: number }> {
       price: freshEggPrice("uncommon"),
     },
     { entry: { kind: "egg" as const, tier: "rare" as const }, price: freshEggPrice("rare") },
-  ];
+  ].sort((a, b) => a.price - b.price);
 }
 
 function parseShopEntry(body: unknown): ShopEntry | null {
