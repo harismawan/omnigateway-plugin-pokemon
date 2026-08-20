@@ -6,7 +6,7 @@ import { Dex } from "./Dex.tsx";
 import { activityOf } from "./format.ts";
 import { Hero } from "./Hero.tsx";
 import { KeyPicker } from "./KeyPicker.tsx";
-import { Button, Dim, KeyId, Notice, Panel, Row, SectionHead } from "./primitives.ts";
+import { Button, Dim, KeyId, Notice, Panel, PanelHead, SectionHead } from "./primitives.ts";
 import { Shop } from "./Shop.tsx";
 import type { CompanionView, Roster, ShopEntry } from "./types.ts";
 
@@ -149,7 +149,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
 
   return (
     <Panel>
-      <Row>
+      <PanelHead>
         <h2>Companion</h2>
         <KeyId>{showing}</KeyId>
         {/*
@@ -171,7 +171,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
         <Button onClick={() => setScreen({ at: "roster" })} type="button">
           All keys
         </Button>
-      </Row>
+      </PanelHead>
 
       <CompanionBody
         buy={buy.mutate}

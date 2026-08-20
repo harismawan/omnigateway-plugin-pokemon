@@ -98,6 +98,23 @@ export const Row = styled.div`
   flex-wrap: wrap;
 `;
 
+/**
+ * A panel's title line: the heading, what it is showing, and the way back.
+ *
+ * `Row` centres its children, and that is only the same as centring them on the
+ * *heading* when the heading's own margins are symmetric. A heading is a block
+ * element carrying whatever margin the console's reset gives it — commonly some
+ * below and none above — and flex centres the margin box, so the words sit high
+ * while the key id and the button sit on the row's true middle. The heading is
+ * the tallest thing here, so it is the one that has to give up its margin;
+ * standalone headings elsewhere keep theirs.
+ */
+export const PanelHead = styled(Row)`
+  h2 {
+    margin: 0;
+  }
+`;
+
 export const Dim = styled.span`
   color: var(--ink-dim);
 `;
