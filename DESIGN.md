@@ -508,6 +508,74 @@ Offline test: with the outbound fetch stubbed to fail, an egg with a
 UI tests under happy-dom against a stub plugin module, covering the error
 boundary and the unreadable-save state.
 
+## Proposed items
+
+Designed and approved, not built. Recorded here because the reasoning is the
+expensive part and two of these were redesigned away from their obvious form —
+an approval nobody wrote down becomes a decision somebody re-litigates.
+
+Three constraints from `balance.ts` govern all of them, and the first is the one
+that kills naïve designs:
+
+1. **Anything granting growth costs more than the growth it grants**, because
+   tokens are simultaneously the meter and the wallet. Candy is 5× its XP.
+2. Cosmetic items have no balance argument and are priced by feel.
+3. Permanent upgrades cost a graduation total — the charm is 3B, one rare.
+
+**Everstone — 1B, consumable, applied to the companion.** Sets
+`active.everstone`; `advance` refuses both the evolve and the graduate branch
+while it is set. Growth still accrues past the threshold and cascades on release
+through the existing transition cap. Priced at a fresh egg deliberately: an egg
+is "discard this one", a stone is "keep this one", and two opposite operations at
+one price are legible from the shop row alone. It blocks graduation as well as
+evolution because the case for it is a shiny, and a shiny is most at risk exactly
+when it is about to graduate away — which also makes it self-limiting, since
+pinning costs Dex progress. **Open:** removal needs a verb; `use` is a one-way
+consume.
+
+**Lure — 1B, consumable, spent at the next roll.** Filters candidates to
+uncollected finals rather than merely halving their weight. A modifier rather
+than a replacement — the egg is still bought — so it must price below the grade
+guarantee beside it: lure plus a plain egg is 2B for a guaranteed-new common
+against 2.5B for a guaranteed-uncommon, which puts novelty below grade. The seed
+is unchanged, so a retried prefetch still reproduces the same Pokémon. A full Dex
+empties the filtered pool; that must refuse the use rather than consume a lure
+that cannot act.
+
+**Soothe Bell — 3B, held, consumed at graduation, +25% to that companion only.**
+The bounding is not a detail. As a permanent bonus on all future growth it is
+**unbuildable under rule 1** — at any price there is a break-even past which it
+is free growth forever. Bounded to one companion its ceiling is 25% of a
+graduation total, so it never repays its own cost in raw tokens: 187M saved on a
+common, 1.5B on a legendary, against 3B paid. It therefore reads as "get this
+rare one over the line sooner" rather than as an investment, and that asymmetry
+is the design. It scales the growth applied to `usedAtStage` while
+`consumedTotal` absorbs the raw amount, so idempotency holds — and it must never
+touch `tokens_total`, which would make it a money printer.
+
+**Incense — 500M, consumable, favours longer evolution lines.** The obvious
+version — stacking shiny odds — **should not be built**: the source app
+considered 1/32, rejected it as excessive, and settled on 1/48 for the charm, so
+a second shiny item re-opens a closed decision and puts two items on one axis.
+Redefined onto an axis nothing else touches. Because `phaseThreshold` sums to `T`
+regardless of form count, a longer line costs exactly the same to graduate and
+simply yields more evolution events, so this is engagement with no economy
+effect — hence cosmetic pricing. It also interacts with the Ditto disguise, which
+only rolls on common multi-form hatches.
+
+**Repel — 500M, consumable, excludes the current line from the next roll.**
+Favouring a species instead would fight the collection incentive the Dex exists
+for, and the parameterised form is worse: a caller-supplied species id means a
+new shop-entry shape and an id reaching the candidate set that would have to be
+range-validated. Excluding *the current companion's final form* needs no
+parameter, adds no wire shape, and complements the lure's positive filter.
+
+**Dependency.** Everstone and Soothe Bell are held, which makes the missing
+repurchase guard load-bearing rather than cosmetic. `applyPurchase` increments
+without refusing a second copy; today that wastes 3B on a duplicate charm, but a
+stacking Soothe Bell is an exploit the moment anything reads the count rather
+than a boolean. The guard comes first.
+
 ## Out of scope
 
 - **Showing a key's console label instead of its id.** Wanted, and not reachable
