@@ -376,9 +376,6 @@ export default definePlugin({
        * therefore stays armed rather than being spent — it is not refused, it
        * waits, and the next roll that has something new to offer uses it.
        */
-      const lureUsable =
-        state.lure && candidates.some((candidate) => !collected.has(candidate.finalId));
-
       const rolled = roll({
         candidates,
         // Seeded from facts rather than from a clock, so a retried prefetch
@@ -391,7 +388,7 @@ export default definePlugin({
         // which candidates are on the table, not which way the dice fall — so a
         // retried prefetch with the same modifiers still produces the same
         // Pokémon.
-        onlyUncollected: lureUsable,
+        onlyUncollected: state.lure,
         preferLongLines: state.incense,
         excludeFinal: state.repel,
       });
@@ -437,9 +434,10 @@ export default definePlugin({
           // set until the egg opens would let a second prefetch, after a fresh
           // egg replaced this one, reuse a modifier that has already been used.
           //
-          // A lure that had nothing to find is the exception: it did no work, so
-          // it is not spent.
-          lure: state.lure && !lureUsable,
+          // A lure that had to be dropped is the exception: `roll` reports
+          // whether it actually narrowed anything, and one that did no work is
+          // still there tomorrow.
+          lure: state.lure && !rolled.usedLure,
           incense: false,
           repel: null,
         }),

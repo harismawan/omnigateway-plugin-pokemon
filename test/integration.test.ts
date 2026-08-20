@@ -857,6 +857,61 @@ test("a lure with nothing left to find waits rather than being spent", async () 
   expect(state?.lure).toBe(true);
 });
 
+test("a guaranteed egg still hatches when a lure rules out everything it allows", async () => {
+  // The 5B failure, end to end. Every rare-or-better final collected, a
+  // guaranteed-rare egg bought, a lure armed. "Is anything uncollected" says yes
+  // — the commons are — but the intersection with the rarity floor is empty, and
+  // an empty pool reads as "no candidate index yet", so the egg used to sit at
+  // its threshold retrying identically on every poll with the lure still armed
+  // to do the same to the next one.
+  await boot(
+    {},
+    cachedSpecies([
+      { id: 1, captureRate: 45, forms: 3, finalId: 3 }, // rare, and collected
+      { id: 10, captureRate: 255, forms: 3, finalId: 12 }, // common, uncollected
+    ]),
+  );
+  spend(100);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      rarity: "rare",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: "rare",
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  // It hatched, and it honoured the guarantee rather than the lure — the
+  // guarantee costs up to 4B against the lure's 1B, and a rare egg producing a
+  // common is what the tier pricing exists to prevent.
+  expect(state?.pendingHatch?.speciesId).toBe(1);
+  // And the lure was not spent doing nothing.
+  expect(state?.lure).toBe(true);
+});
+
 test("the shop is listed cheapest first", async () => {
   // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
   // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed

@@ -225,12 +225,41 @@ test("a lure never produces a species already in the Dex", () => {
   }
 });
 
-test("a lure with nothing left to find empties the pool rather than repeating", () => {
-  // Which is why the caller checks first and leaves the lure armed instead of
-  // spending it: null here is indistinguishable from "no candidate index yet",
-  // so an egg with an unusable lure would simply never hatch.
+test("a lure with nothing left to find is dropped rather than emptying the pool", () => {
+  // The lure must never be able to stop a hatch. An empty pool returns null,
+  // which the caller cannot tell apart from "no candidate index yet" — so it
+  // would sit at the threshold retrying identically on every poll, forever.
   const everything = new Set(CANDIDATES.map((one) => one.finalId));
-  expect(rollWith(1, { collectedFinals: everything, onlyUncollected: true })).toBeNull();
+  const result = rollWith(1, { collectedFinals: everything, onlyUncollected: true });
+
+  expect(result).not.toBeNull();
+  // And it says so, which is what lets the caller leave the lure armed for a day
+  // when there is something new to find.
+  expect(result?.usedLure).toBe(false);
+});
+
+test("a lure the guarantee rules out is dropped, not left to brick the egg", () => {
+  // The case a collected-set check alone cannot see, and the one that stranded
+  // 5B: every rare-or-better final collected, a guaranteed-rare egg bought, and
+  // a lure armed. Uncollected species exist, so "is anything uncollected" says
+  // yes — but the *intersection* with the rarity floor is empty.
+  const collectedFinals = new Set([3, 144]);
+  const result = rollWith(1, { collectedFinals, guarantee: "rare", onlyUncollected: true });
+
+  expect(result).not.toBeNull();
+  expect(result?.usedLure).toBe(false);
+  // The guarantee is what must survive the collision: it was paid for, the lure
+  // is the cheaper of the two, and a rare egg that hatches a common is the
+  // failure the tier pricing exists to prevent.
+  const chosen = CANDIDATES.find((one) => one.id === result?.speciesId);
+  expect(rarityFromCaptureRate(chosen?.captureRate ?? 255, false, false)).toBe("rare");
+});
+
+test("a lure that can be honoured reports that it was", () => {
+  // Guards the implementation that satisfies the two above by never applying
+  // the filter at all.
+  const result = rollWith(1, { collectedFinals: new Set([3]), onlyUncollected: true });
+  expect(result?.usedLure).toBe(true);
 });
 
 test("a repel refuses the whole line, not just the form that was held", () => {
