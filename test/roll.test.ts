@@ -6,6 +6,7 @@ import {
   rarityFromCaptureRate,
 } from "../src/balance.ts";
 import { NATURES, type Roll, roll, type SpeciesCandidate } from "../src/roll.ts";
+import { freshState, hasShinyCharm } from "../src/state.ts";
 
 /** A spread of candidates across every rarity band, all with animations. */
 /**
@@ -102,6 +103,34 @@ test("shiny lands near its declared odds, and the charm improves them", () => {
   expect(plain).toBeGreaterThan(1 / ODDS.shiny / 2);
   expect(plain).toBeLessThan((1 / ODDS.shiny) * 2);
   expect(charmed).toBeGreaterThan(plain);
+});
+
+test("a charm in the bag reaches the roll, and an empty bag does not", () => {
+  // The seam nothing crossed. `hasShinyCharm` is the charm's *entire* effect —
+  // 3,000,000,000 tokens buys one boolean — and the odds test above passes the
+  // flag as a literal, so the function could have returned a constant `false`
+  // and the shop's most expensive item would have done nothing, silently.
+  //
+  // Seed 452 was chosen because its shiny draw falls between 1/64 and 1/48: the
+  // same egg is shiny holding the charm and not shiny without it. The species is
+  // drawn before the shiny check, so it is identical either way — which is what
+  // makes the difference attributable to the charm and to nothing else.
+  const holding = { ...freshState(), inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 } };
+  const empty = freshState();
+
+  // The seam is asserted before the flag itself, deliberately: a failure here
+  // has to read as "the bag did not reach the roll" rather than as a broken
+  // predicate, and an assertion on the boolean alone would let the wiring rot
+  // while still going red for the right-looking reason.
+  const charmed = rollWith(452, { hasShinyCharm: hasShinyCharm(holding) });
+  const plain = rollWith(452, { hasShinyCharm: hasShinyCharm(empty) });
+
+  expect(charmed?.speciesId).toBe(plain?.speciesId as number);
+  expect(charmed?.isShiny).toBe(true);
+  expect(plain?.isShiny).toBe(false);
+
+  expect(hasShinyCharm(holding)).toBe(true);
+  expect(hasShinyCharm(empty)).toBe(false);
 });
 
 test("a Ditto only ever disguises itself as a common multi-form species", () => {

@@ -95,6 +95,28 @@ test("a whole line graduates and returns to an egg", () => {
   expect(result.state.active).toBeNull();
 });
 
+test("a graduation seeds the next egg with what overshot it", () => {
+  // The third carry-over site and the only one nothing covered: the hatch
+  // overflow kills six tests and the evolution overflow five, while `eggUsage:
+  // excess` here could become `eggUsage: 0` with the suite still green. A single
+  // large credit that carries a whole line and then some has to leave the
+  // remainder incubating, exactly as the other two sites do — a burst that
+  // finishes a Pokémon and starts the next one must not be charged twice for the
+  // part that started the next one.
+  const excess = 12_345_678;
+  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD + graduationTotal("common") + excess);
+
+  expect(result.events.map((e) => e.kind)).toEqual(["hatched", "evolved", "evolved", "graduated"]);
+  expect(result.state.active).toBeNull();
+  // Not zero, and not the threshold either: a number that appears nowhere else
+  // in the arithmetic, so only the carry-over can produce it.
+  expect(result.state.eggUsage).toBe(excess);
+  // The new egg is unrolled and unguaranteed, so nothing hatches out of the
+  // graduate's leftovers by accident — it waits for its own roll.
+  expect(result.state.pendingHatch).toBeNull();
+  expect(result.state.eggTier).toBeNull();
+});
+
 test("a graduation carries the whole line and the nature, not just its ends", () => {
   // The Dex stores `chain_order`, and `advance` is the only thing that knows the
   // line. Rebuilding `[baseId, finalId]` at the call site lost every middle form

@@ -421,6 +421,44 @@ describe("the Pokédex", () => {
     expect(screen.queryByText("Nothing graduated yet.")).toBeNull();
   });
 
+  test("draws the graduate itself, not the form it started as", async () => {
+    // `alt` and `src` are two separate expressions in the cell and only the alt
+    // was ever asserted — so every thumbnail could have been built from
+    // `entry.baseId` and the whole collection would have rendered its
+    // pre-evolutions, with 37 UI tests green and the alt text still naming the
+    // right species.
+    //
+    // `baseId` and `finalId` differ in both fixtures, which is the only reason
+    // the swap is visible at all: on a one-form line the two URLs are identical.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexEntry({ id: "d1", baseId: 10, finalId: 12, chainOrder: [10, 11, 12] }),
+            dexEntry({
+              id: "d2",
+              baseId: 133,
+              finalId: 134,
+              chainOrder: [133, 134],
+              rarity: "legendary",
+              isShiny: true,
+              nature: "modest",
+            }),
+          ],
+        }),
+      ),
+    );
+    await lookUp(KEY);
+
+    const graduate = await screen.findByRole("img", { name: "common species 12" });
+    expect(graduate.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/12");
+
+    // And the shiny variant is asked for by the entry's own flag, on the final
+    // form as well.
+    const shiny = screen.getByRole("img", { name: "legendary shiny species 134" });
+    expect(shiny.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/134?shiny=1");
+  });
+
   test("shows the nature the server records, which the sprite cannot say", async () => {
     // Two different natures, because one would pass against a component that
     // rendered the same entry twice.

@@ -1,11 +1,21 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LimitReached, RequestCompleted } from "@omnigateway/plugin-api";
+import type {
+  LimitReached,
+  PluginFetch,
+  PluginFiles,
+  RequestCompleted,
+} from "@omnigateway/plugin-api";
 import type { PluginContext, PluginRoute } from "@omnigateway/plugin-api/define";
 import { WINDOW_MS } from "@omnigateway/plugin-api/events";
 import { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "@omnigateway/plugin-api/version";
-import { EGG_HATCH_THRESHOLD, graduationTotal, ITEM_PRICES } from "../src/balance.ts";
+import {
+  EGG_HATCH_THRESHOLD,
+  freshEggPrice,
+  graduationTotal,
+  ITEM_PRICES,
+} from "../src/balance.ts";
 import companion from "../src/server.ts";
 import { freshState, serialiseState } from "../src/state.ts";
 import { readCompanion, readDex } from "../src/store.ts";
@@ -65,7 +75,109 @@ function spend(tokens: number, requestId = `req_${Math.trunc(tokens)}`): void {
   );
 }
 
-async function boot(config: Record<string, unknown> = {}): Promise<void> {
+/**
+ * Writes a companion's state directly, as an earlier session or the panel's own
+ * prefetch would have left it.
+ *
+ * `consumedTotal` is the caller's to set and must match what has been credited,
+ * or the next `advance` walks the difference and the fixture stops being the
+ * thing under test.
+ */
+function plant(state: Record<string, unknown>): void {
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify(state),
+    KEY,
+  ]);
+}
+
+/**
+ * The species index and one species' detail, already cached on disk.
+ *
+ * Everything `prefetchHatch` needs with `net` stubbed to throw, which is the
+ * whole point of the cache: a roll needs no network at the moment it happens,
+ * and a test that reached one would be testing PokéAPI rather than this plugin.
+ *
+ * One candidate, so the species a roll produces is not in question and the only
+ * thing a fixture can change is the rest of the roll.
+ */
+type CachedSpecies = { id: number; captureRate: number; forms: number; finalId: number };
+
+/** The one common species every test that does not care about rarity uses. */
+const COMMON_SPECIES: CachedSpecies = { id: 10, captureRate: 255, forms: 3, finalId: 12 };
+
+function cachedSpecies(species: readonly CachedSpecies[] = [COMMON_SPECIES]): Capabilities {
+  const encoder = new TextEncoder();
+  const store = new Map<string, Uint8Array>([
+    ["species/index.json", encoder.encode(JSON.stringify(species))],
+    ...species.map((one): [string, Uint8Array] => [
+      `species/${one.id}.json`,
+      encoder.encode(
+        JSON.stringify({
+          captureRate: one.captureRate,
+          isLegendary: false,
+          isMythical: false,
+          chain: Array.from({ length: one.forms }, (_unused, step) => one.id + step),
+          names: [{ language: { name: "en" }, name: `species-${one.id}` }],
+        }),
+      ),
+    ]),
+  ]);
+
+  return {
+    files: {
+      read: async (path) => store.get(path) ?? null,
+      write: async (path, data) => {
+        store.set(path, data);
+      },
+      exists: async (path) => store.has(path),
+    },
+    net: async (url) => {
+      throw new Error(`the cache should have answered ${url}`);
+    },
+  };
+}
+
+/**
+ * Waits for the panel's prefetch to land a roll.
+ *
+ * The route fires it unawaited on purpose — a prefetch is an optimisation for
+ * the next hatch and the panel has to render now — so a test that wants to see
+ * the roll has to wait for it rather than assume it. Bounded, and it throws
+ * rather than returning quietly: a prefetch that never lands must fail as a
+ * prefetch that never landed, not as an assertion about a null.
+ */
+async function prefetched(apiKeyId: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const pending = readCompanion(storage, apiKeyId)?.state?.pendingHatch;
+    if (pending !== null && pending !== undefined) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`no roll ever landed for ${apiKeyId}`);
+}
+
+/** An active Pokémon, spelled out because every field here is a fixture decision. */
+function activeMon(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    baseId: 1,
+    plannedPath: [1, 2, 3],
+    stageIndex: 0,
+    usedAtStage: 0,
+    rarity: "common",
+    isShiny: false,
+    nature: "sassy",
+    dittoDisguise: null,
+    dittoRevealed: false,
+    ...over,
+  };
+}
+
+/** The two capabilities a roll needs, when a test supplies them. */
+type Capabilities = { net: PluginFetch; files: PluginFiles };
+
+async function boot(
+  config: Record<string, unknown> = {},
+  capabilities: Capabilities | null = null,
+): Promise<void> {
   storage.migrate(companion.migrations ?? []);
 
   const context: PluginContext = {
@@ -78,9 +190,12 @@ async function boot(config: Record<string, unknown> = {}): Promise<void> {
       error: () => {},
     },
     storage,
-    // No `net` and no `files`: this is the offline install, which is also the
-    // shape that keeps the test off the network. Prefetching a species is the
-    // one thing that needs them, and it degrades rather than throwing.
+    // Neither capability by default: that is the offline install, and it is also
+    // the shape that keeps this file off the network. Prefetching a species is
+    // the one thing that needs them, and it degrades rather than throwing. A
+    // test that has to watch a roll happen passes `cachedSpecies()`, whose
+    // `net` throws — so even then nothing here can reach PokéAPI.
+    ...(capabilities ?? {}),
     events: {
       onRequestCompleted: (handler) => {
         onRequest = handler;
@@ -499,6 +614,200 @@ test("a held item cannot be spent, however the request is spelled", async () => 
   expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
 });
 
+test("the charm in the bag reaches the roll the panel prefetches", async () => {
+  // The other end of the same seam `roll.test.ts` pins from the pure side, and
+  // the one that matters commercially: `hasShinyCharm(state)` at the prefetch is
+  // the entire return on a 3,000,000,000-token purchase, and it could have been
+  // written `false` with every suite in the package green.
+  //
+  // The same key and the same credited total in both halves, so the seed —
+  // derived from exactly those two facts — is identical and the only difference
+  // between the two rolls is the charm. 902 was chosen because the shiny draw
+  // for that seed falls between 1/64 and 1/48, which is the band the charm
+  // moves; any other total would leave both rolls on the same side of it and
+  // prove nothing.
+  await boot({}, cachedSpecies());
+  spend(902);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+    speciesId: 10,
+    isShiny: false,
+  });
+
+  // Now the same egg with a charm in the bag: the prefetch is dropped so it is
+  // rolled again, and nothing else about the save moves.
+  plant({
+    consumedTotal: 902,
+    active: null,
+    eggUsage: 902,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 },
+  });
+
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+    speciesId: 10,
+    isShiny: true,
+  });
+});
+
+test("a mint actually rerolls the nature it was spent on", async () => {
+  // The item's whole effect, and until now nothing read `active.nature` after a
+  // mint at all: `useItem` could go back to `return state` — which is what it
+  // used to be, a no-op incrementing a counter a test then pinned as correct —
+  // and every suite would stay green while the operator's 100M bought nothing.
+  //
+  // "sassy" rather than "hardy" on purpose. "hardy" is `parseState`'s fallback
+  // for an unreadable nature *and* the first entry of the cycle, so a fixture
+  // starting there cannot tell a reroll from a default from a no-op.
+  await boot();
+  spend(ITEM_PRICES.mint);
+  plant({
+    consumedTotal: ITEM_PRICES.mint,
+    active: activeMon({ usedAtStage: 111, nature: "sassy" }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 1, shinyCharm: 0 },
+  });
+  expect(readCompanion(storage, KEY)?.state?.active?.nature).toBe("sassy");
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
+  expect(used?.status).toBeUndefined();
+
+  const after = readCompanion(storage, KEY)?.state;
+  expect(after?.active?.nature).not.toBe("sassy");
+  // The next nature in the cycle, which is deterministic on purpose — a reroll
+  // needing entropy would be the one thing in this plugin that cannot be
+  // reproduced.
+  expect(after?.active?.nature).toBe("careful");
+  // And nothing else moved: a mint is cosmetic, so growth and the rest of the
+  // save are untouched and the mint itself is gone from the bag.
+  expect(after?.active?.usedAtStage).toBe(111);
+  expect(after?.active?.stageIndex).toBe(0);
+  expect(after?.inventory.mint).toBe(0);
+});
+
+test("a guaranteed egg discards the roll the old egg was already holding", async () => {
+  // The most expensive failure in the plugin. The panel prefetches a roll on
+  // every poll, so an incubating egg normally *has* a `pendingHatch` — and if
+  // buying a fresh egg stopped clearing it, the 4,000,000,000-token rare
+  // guarantee would hatch the stale common that was already sitting there. The
+  // operator pays for a rarity floor and gets whatever the old egg had rolled,
+  // with nothing anywhere to say so.
+  await boot();
+  const price = freshEggPrice("rare");
+  spend(price);
+  plant({
+    consumedTotal: price,
+    active: null,
+    eggUsage: 4_000_000,
+    eggTier: null,
+    pendingHatch: {
+      speciesId: 10,
+      path: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "jolly",
+      ditto: false,
+    },
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: "rare" },
+  });
+  expect(bought?.status).toBeUndefined();
+
+  const after = readCompanion(storage, KEY)?.state;
+  expect(after?.eggTier).toBe("rare");
+  expect(after?.pendingHatch).toBeNull();
+  expect(after?.eggUsage).toBe(0);
+
+  // And the consequence, which is the part a player would notice: crediting past
+  // the hatch threshold cannot open the discarded common. There is no `net` in
+  // this install, so no replacement roll can land either — the egg waits, which
+  // is the honest outcome.
+  spend(EGG_HATCH_THRESHOLD * 2, "req_after_egg");
+  const settled = readCompanion(storage, KEY)?.state;
+  expect(settled?.active).toBeNull();
+  expect(settled?.eggUsage).toBe(EGG_HATCH_THRESHOLD * 2);
+});
+
+test("the panel route prices the stage a companion is actually on", async () => {
+  // The route computes `nextThreshold` and nothing ever read it: the UI suite
+  // supplies the field as a fixture, and that fixture's value happens to equal
+  // `EGG_HATCH_THRESHOLD` — two numbers that are the same by coincidence, which
+  // is precisely the shape that hides a swapped branch. Collapsing the ternary
+  // to a bare `EGG_HATCH_THRESHOLD` passed every test in the package.
+  await boot();
+  spend(7_000);
+  plant({
+    consumedTotal: 7_000,
+    // Stage 2 of an uncommon three-form line: 1,875,000,000 × 2 / 6.
+    active: activeMon({ rarity: "uncommon", stageIndex: 1, usedAtStage: 3_333 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  // Written out rather than recomputed with `phaseThreshold`, so the assertion
+  // cannot agree with the route by running the same function.
+  expect(found?.json).toMatchObject({ nextThreshold: 625_000_000, progress: 3_333 });
+  expect(625_000_000).not.toBe(EGG_HATCH_THRESHOLD);
+
+  // The other branch, for the same reason in the other direction: an egg is
+  // priced at the hatch threshold and its progress is the incubation.
+  onRequest?.(
+    completed({
+      requestId: "req_egg_key",
+      apiKeyId: "key_egg",
+      tokens: { input: 1_234_567, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }),
+  );
+  const egg = await route?.handler({ params: { id: "key_egg" }, query: {}, body: null });
+  expect(egg?.json).toMatchObject({
+    nextThreshold: EGG_HATCH_THRESHOLD,
+    progress: 1_234_567,
+  });
+});
+
+test("an outsized multiplier is capped rather than trusted", async () => {
+  // The cap's stated purpose is that `tokens_total` never reaches
+  // MAX_SAFE_INTEGER, where addition quietly stops being addition and the growth
+  // meter becomes fiction. The existing coverage tries 10, 0, -5, NaN and
+  // "fast" — every one of them below the cap — so removing `Math.min` changed
+  // nothing any test could see.
+  await boot({ multiplier: 2_500 });
+  spend(1_000);
+  // 1,000 × MAX_MULTIPLIER, not 1,000 × 2,500.
+  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_000_000);
+
+  // And the mistyped exponent the comment names, which is the case that would
+  // otherwise put the counter past what a JavaScript integer can hold.
+  storage.close();
+  storage = createTestStorage();
+  await boot({ multiplier: 1e21 });
+  spend(1_000);
+
+  const total = readCompanion(storage, KEY)?.tokensTotal ?? 0;
+  expect(total).toBe(1_000_000);
+  expect(total).toBeLessThan(Number.MAX_SAFE_INTEGER);
+});
+
 test("the shipped manifest is compatible with the SDK and API the host ships", () => {
   // The failure this catches is silent by design. A manifest whose `sdk` range
   // no longer matches the console's version does not error — the host disables
@@ -517,4 +826,51 @@ test("the shipped manifest is compatible with the SDK and API the host ships", (
 
   expect(Bun.semver.satisfies(DASHBOARD_SDK_VERSION, manifest.sdk)).toBe(true);
   expect(manifest.api).toBe(PLUGIN_API_VERSION);
+});
+
+test("the tier a guaranteed egg was paid for reaches the roll, not just the save", async () => {
+  // The second seam of the same purchase, and the one that survived when the
+  // first was covered. `applyPurchase` recording `eggTier` is asserted elsewhere;
+  // this is `guarantee: state.eggTier` at the prefetch, which could have been
+  // written `null` with all 136 tests green. A rare egg costs 4,000,000,000
+  // tokens and its entire return is that one field arriving here.
+  //
+  // Discriminated by eligibility rather than by seed. Capture rate is the roll's
+  // weight directly, so with a 255 and a 3 in the pool the common wins ~99% of
+  // draws — but a `rare` guarantee removes the common from the pool outright, so
+  // the outcome is fixed rather than probable and no seed hunting is involved.
+  const pool = [COMMON_SPECIES, { id: 20, captureRate: 3, forms: 1, finalId: 20 }];
+
+  await boot({}, cachedSpecies(pool));
+  spend(902);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  // Unguaranteed: the heavily weighted common, which is what makes the paid
+  // version worth anything.
+  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+    speciesId: 10,
+    rarity: "common",
+  });
+
+  // The same key and the same credited total, so the seed is identical and the
+  // guarantee is the only thing that differs between the two rolls.
+  plant({
+    consumedTotal: 902,
+    active: null,
+    eggUsage: 902,
+    eggTier: "rare",
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+    speciesId: 20,
+    rarity: "rare",
+  });
 });

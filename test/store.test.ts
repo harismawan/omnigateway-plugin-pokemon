@@ -61,6 +61,29 @@ test("credits accumulate and never decrease", () => {
   expect(readCompanion(storage, KEY)?.tokensTotal).toBe(3_500);
 });
 
+test("a zero-token request writes no row and stamps no credit instant", () => {
+  // `tokens <= 0`, not `tokens < 0`, and the difference is a whole companion.
+  // The accumulation test above credits 0 and asserts a total of 3,500 — which
+  // is the same number whether or not the row was written — so the guard's
+  // boundary was uncovered from both directions.
+  //
+  // A request that produced no tokens (a refusal, an empty completion) would
+  // otherwise mint a companion for a key that has never earned anything and
+  // stamp `last_credit_at` on it: the "working-looking companion" migration 5
+  // exists to avoid, arriving through the one site allowed to write that column.
+  creditTokens(storage, KEY, 0, 111);
+  expect(readCompanion(storage, KEY)).toBeNull();
+  expect(storage.get<{ n: number }>("SELECT COUNT(*) AS n FROM {{companion}}", [])?.n).toBe(0);
+
+  // And against a row that does exist it moves neither the meter nor the instant.
+  creditTokens(storage, KEY, 4_000, 222);
+  creditTokens(storage, KEY, 0, 333);
+
+  const row = readCompanion(storage, KEY);
+  expect(row?.tokensTotal).toBe(4_000);
+  expect(row?.lastCreditAt).toBe(222);
+});
+
 test("settling twice does not grow twice", () => {
   creditTokens(storage, KEY, EGG_HATCH_THRESHOLD, 1);
   const first = settle(storage, KEY, 2);
