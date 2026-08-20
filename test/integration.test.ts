@@ -874,6 +874,72 @@ function withRepels(count: number, over: Record<string, unknown> = {}): void {
   });
 }
 
+test("an egg cannot be bought while one is already incubating", async () => {
+  // It used to sell, and `applyPurchase` set `eggUsage: 0` unconditionally — so
+  // 1B to 4B destroyed the incubation with nothing said. A shop egg means
+  // exactly one thing: release the current companion and re-roll. With no
+  // companion there is nothing to release, so there is nothing to sell.
+  await boot();
+  spend(freshEggPrice(null) * 2);
+  plant({
+    consumedTotal: freshEggPrice(null) * 2,
+    active: null,
+    eggUsage: 4_000_000,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const refused = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: null },
+  });
+
+  expect(refused?.status).toBe(409);
+  const row = readCompanion(storage, KEY);
+  // The incubation is untouched and so is the wallet.
+  expect(row?.state?.eggUsage).toBe(4_000_000);
+  expect(row?.tokensSpent).toBe(0);
+});
+
+test("an egg is still sold to replace a companion", async () => {
+  // The other half, and what the item is actually for: a reroll. The discarded
+  // companion is not a graduation, so it never reaches the Dex.
+  await boot();
+  spend(freshEggPrice(null) * 2);
+  plant({
+    consumedTotal: freshEggPrice(null) * 2,
+    active: activeMon({ usedAtStage: 9_000 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: null },
+  });
+
+  expect(bought?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.active).toBeNull();
+  expect(state?.eggUsage).toBe(0);
+  expect(readDex(storage, KEY)).toHaveLength(0);
+});
+
 test("a second shiny charm is refused rather than sold", async () => {
   // Owning the charm *is* its effect — `hasShinyCharm` reads `> 0` — so a second
   // one is 3B for a counter nobody reads. PokeTokenBar refuses at both the
@@ -1034,19 +1100,23 @@ test("a guarantee bought while a prefetch is in flight is not thrown away", asyn
       },
     },
   );
-  spend(freshEggPrice("rare") * 2);
+  spend(ITEM_PRICES.shinyCharm * 2);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   // Fires the prefetch unawaited, as the panel does.
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await reached;
 
-  // Mid-flight: 4B on a guaranteed-rare egg.
+  // Mid-flight: 3B on a shiny charm. A charm rather than a guaranteed egg,
+  // because an egg can no longer be bought while one is incubating — and this
+  // is an incubating egg, since that is the only state a prefetch runs in. The
+  // charm is a paid roll input all the same: it takes the shiny odds from 1/64
+  // to 1/48, and the roll in flight was made without it.
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
   const bought = await buy?.handler({
     params: { id: KEY },
     query: {},
-    body: { kind: "egg", tier: "rare" },
+    body: { kind: "item", item: "shinyCharm" },
   });
   expect(bought?.status).toBeUndefined();
 
@@ -1055,8 +1125,8 @@ test("a guarantee bought while a prefetch is in flight is not thrown away", asyn
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   const state = readCompanion(storage, KEY)?.state;
-  // The guarantee survives, and no roll made against the old one was stored.
-  expect(state?.eggTier).toBe("rare");
+  // The charm survives, and no roll made without it was stored.
+  expect(state?.inventory.shinyCharm).toBe(1);
   expect(state?.pendingHatch).toBeNull();
 });
 
@@ -1386,18 +1456,23 @@ test("a mint actually rerolls the nature it was spent on", async () => {
 });
 
 test("a guaranteed egg discards the roll the old egg was already holding", async () => {
-  // The most expensive failure in the plugin. The panel prefetches a roll on
-  // every poll, so an incubating egg normally *has* a `pendingHatch` — and if
-  // buying a fresh egg stopped clearing it, the 4,000,000,000-token rare
-  // guarantee would hatch the stale common that was already sitting there. The
-  // operator pays for a rarity floor and gets whatever the old egg had rolled,
-  // with nothing anywhere to say so.
+  // The most expensive failure in the plugin: a 4,000,000,000-token rare
+  // guarantee hatching the stale common a previous roll had already left in
+  // `pendingHatch`. The operator pays for a rarity floor and gets whatever was
+  // sitting there, with nothing anywhere to say so.
+  //
+  // The route that produced it is now closed from the other end — an egg can
+  // only be bought to replace a live companion, and a live companion has no
+  // pending roll, because hatching clears it. So this fixture is a state the
+  // game no longer reaches on its own, and the test is defence in depth: a
+  // legacy or hand-edited save can still carry both, and the clearing is one
+  // line that nothing else would fail on if it were dropped.
   await boot();
   const price = freshEggPrice("rare");
   spend(price);
   plant({
     consumedTotal: price,
-    active: null,
+    active: activeMon(),
     eggUsage: 4_000_000,
     eggTier: null,
     pendingHatch: {

@@ -845,6 +845,19 @@ function parseShopEntry(body: unknown): ShopEntry | null {
  */
 function applyPurchase(state: CompanionState, entry: ShopEntry): ItemOutcome {
   if (entry.kind === "egg") {
+    /*
+      A shop egg means exactly one thing: release the current companion and
+      re-roll. With no companion there is nothing to release, so there is
+      nothing to sell.
+
+      Without this it sold anyway, and the reset below is unconditional — so
+      buying an egg part-way through an incubation charged 1B to 4B and
+      destroyed the progress, silently, which is the one thing a purchase must
+      never do. Refusing is better than carrying the incubation across: a plain
+      egg bought during incubation would then be 1B for no change at all, which
+      is the same loss wearing a different face.
+    */
+    if (state.active === null) return { refused: "no-companion" };
     return {
       applied: { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null },
     };

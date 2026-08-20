@@ -15,6 +15,7 @@ export function Shop({
   onBuy,
   pending,
   inventory,
+  hasCompanion,
 }: {
   offers: ReadonlyArray<{ entry: ShopEntry; price: number }>;
   wallet: number;
@@ -22,14 +23,22 @@ export function Shop({
   pending: boolean;
   /** What is already held, for the entries that can only be owned once. */
   inventory: Record<string, number>;
+  /** False while an egg is incubating, when there is nothing an egg could replace. */
+  hasCompanion: boolean;
 }) {
   return (
     <Row>
       {offers.map((offer) => {
         const owned = alreadyOwned(offer.entry, inventory);
+        // An egg is a reroll, so with nothing to reroll there is nothing to
+        // sell — and the server refuses it. Disabled rather than hidden, like
+        // an offer beyond the wallet: the prices are what an operator saves up
+        // against, and a shop that reshuffles as the egg grows is harder to
+        // read than one that greys a row out.
+        const nothingToReplace = offer.entry.kind === "egg" && !hasCompanion;
         return (
           <Button
-            disabled={owned || wallet < offer.price || pending}
+            disabled={owned || nothingToReplace || wallet < offer.price || pending}
             key={`${offer.entry.kind}:${shopLabel(offer.entry)}`}
             onClick={() => onBuy(offer.entry)}
             type="button"

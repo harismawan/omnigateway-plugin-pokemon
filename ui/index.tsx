@@ -265,6 +265,7 @@ function CompanionBody({
 
       <SectionHead>Shop</SectionHead>
       <Shop
+        hasCompanion={view.state.active !== null}
         inventory={view.state.inventory}
         offers={view.shop}
         onBuy={buy}

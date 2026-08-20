@@ -709,6 +709,46 @@ describe("an active companion", () => {
     expect(screen.getByText("?")).toBeTruthy();
   });
 
+  test("does not offer an egg while one is already incubating", async () => {
+    // An egg is a reroll. With nothing to reroll the server refuses it, so
+    // offering the button would be offering a guaranteed 409 — and buying it
+    // used to destroy the incubation outright.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: null, eggUsage: 4_000_000, eggTier: null, inventory: {} },
+          wallet: 9_000_000_000,
+          shop: [
+            { entry: { kind: "egg", tier: null }, price: 1_000_000_000 },
+            { entry: { kind: "item", item: "rareCandy" }, price: 500_000_000 },
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const egg = await screen.findByRole("button", { name: /fresh egg/ });
+    expect(egg.hasAttribute("disabled")).toBe(true);
+    // Everything else is still for sale, wallet permitting.
+    expect(screen.getByRole("button", { name: /rare candy/ }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("offers an egg once there is a companion to replace", async () => {
+    renderCompanion(
+      serving(
+        view({
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} },
+          wallet: 9_000_000_000,
+          shop: [{ entry: { kind: "egg", tier: null }, price: 1_000_000_000 }],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const egg = await screen.findByRole("button", { name: /fresh egg/ });
+    expect(egg.hasAttribute("disabled")).toBe(false);
+  });
+
   test("marks a passive already owned instead of offering to buy it twice", async () => {
     // Owning the charm *is* its effect, so a second one is 3B for nothing. The
     // server refuses it; this keeps the panel from offering a guaranteed 409.

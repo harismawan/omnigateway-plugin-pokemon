@@ -243,6 +243,21 @@ probability ratio instead, two uncommon eggs beat one rare egg on *every* axis,
 making the higher tier a strictly inferior product. `sortRank` ordering has a
 test for the same class of bug, and it ports too.
 
+**An egg is only sold when there is a companion to replace.** It means exactly
+one thing — release the current one and re-roll — so with nothing to release
+there is nothing to sell. Without that rule it sold anyway and reset `eggUsage`
+unconditionally, so buying one part-way through an incubation charged 1B to 4B
+and destroyed the progress in silence. Carrying the incubation across instead
+was considered and rejected: a plain egg bought while incubating would then be
+1B for no change at all, which is the same loss wearing a different face.
+
+One consequence worth recording, because it closes a hazard from the other end:
+an egg can now only be bought while a companion is active, and an active
+companion has no `pendingHatch` — hatching clears it. So the case where a paid
+guarantee inherited a stale roll is no longer reachable by play. `applyPurchase`
+still clears `pendingHatch`, and its test still covers it, as defence for a
+legacy or hand-edited save.
+
 ## Species data and sprites
 
 The plugin owns two proxy routes under its own mount, both inheriting the host's
