@@ -363,19 +363,6 @@ export default definePlugin({
       if (candidates.length === 0) return;
 
       const collected = new Set(readDex(storage, apiKeyId).map((entry) => entry.finalId));
-      /**
-       * Whether a lure has anything left to find.
-       *
-       * A lure filters to uncollected finals, so on a complete Dex it would empty
-       * the pool and the roll would answer null — indistinguishable from "the
-       * candidate index has not arrived", and the egg would simply never hatch.
-       *
-       * Checked here rather than refused when the lure is used, because that is
-       * the only place the candidate list exists: the Dex says what has been
-       * collected but nothing on the save says what *could* be. An unusable lure
-       * therefore stays armed rather than being spent — it is not refused, it
-       * waits, and the next roll that has something new to offer uses it.
-       */
       const rolled = roll({
         candidates,
         // Seeded from facts rather than from a clock, so a retried prefetch
@@ -416,6 +403,33 @@ export default definePlugin({
       // Re-read rather than trusting the state this started from: an await
       // happened in between, and a credit may have landed.
       if (current?.state == null || current.state.pendingHatch !== null) return;
+      // Nor may it have hatched. A roll written onto a companion that already
+      // exists would queue itself for whatever egg comes next, with this egg's
+      // modifiers already spent on it.
+      if (current.state.active !== null) return;
+      /*
+        And nothing the player *paid for* may have changed under us.
+
+        This roll was made from the state captured before two awaits — the
+        species index alone is ~649 fetches on a cold cache, which is minutes of
+        window. Everything bought in that window lands in the save while the roll
+        is still in the air, and the guard above only noticed `pendingHatch`,
+        which an egg purchase sets to null on its way past. So a 4B
+        guaranteed-rare egg bought mid-flight was rolled against the *old*
+        `eggTier` and thrown away silently, and the same for a charm, a lure, an
+        incense and a repel.
+
+        Discarding the roll is the cheap correction: the next poll re-rolls
+        against the state as it now is, and by then the index it just built is
+        cached, so the retry costs nothing.
+
+        `consumedTotal` is deliberately *not* compared even though it seeds the
+        roll. It moves on every credited request, so requiring it to hold still
+        would mean a busy key never completes a prefetch at all — and its
+        staleness costs nothing, because it only decides which arbitrary species
+        an already-fair roll produced. What must not be stale is what was bought.
+      */
+      if (paidRollInputs(current.state) !== paidRollInputs(state)) return;
 
       storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
         JSON.stringify({
@@ -745,6 +759,24 @@ export default definePlugin({
     return { routes };
   },
 });
+
+/**
+ * Everything a roll depends on that somebody had to buy.
+ *
+ * Compared as one string so adding a modifier to `roll` and forgetting it here
+ * is a visible omission in one place rather than a missing `&&` in a chain.
+ * Deliberately excludes `consumedTotal`: see the call site for why the seed is
+ * allowed to go stale when a guarantee is not.
+ */
+function paidRollInputs(state: CompanionState): string {
+  return JSON.stringify([
+    state.eggTier,
+    hasShinyCharm(state),
+    state.lure,
+    state.incense,
+    state.repel,
+  ]);
+}
 
 /** A deterministic 32-bit seed from a string, so a retried roll is the same roll. */
 function hashSeed(input: string): number {

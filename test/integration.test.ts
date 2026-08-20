@@ -857,6 +857,91 @@ test("a lure with nothing left to find waits rather than being spent", async () 
   expect(state?.lure).toBe(true);
 });
 
+test("a guarantee bought while a prefetch is in flight is not thrown away", async () => {
+  // `prefetchHatch` awaits twice — the species index is ~649 fetches on a cold
+  // cache, which is minutes — and it took every roll input from the state it
+  // captured *before* those awaits, while writing against a re-read one. The
+  // re-read guard only checked `pendingHatch`, which an egg purchase sets to
+  // null, so it passed. A 4B guaranteed-rare egg bought during that window was
+  // rolled against the old `eggTier` and silently discarded.
+  let openGate = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  let gateReached = (): void => {};
+  const reached = new Promise<void>((resolve) => {
+    gateReached = resolve;
+  });
+
+  const encoder = new TextEncoder();
+  const store = new Map<string, Uint8Array>([
+    [
+      "species/index.json",
+      encoder.encode(JSON.stringify([{ id: 10, captureRate: 255, forms: 1, finalId: 10 }])),
+    ],
+    [
+      "species/10.json",
+      encoder.encode(
+        JSON.stringify({
+          captureRate: 255,
+          isLegendary: false,
+          isMythical: false,
+          chain: [10],
+          names: [{ language: { name: "en" }, name: "species-10" }],
+        }),
+      ),
+    ],
+  ]);
+
+  await boot(
+    {},
+    {
+      files: {
+        // The detail read is the second await. Holding it open is what lets a
+        // purchase land in the middle of the prefetch, which is the whole race.
+        read: async (path) => {
+          if (path === "species/10.json") {
+            gateReached();
+            await gate;
+          }
+          return store.get(path) ?? null;
+        },
+        write: async (path, data) => {
+          store.set(path, data);
+        },
+        exists: async (path) => store.has(path),
+      },
+      net: async (url) => {
+        throw new Error(`the cache should have answered ${url}`);
+      },
+    },
+  );
+  spend(freshEggPrice("rare") * 2);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  // Fires the prefetch unawaited, as the panel does.
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await reached;
+
+  // Mid-flight: 4B on a guaranteed-rare egg.
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: "rare" },
+  });
+  expect(bought?.status).toBeUndefined();
+
+  openGate();
+  // Let the in-flight prefetch finish whatever it is going to do.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const state = readCompanion(storage, KEY)?.state;
+  // The guarantee survives, and no roll made against the old one was stored.
+  expect(state?.eggTier).toBe("rare");
+  expect(state?.pendingHatch).toBeNull();
+});
+
 test("a guaranteed egg still hatches when a lure rules out everything it allows", async () => {
   // The 5B failure, end to end. Every rare-or-better final collected, a
   // guaranteed-rare egg bought, a lure armed. "Is anything uncollected" says yes
