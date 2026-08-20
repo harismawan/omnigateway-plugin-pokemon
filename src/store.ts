@@ -354,7 +354,7 @@ export function shopPrice(entry: ShopEntry): number {
  * an operator: "you do not have one" is about the bag, and these are about the
  * companion the item was aimed at.
  */
-export type ItemRefusal = "no-companion" | "nothing-new";
+export type ItemRefusal = "no-companion" | "nothing-new" | "already-armed";
 
 export type ConsumeResult =
   | { ok: true; row: CompanionRow }

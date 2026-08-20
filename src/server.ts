@@ -924,6 +924,17 @@ function useItem(state: CompanionState, item: HeldItem): ItemOutcome {
     // do not want another, and by the time the next roll happens it is gone.
     const finalId = active.plannedPath[active.plannedPath.length - 1];
     if (finalId === undefined) return { refused: "no-companion" };
+    // `roll` excludes Ditto unconditionally, so repelling it is a guaranteed
+    // no-op — and unlike the checks below it is a genuine state *change*, so
+    // `consume` could not have caught it.
+    if (finalId === DITTO_SPECIES_ID) return { refused: "nothing-new" };
+    // One slot, so a second repel can only overwrite — which means the first was
+    // paid for and thrown away. Refused rather than silently replaced, and
+    // refused even when it names the same line, which changed nothing at all
+    // while still costing the item. This was the last no-op burn left after
+    // `consume` was reordered: the other four modifiers got this guard and the
+    // repel did not.
+    if (state.repel !== null) return { refused: "already-armed" };
     return { applied: { ...state, repel: finalId } };
   }
 

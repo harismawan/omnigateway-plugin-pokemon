@@ -857,6 +857,77 @@ test("a lure with nothing left to find waits rather than being spent", async () 
   expect(state?.lure).toBe(true);
 });
 
+/** Plants a companion holding `repel` copies, with an optional armed exclusion. */
+function withRepels(count: number, over: Record<string, unknown> = {}): void {
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11] }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: { ...emptyInventory(), repel: count },
+    ...over,
+  });
+}
+
+test("a repel names the line it is refusing", async () => {
+  await boot();
+  spend(1_000);
+  withRepels(2);
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(used?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  // The final form, so the whole line is refused rather than the one base the
+  // player happened to be looking at.
+  expect(state?.repel).toBe(11);
+  expect(state?.inventory.repel).toBe(1);
+});
+
+test("a second repel is refused rather than spent on the slot it already fills", async () => {
+  // The one item that shipped without a guard the other four had. `repel` is a
+  // single slot, so a second use could only overwrite — which means the first
+  // was wasted — and using it on the *same* companion changed nothing at all
+  // while `consume` still decremented. 500M for a state that was already true.
+  await boot();
+  spend(1_000);
+  withRepels(2, { repel: 11 });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(2);
+});
+
+test("a repel is refused on a revealed Ditto, which nothing can roll anyway", async () => {
+  // `roll` excludes Ditto unconditionally, so excluding it again is a guaranteed
+  // no-op — and it is a *state change*, so `consume` cannot catch it. 500M for
+  // an exclusion that was already in force.
+  await boot();
+  spend(1_000);
+  withRepels(1, {
+    active: activeMon({
+      baseId: 132,
+      plannedPath: [132],
+      dittoDisguise: 10,
+      dittoRevealed: true,
+    }),
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(1);
+});
+
 test("a guarantee bought while a prefetch is in flight is not thrown away", async () => {
   // `prefetchHatch` awaits twice — the species index is ~649 fetches on a cold
   // cache, which is minutes — and it took every roll input from the state it
