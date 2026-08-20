@@ -874,6 +874,53 @@ function withRepels(count: number, over: Record<string, unknown> = {}): void {
   });
 }
 
+test("a second shiny charm is refused rather than sold", async () => {
+  // Owning the charm *is* its effect — `hasShinyCharm` reads `> 0` — so a second
+  // one is 3B for a counter nobody reads. PokeTokenBar refuses at both the
+  // listing and the purchase; this refuses at the purchase, which is the
+  // enforcement half.
+  await boot();
+  spend(ITEM_PRICES.shinyCharm * 3);
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const first = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+  expect(first?.status).toBeUndefined();
+
+  const second = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+
+  expect(second?.status).toBe(409);
+  const row = readCompanion(storage, KEY);
+  expect(row?.state?.inventory.shinyCharm).toBe(1);
+  // And the wallet was not touched by the refusal.
+  expect(row?.tokensSpent).toBe(ITEM_PRICES.shinyCharm);
+});
+
+test("a spendable item can still be stocked up", async () => {
+  // The guard is about passives only. A second candy is a second candy.
+  await boot();
+  spend(ITEM_PRICES.rareCandy * 3);
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  for (let n = 0; n < 2; n++) {
+    const bought = await buy?.handler({
+      params: { id: KEY },
+      query: {},
+      body: { kind: "item", item: "rareCandy" },
+    });
+    expect(bought?.status).toBeUndefined();
+  }
+
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(2);
+});
+
 test("a repel names the line it is refusing", async () => {
   await boot();
   spend(1_000);

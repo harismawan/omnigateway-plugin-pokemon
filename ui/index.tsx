@@ -264,7 +264,13 @@ function CompanionBody({
       />
 
       <SectionHead>Shop</SectionHead>
-      <Shop offers={view.shop} onBuy={buy} pending={buying} wallet={view.wallet} />
+      <Shop
+        inventory={view.state.inventory}
+        offers={view.shop}
+        onBuy={buy}
+        pending={buying}
+        wallet={view.wallet}
+      />
 
       <SectionHead>Bag</SectionHead>
       <Bag inventory={view.state.inventory} onUse={onUse} pending={using} />

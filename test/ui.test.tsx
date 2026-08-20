@@ -709,6 +709,40 @@ describe("an active companion", () => {
     expect(screen.getByText("?")).toBeTruthy();
   });
 
+  test("marks a passive already owned instead of offering to buy it twice", async () => {
+    // Owning the charm *is* its effect, so a second one is 3B for nothing. The
+    // server refuses it; this keeps the panel from offering a guaranteed 409.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active(),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: { shinyCharm: 1 },
+          },
+          wallet: 9_000_000_000,
+          shop: [
+            { entry: { kind: "item", item: "shinyCharm" }, price: 3_000_000_000 },
+            { entry: { kind: "item", item: "rareCandy" }, price: 500_000_000 },
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const charm = await screen.findByRole("button", { name: /shiny charm/ });
+    expect(charm.hasAttribute("disabled")).toBe(true);
+    // The price is replaced rather than sat beside: a price on something that
+    // cannot be bought is the one number on the row that means nothing.
+    expect(charm.textContent).toContain("owned");
+    expect(charm.textContent).not.toContain("3.0B");
+
+    // And a spendable item is untouched by the rule, wallet permitting.
+    const candy = screen.getByRole("button", { name: /rare candy/ });
+    expect(candy.hasAttribute("disabled")).toBe(false);
+  });
+
   test("says a pinned companion is held rather than showing it stuck", async () => {
     // A pinned companion's progress runs past its threshold and keeps going, so
     // the usual "X / Y to the next stage" would read as a number stuck above a

@@ -843,16 +843,28 @@ function parseShopEntry(body: unknown): ShopEntry | null {
  * discarded one is not a graduation, so it never reaches the Dex. That is what
  * keeps rerolling from being a way to farm the collection.
  */
-function applyPurchase(state: CompanionState, entry: ShopEntry): CompanionState {
+function applyPurchase(state: CompanionState, entry: ShopEntry): ItemOutcome {
   if (entry.kind === "egg") {
-    return { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null };
+    return {
+      applied: { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null },
+    };
+  }
+  // A passive item is one that cannot be spent, which means *owning* it is the
+  // whole effect — `hasShinyCharm` reads `> 0`, so the second one is a counter
+  // nobody reads and 3B gone. Derived from `HELD_ITEMS` rather than naming the
+  // charm, so an item added without an effect is guarded by default instead of
+  // by remembering.
+  if (!HELD_ITEMS.includes(entry.item as HeldItem) && (state.inventory[entry.item] ?? 0) > 0) {
+    return { refused: "already-owned" };
   }
   // A bought candy is stocked rather than spent on the spot, so buying and
   // being granted one put the same thing in the same place — and `use` is the
   // single site that applies the effect.
   return {
-    ...state,
-    inventory: { ...state.inventory, [entry.item]: (state.inventory[entry.item] ?? 0) + 1 },
+    applied: {
+      ...state,
+      inventory: { ...state.inventory, [entry.item]: (state.inventory[entry.item] ?? 0) + 1 },
+    },
   };
 }
 

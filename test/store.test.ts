@@ -116,7 +116,13 @@ test("an unreadable save is left alone rather than replaced", () => {
 test("a purchase spends the wallet and never the growth meter", () => {
   creditTokens(storage, KEY, ITEM_PRICES.rareCandy * 2, 1);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
   expect(result.ok).toBe(true);
 
   const row = readCompanion(storage, KEY);
@@ -135,8 +141,20 @@ test("a second purchase beyond the balance is refused", () => {
   // this name was caught.
   creditTokens(storage, KEY, ITEM_PRICES.rareCandy, 1);
 
-  const first = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
-  const second = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 3);
+  const first = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
+  const second = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    3,
+  );
 
   expect(first.ok).toBe(true);
   expect(second).toEqual({ ok: false, reason: "insufficient" });
@@ -147,7 +165,13 @@ test("a purchase that cannot afford itself changes nothing at all", () => {
   creditTokens(storage, KEY, 10, 1);
   const before = readCompanion(storage, KEY);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "shinyCharm" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "shinyCharm" },
+    (s) => ({ applied: s }),
+    2,
+  );
 
   expect(result).toEqual({ ok: false, reason: "insufficient" });
   expect(readCompanion(storage, KEY)).toEqual(before as never);
@@ -157,7 +181,13 @@ test("a purchase against an unreadable save is refused, not attempted", () => {
   creditTokens(storage, KEY, ITEM_PRICES.shinyCharm, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["nonsense", KEY]);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
   expect(result).toEqual({ ok: false, reason: "unreadable" });
   expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
 });
@@ -191,7 +221,9 @@ test("a purchase applies its own effect to the state", () => {
     storage,
     KEY,
     { kind: "item", item: "rareCandy" },
-    (s) => ({ ...s, inventory: { ...s.inventory, rareCandy: s.inventory.rareCandy + 1 } }),
+    (s) => ({
+      applied: { ...s, inventory: { ...s.inventory, rareCandy: s.inventory.rareCandy + 1 } },
+    }),
     2,
   );
 
