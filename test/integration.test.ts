@@ -320,6 +320,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
   expect(onRequest).not.toBeNull();
   expect(onLimit).not.toBeNull();
   expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+    "GET /item-sprite/:item",
     "GET /keys",
     "GET /keys/:id",
     "GET /sprite/:species",
@@ -1242,6 +1243,27 @@ test("a non-numeric species id is refused before any lookup", async () => {
     body: null,
   });
   expect(response?.status).toBe(400);
+});
+
+test("an unmapped item icon is a 404, and it is decided before the capabilities are", async () => {
+  // Ordered the way the species route orders its integer check: an id this
+  // plugin does not sell is a 404 whether or not the install can fetch, because
+  // the answer is the same forever either way. `mint` is the honest case — it
+  // has no sprite in the repository at all — and `../secret` is the hostile one
+  // that must land in the identical branch.
+  await boot();
+  const route = routes.find((r) => r.path === "/item-sprite/:item");
+  for (const item of ["mint", "../secret", "notAnItem"]) {
+    const response = await route?.handler({ params: { item }, query: {}, body: null });
+    expect(response?.status).toBe(404);
+  }
+});
+
+test("a mapped item icon without the net capability degrades rather than throwing", async () => {
+  await boot();
+  const route = routes.find((r) => r.path === "/item-sprite/:item");
+  const response = await route?.handler({ params: { item: "rareCandy" }, query: {}, body: null });
+  expect(response?.status).toBe(503);
 });
 
 test("earning stamps the credit instant, and the panel route reports it", async () => {

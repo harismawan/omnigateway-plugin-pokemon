@@ -23,7 +23,7 @@
  */
 
 import type { PluginFetch, PluginFiles } from "@omnigateway/plugin-api";
-import { ANIMATED_SPECIES_MAX, hasAnimatedSprite } from "./balance.ts";
+import { ANIMATED_SPECIES_MAX, hasAnimatedSprite, ITEM_SPRITE_NAMES } from "./balance.ts";
 import type { SpeciesCandidate } from "./roll.ts";
 
 export type PokeApiDeps = { net: PluginFetch; files: PluginFiles };
@@ -44,6 +44,14 @@ const SPRITE_ORIGIN = "https://raw.githubusercontent.com";
 /** The animated Gen-V set, the only sprites this plugin uses. See `ANIMATED_SPECIES_MAX`. */
 const SPRITE_DIR =
   "/PokeAPI/sprites/master/sprites/pokemon/versions/generation-v/black-white/animated";
+
+/**
+ * Item icons, from the same repository and so from the same declared origin.
+ *
+ * Static PNGs rather than the animated set the companions use — these are 32px
+ * icons in a grid of cards, and there is no animated variant of them to choose.
+ */
+const ITEM_SPRITE_DIR = "/PokeAPI/sprites/master/sprites/items";
 
 /**
  * A ceiling on an evolution-chain id, which is the one id we learn from a
@@ -100,6 +108,8 @@ const speciesPath = (id: number): string => `species/${id}.json`;
 const chainPath = (chainId: number): string => `species/chain-${chainId}.json`;
 const spritePath = (id: number, shiny: boolean): string =>
   shiny ? `sprites/shiny/${id}.gif` : `sprites/${id}.gif`;
+/** Built from a value out of `ITEM_SPRITE_NAMES`, never from a caller's string. */
+const itemSpritePath = (name: string): string => `sprites/items/${name}.png`;
 
 /**
  * The gate every public function passes through before an id reaches a URL or a
@@ -638,6 +648,38 @@ export async function spriteBytes(
     ? `${SPRITE_ORIGIN}${SPRITE_DIR}/shiny/${id}.gif`
     : `${SPRITE_ORIGIN}${SPRITE_DIR}/${id}.gif`;
   const bytes = await fetchBytes(deps, url);
+  if (bytes === null) return null;
+  await writeCache(deps, path, bytes);
+  return bytes;
+}
+
+/**
+ * An item's icon bytes, cached on disk forever, or null when there is no icon.
+ *
+ * Takes the item id as a `string` rather than an `ItemKind` on purpose: the
+ * caller is a route parameter, and typing this parameter narrowly would only
+ * move the cast to the caller and put the lookup somewhere less obvious. The
+ * map is the validation — an id absent from `ITEM_SPRITE_NAMES` returns before
+ * any I/O, so an unmapped or invented id costs neither a fetch nor a disk read
+ * and can never reach a URL or a filename.
+ *
+ * Null is an ordinary answer here, more so than it is for a species: `mint` has
+ * no sprite and never will, so the panel's fallback is a permanent state for at
+ * least one row rather than a degraded one.
+ */
+export async function itemSpriteBytes(deps: PokeApiDeps, item: string): Promise<Uint8Array | null> {
+  const name = ITEM_SPRITE_NAMES[item as keyof typeof ITEM_SPRITE_NAMES];
+  if (name === undefined) return null;
+
+  const path = itemSpritePath(name);
+  try {
+    const cached = await deps.files.read(path);
+    if (cached !== null && cached.length > 0) return cached;
+  } catch {
+    // An unreadable cache is a miss, not a failure.
+  }
+
+  const bytes = await fetchBytes(deps, `${SPRITE_ORIGIN}${ITEM_SPRITE_DIR}/${name}.png`);
   if (bytes === null) return null;
   await writeCache(deps, path, bytes);
   return bytes;

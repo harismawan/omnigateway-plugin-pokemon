@@ -56,8 +56,8 @@ check:
 | Capability | Why |
 | --- | --- |
 | `storage` | Three tables on the plugin's own migration track, named `plugin_pokemon_<name>` by the host: the companion row per key, the Dex, and the grant ledger. |
-| `files` | The species index and cached sprites live in the plugin's scoped data directory, **not** in a table. That directory is excluded from database snapshots, exactly as `request_bodies/` is — the alternative would put tens of megabytes of artwork into every snapshot an operator downloads, and it re-fetches itself anyway. |
-| `net:outbound` | Species data and sprites are fetched at runtime. The manifest also declares the origins, `https://pokeapi.co` and `https://raw.githubusercontent.com`; the host hands the plugin a `fetch` bound to that allowlist and refuses anything else. |
+| `files` | The species index and cached sprites — companions and item icons alike — live in the plugin's scoped data directory, **not** in a table. That directory is excluded from database snapshots, exactly as `request_bodies/` is — the alternative would put tens of megabytes of artwork into every snapshot an operator downloads, and it re-fetches itself anyway. |
+| `net:outbound` | Species data, companion sprites and item icons are fetched at runtime. The manifest also declares the origins, `https://pokeapi.co` and `https://raw.githubusercontent.com`; the host hands the plugin a `fetch` bound to that allowlist and refuses anything else. |
 | `events:request` | Growth is credited from `RequestCompleted` — all four token classes, which are disjoint, so summing them double-counts nothing. |
 | `events:limit` | A key parked at a `5h` or `1w` ceiling earns a rare candy, rated by the window's own length. A `1m` ceiling pays nothing: a minute is not a span in which work happened. |
 
@@ -68,8 +68,10 @@ accidental overreach is impossible and that the plugin's intent is auditable
 from one readable file. It constrains honest code and not hostile code.
 
 The plugin degrades rather than failing when a capability is absent. With no
-`net`, an incubating egg holds its progress instead of losing it, and the sprite
-route answers `503`.
+`net`, an incubating egg holds its progress instead of losing it, and both
+sprite routes answer `503` — the panel then draws each item as an emoji, which
+is the same thing it draws before the cache has filled and the same thing it
+draws for `mint`, whose icon does not exist upstream at all.
 
 ## Nintendo and Game Freak intellectual property
 

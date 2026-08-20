@@ -207,6 +207,44 @@ export type ItemKind = keyof typeof ITEM_PRICES;
 
 export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
 
+/**
+ * What each purchasable thing is drawn as, and why this is a map rather than a
+ * derivation.
+ *
+ * `sootheBell` becomes `soothe-bell` and `rareCandy` becomes `rare-candy`, so a
+ * kebab-casing function would cover most of this table and would be wrong about
+ * the rest — which is the entire reason it is written out. Three entries do not
+ * derive:
+ *
+ * - `incense` has no plain sprite. PokéAPI ships nine incenses and no generic
+ *   one, so this picks `luck-incense`; the plugin's incense weights a roll
+ *   toward longer lines, which is the closest of the nine.
+ * - `lure` has no sprite at all. `honey` is the in-game encounter-attractor and
+ *   is the nearest thing in the set to what this lure does. It is knowingly art
+ *   that names a different item than the label does, accepted because the
+ *   alternative for an item with no sprite is no art.
+ * - `mint` is **deliberately absent**. It is a Gen-8 item and the sprites
+ *   repository has none, generic or otherwise, so there is nothing to point at
+ *   and no near miss worth the lie — a Heart Scale is a Move Reminder token,
+ *   not a nature item. It falls through to the panel's emoji, which is the same
+ *   path a cold cache and an offline install already take.
+ *
+ * Being a closed map is also the security property. The value that reaches a URL
+ * and a cache path is a lookup *result*, never a caller's string, which is the
+ * same guarantee `spriteBytes` gets from validating an integer against a range.
+ */
+export const ITEM_SPRITE_NAMES: Readonly<Partial<Record<ItemKind, string>> & { egg: string }> = {
+  rareCandy: "rare-candy",
+  shinyCharm: "shiny-charm",
+  everstone: "everstone",
+  sootheBell: "soothe-bell",
+  repel: "repel",
+  incense: "luck-incense",
+  lure: "honey",
+  /** Every tier. The guarantee is carried by the rarity chip, not by the art. */
+  egg: "lucky-egg",
+};
+
 export const FRESH_EGG_BASE_PRICE = 1_000_000_000;
 
 /**

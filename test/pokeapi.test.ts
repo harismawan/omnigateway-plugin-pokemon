@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
 import type { PluginFetch, PluginFiles } from "@omnigateway/plugin-api";
-import { ANIMATED_SPECIES_MAX } from "../src/balance.ts";
+import {
+  ANIMATED_SPECIES_MAX,
+  ITEM_KINDS,
+  ITEM_SPRITE_NAMES,
+  type ItemKind,
+} from "../src/balance.ts";
 import {
   cachedSpeciesName,
+  itemSpriteBytes,
   type PokeApiDeps,
   speciesDetail,
   speciesIndex,
@@ -46,6 +52,11 @@ const SPRITE_BASE =
   "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/versions/generation-v/black-white/animated";
 
 const GIF = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+
+const ITEM_SPRITE_BASE = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items";
+
+/** Distinct from `GIF`, so a test cannot pass by serving the wrong asset. */
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
 type ChainDoc = { species: { url: string }; evolves_to: ChainDoc[] };
 
@@ -212,6 +223,81 @@ test("a sprite whose cache write fails is still returned", async () => {
   };
   const { net } = stubNet(() => new Response(GIF));
   expect(await spriteBytes(deps(net, failing), 25, false)).toEqual(GIF);
+});
+
+// --- item sprites ------------------------------------------------------------
+
+test("a cached item sprite is served without any fetch", async () => {
+  const { files, store } = memoryFiles();
+  store.set("sprites/items/rare-candy.png", PNG);
+  const { net, calls } = stubNet(() => {
+    throw new Error("the cache should have answered this");
+  });
+
+  expect(await itemSpriteBytes(deps(net, files), "rareCandy")).toEqual(PNG);
+  expect(calls).toEqual([]);
+});
+
+test("a fetched item sprite is cached under the name the map gives it", async () => {
+  const { files, store } = memoryFiles();
+  const { net, calls } = stubNet(() => new Response(PNG));
+  const api = deps(net, files);
+
+  expect(await itemSpriteBytes(api, "sootheBell")).toEqual(PNG);
+  // The literal URL, asserted whole. A typo here is a permanent 404 that reads
+  // as "this item has no icon", which is indistinguishable from `mint`.
+  expect(calls).toEqual([`${ITEM_SPRITE_BASE}/soothe-bell.png`]);
+  expect(store.get("sprites/items/soothe-bell.png")).toEqual(PNG);
+
+  calls.length = 0;
+  expect(await itemSpriteBytes(api, "sootheBell")).toEqual(PNG);
+  expect(calls).toEqual([]);
+});
+
+test("an id the map does not name reaches neither the network nor the disk", async () => {
+  // `mint` is the real case and the reason the map is partial: it is a Gen-8
+  // item with no sprite in the repository, so a fetch for it is a guaranteed
+  // 404 and a cache path for it is a file that can never be a valid hit. An id
+  // invented by a caller lands in the same branch, which is what keeps a
+  // caller's string out of a URL.
+  const { files } = memoryFiles();
+  const reads: string[] = [];
+  const watched: PluginFiles = {
+    ...files,
+    read: async (path) => {
+      reads.push(path);
+      return null;
+    },
+  };
+  const { net, calls } = stubNet(() => {
+    throw new Error("nothing unmapped should be fetched");
+  });
+
+  expect(await itemSpriteBytes(deps(net, watched), "mint")).toBeNull();
+  expect(await itemSpriteBytes(deps(net, watched), "../../etc/passwd")).toBeNull();
+  expect(calls).toEqual([]);
+  expect(reads).toEqual([]);
+});
+
+test("an offline or 404 item sprite returns null rather than throwing", async () => {
+  const { files, store } = memoryFiles();
+  const { net: offline } = stubNet(() => null);
+  expect(await itemSpriteBytes(deps(offline, files), "everstone")).toBeNull();
+
+  const { net: missing } = stubNet(() => notFound());
+  expect(await itemSpriteBytes(deps(missing, files), "everstone")).toBeNull();
+
+  // And neither failure left anything behind to be served as an icon later.
+  expect(store.size).toBe(0);
+});
+
+test("every shop item either maps to a sprite or is deliberately absent", () => {
+  // The map is allowed to be partial — that is what the emoji fallback is for —
+  // but it must not name an item the shop does not sell, because a name in here
+  // is a URL this plugin will fetch.
+  for (const item of Object.keys(ITEM_SPRITE_NAMES)) {
+    expect(ITEM_KINDS.includes(item as ItemKind) || item === "egg").toBe(true);
+  }
 });
 
 // --- species detail ----------------------------------------------------------

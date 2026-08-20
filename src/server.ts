@@ -10,6 +10,7 @@ import {
   freshEggPrice,
   ITEM_KINDS,
   ITEM_PRICES,
+  ITEM_SPRITE_NAMES,
   type ItemKind,
   phaseThreshold,
   RARE_CANDY_XP,
@@ -18,6 +19,7 @@ import {
 import { decideGrant, windowKey } from "./grants.ts";
 import {
   cachedSpeciesName,
+  itemSpriteBytes,
   speciesDetail,
   speciesDetails,
   speciesIndex,
@@ -666,6 +668,38 @@ export default definePlugin({
             contentType: "image/gif",
             // Sprites never change. This is the one thing in the plugin worth
             // caching hard, and it is why the panel stays responsive offline.
+            cacheControl: "public, max-age=31536000, immutable",
+          };
+        },
+      },
+      {
+        method: "GET",
+        path: "/item-sprite/:item",
+        handler: async (request) => {
+          // No parsing and no validation of the parameter, because there is
+          // nothing to validate: `itemSpriteBytes` looks the id up in a closed
+          // map and answers null for anything not in it, so a caller's string
+          // never becomes a URL segment or a filename. The map is the gate.
+          const item = request.params.item ?? "";
+
+          // Decided before the capability check, and the order is deliberate.
+          // An id this plugin does not sell — or `mint`, which it does sell and
+          // has no sprite for — is a 404 on every install forever, so answering
+          // 503 on a gateway without `net` would invite a client to retry for
+          // something that is never coming.
+          if (!(item in ITEM_SPRITE_NAMES)) {
+            return { status: 404, json: { error: "no item icon" } };
+          }
+          if (net === undefined || files === undefined) {
+            return { status: 503, json: { error: "sprites need the net and files capabilities" } };
+          }
+
+          const bytes = await itemSpriteBytes({ net, files }, item);
+          // Offline, or simply not fetched yet. The panel draws its emoji.
+          if (bytes === null) return { status: 404, json: { error: "no item icon" } };
+          return {
+            bytes,
+            contentType: "image/png",
             cacheControl: "public, max-age=31536000, immutable",
           };
         },
