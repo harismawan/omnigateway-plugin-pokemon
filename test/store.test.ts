@@ -5,6 +5,7 @@ import {
   consume,
   creditTokens,
   lastGrantedAt,
+  listCompanions,
   MIGRATIONS,
   purchase,
   readCompanion,
@@ -349,4 +350,51 @@ test("a held item cannot be spent against an unreadable save", () => {
     ok: false,
     reason: "unreadable",
   });
+});
+
+// ---------------------------------------------------------------- the roster
+
+test("the roster lists every key that has earned, most recent earner first", () => {
+  // The whole point of the route this backs: an operator has no other place to
+  // find the ids of the keys that have companions.
+  creditTokens(storage, "key_old", 1_000, 1_000);
+  creditTokens(storage, "key_new", 1_000, 9_000);
+  creditTokens(storage, "key_mid", 1_000, 5_000);
+
+  expect(listCompanions(storage).map((row) => row.apiKeyId)).toEqual([
+    "key_new",
+    "key_mid",
+    "key_old",
+  ]);
+});
+
+test("a key that has never been observed earning sorts last, however large its total", () => {
+  // `last_credit_at` is null for a row written before migration 5. Sorting it
+  // as if it were instant zero would be right; sorting it as if it were *now* —
+  // which is what a bare DESC does to NULL in SQLite — puts the least active
+  // key at the top of the roster.
+  creditTokens(storage, "key_recent", 10, 5_000);
+  creditTokens(storage, "key_ancient", 10_000_000, 1_000);
+  storage.run("UPDATE {{companion}} SET last_credit_at = NULL WHERE api_key_id = ?", [
+    "key_ancient",
+  ]);
+
+  expect(listCompanions(storage).map((row) => row.apiKeyId)).toEqual(["key_recent", "key_ancient"]);
+});
+
+test("an unreadable save keeps its place in the roster instead of hiding the key", () => {
+  // Fails open, like the Dex and unlike `settle`. A key whose save cannot be
+  // read is the one an operator most needs to see listed — dropping it from the
+  // roster is how a corrupt companion becomes invisible.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
+
+  const roster = listCompanions(storage);
+  expect(roster).toHaveLength(1);
+  expect(roster[0]?.apiKeyId).toBe(KEY);
+  expect(roster[0]?.state).toBeNull();
+});
+
+test("the roster is empty before any key has earned", () => {
+  expect(listCompanions(storage)).toEqual([]);
 });

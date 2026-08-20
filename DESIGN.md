@@ -295,7 +295,7 @@ same pure `advance` in the same transaction.
 An ESM bundle built against `packages/dashboard-sdk`, rendered inline under a
 "Companion" nav entry, themed with the real dashboard tokens.
 
-- A key selector; each key is a save file.
+- A roster of the keys that have companions; each key is a save file.
 - The active sprite with its state — egg, idle, working, focus, tired, sleep —
   derived from recent traffic on that key.
 - Growth to next evolution, wallet, and current form.
@@ -320,13 +320,60 @@ Building it later is a storage change, not a UI one: it needs a short rolling
 count of credits per key, and the natural place is the plugin's own table rather
 than anything the host would have to start recording.
 
-**Also amended: the key selector is free text.** A plugin has no capability to
-enumerate API keys, so the panel cannot offer a list. That is a host gap rather
-than a UI shortcut, and widening the plugin contract to close it wants its own
-amendment to the host design.
+**Also amended, twice.** The first amendment said the key selector had to be
+free text, because a plugin has no capability to enumerate API keys. That is
+still true and it was still the wrong conclusion: it conflated *the host's key
+list*, which no capability offers, with *this plugin's own saves*, which it owns
+outright. `plugin_pokemon_companion` has one row per key that has ever spent a
+token, and `listCompanions` reads it.
+
+So the panel opens on a roster of those rows — sprite, name, key id, lifetime
+tokens, activity — and the free-text field survives one fold down, for the two
+cases a roster cannot cover: a key minted a minute ago that has no row yet, and
+an install whose roster route is unreachable.
+
+The set is smaller than the host's key list and it is the right set. A key with
+no companion row has never served a request, so it has nothing to show and a
+card for it would lead to a 404. The remaining host gap is only that a companion
+cannot be labelled with the key's *name* — the roster shows ids, which is what
+an operator matches against the console's own key list.
+
+A roster holding exactly one key opens it without a click, and **that is decided
+once, when the roster first arrives** — not re-derived from what the roster
+currently holds. Written the second way it fired in both directions every time
+the roster crossed the one-key boundary: a companion the panel had opened by
+itself closed again the moment a second key earned its first tokens, and since a
+purchase refetches the roster, an operator could be thrown back to the picker
+mid-transaction. The panel therefore tracks three screens — `start`, `roster`,
+`key` — because "the roster has not arrived yet" and "the operator asked to go
+back" are different facts that one nullable key id cannot hold apart.
+
+Two facts the roster keeps apart, because everything else in this plugin does:
+an egg is drawn as an egg, and a save that could not be read is drawn as neither
+an egg nor a species. Dropping the unreadable key from the listing would hide
+the one key an operator most needs to find.
 
 All sprite and species requests go to the plugin's own routes. The browser never
-contacts `pokeapi.co` or `raw.githubusercontent.com`.
+contacts `pokeapi.co` or `raw.githubusercontent.com`. **Species names are
+resolved server-side and cache-only** — `cachedSpeciesName` takes `files` and
+not `net`, so a roster of twenty keys repainting on a poll cannot become twenty
+requests against an unpaid public API for decoration. A cold cache shows `#25`
+and fills in on a later poll.
+
+The panel's one non-obvious element is the **growth track**: the companion's
+`plannedPath` drawn as one segment per stage, filled behind the current stage,
+carrying real progress on it, empty ahead. A single bar can only answer "how far
+to the next evolution"; the track answers "how far through the line", which is
+the question somebody watching a companion grow actually has. An egg gets one
+segment, because its line is not rolled until it hatches and drawing three empty
+ones would be inventing a shape the save does not have.
+
+Rarity and shininess are set in letterspaced small caps and a glyph, never a
+hue. The console's rule is that colour means provider identity or state, and a
+rarity drawn as a colour would be the one decorative colour in the product — and
+it would still need the word underneath to be readable. The only `--warn` on the
+panel is the unreadable-save mark, which is a claim about health and so is
+exactly what the rule permits.
 
 Per the host design, this mount sits inside a React error boundary. A rendering
 bug here must not black out the console — the dashboard is what an operator

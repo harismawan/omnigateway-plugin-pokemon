@@ -89,10 +89,28 @@ function renderCompanion(routes: Record<string, StubHandler>): FetchStub {
   return stub;
 }
 
-/** Type a key id into the selector and ask for it, as an operator would. */
+/**
+ * Type a key id into the fallback field and ask for it.
+ *
+ * The fallback, not the main path: an operator with a roster clicks a card. This
+ * is what is left for the key that has never spent a token — it has no
+ * companion row, so it cannot appear on a roster built from those rows — and for
+ * the install whose roster route is unreachable.
+ */
 async function lookUp(keyId: string): Promise<void> {
   await userEvent.type(await screen.findByRole("textbox", { name: "API key id" }), keyId);
   await userEvent.click(screen.getByRole("button", { name: "Show" }));
+}
+
+/**
+ * Wait for the companion itself, however the panel got there.
+ *
+ * Every fixture below serves a one-key roster, which the panel opens on its own
+ * — so the assertions can be about the companion rather than about the clicking
+ * that reached it.
+ */
+async function openCompanion(): Promise<void> {
+  await screen.findByRole("heading", { name: "Companion" });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -130,6 +148,8 @@ type DexEntry = {
   isShiny: boolean;
   nature: string | null;
   caughtAt: number;
+  /** Resolved from the plugin's own cache, so null on a cold one. */
+  name: string | null;
 };
 
 type CompanionView = {
@@ -137,6 +157,8 @@ type CompanionView = {
   tokensTotal: number;
   wallet: number;
   lastCreditAt: number | null;
+  /** What the current stage is called, or null when the cache cannot say. */
+  name: string | null;
   dex: DexEntry[];
   shop: Array<{ entry: ShopEntry; price: number }>;
   nextThreshold: number;
@@ -168,6 +190,10 @@ function dexEntry(patch: Partial<DexEntry> = {}): DexEntry {
     // Distinct from every id and species number in the fixture, so a cell that
     // renders the wrong field is visible rather than coincidentally right.
     caughtAt: 1_700_000_000_777,
+    // Unnamed by default, which is the cold cache and the offline install. The
+    // tests that care about names set one; every other assertion in this file
+    // is about the species number and stays true either way.
+    name: null,
     ...patch,
   };
 }
@@ -180,6 +206,7 @@ function view(patch: Partial<CompanionView> = {}): CompanionView {
     // Null rather than an instant: the default fixture has no active companion,
     // and a companion is what an activity state describes.
     lastCreditAt: null,
+    name: null,
     dex: [],
     shop: [],
     // Distinct from every other number in the fixture, so a component that
@@ -190,39 +217,277 @@ function view(patch: Partial<CompanionView> = {}): CompanionView {
   };
 }
 
+/** One roster card, as `GET /keys` sends it. */
+type RosterKey = {
+  apiKeyId: string;
+  speciesId: number | null;
+  name: string | null;
+  rarity: Rarity | null;
+  isShiny: boolean;
+  tokensTotal: number;
+  wallet: number;
+  lastCreditAt: number | null;
+  unreadable: boolean;
+};
+
 const KEY = "key_7f3a";
+const GET_ROSTER = "GET /api/plugins/pokemon/keys";
 const GET_KEY = `GET /api/plugins/pokemon/keys/${KEY}`;
 const POST_PURCHASE = `POST /api/plugins/pokemon/keys/${KEY}/purchase`;
 const POST_USE = `POST /api/plugins/pokemon/keys/${KEY}/use`;
 
-/** The whole panel for one key, served from a single fixture. */
+function rosterKey(patch: Partial<RosterKey> = {}): RosterKey {
+  return {
+    apiKeyId: KEY,
+    speciesId: 25,
+    name: "Pikachu",
+    rarity: "rare",
+    isShiny: false,
+    tokensTotal: 4_200_000,
+    wallet: 2_500,
+    lastCreditAt: null,
+    unreadable: false,
+    ...patch,
+  };
+}
+
+/**
+ * The whole panel for one key: the roster it opens on, and the key itself.
+ *
+ * One key, so the panel opens straight onto the companion. That is the common
+ * install — most gateways have a handful of keys and one that does the work —
+ * and it means every fixture below tests the companion rather than the clicking.
+ */
 function serving(body: CompanionView): Record<string, StubHandler> {
-  return { [GET_KEY]: () => ({ body }) };
+  return {
+    [GET_ROSTER]: () => ({ body: { keys: [rosterKey()] } }),
+    [GET_KEY]: () => ({ body }),
+  };
 }
 
 /* -------------------------------------------------------------------------- */
 /* tests                                                                       */
 /* -------------------------------------------------------------------------- */
 
-describe("the key selector", () => {
-  test("asks for a key before it asks the gateway for anything", async () => {
-    const stub = renderCompanion(serving(view()));
+describe("the key roster", () => {
+  /** A roster of several keys, so nothing is opened automatically. */
+  function withKeys(keys: RosterKey[], body: CompanionView = view()): Record<string, StubHandler> {
+    return {
+      [GET_ROSTER]: () => ({ body: { keys } }),
+      [GET_KEY]: () => ({ body }),
+    };
+  }
 
-    expect(await screen.findByRole("textbox", { name: "API key id" })).toBeTruthy();
-    expect(screen.getByText(/Each API key raises its own Pokémon/)).toBeTruthy();
-    expect(stub.calls).toEqual([]);
+  test("opens on the keys that have companions, rather than on an empty field", async () => {
+    // The complaint this whole surface answers: the panel used to demand a key
+    // id, and nothing in the console shows the ids of keys that have
+    // companions. An operator had to read them out of the database.
+    renderCompanion(
+      withKeys([
+        rosterKey({ apiKeyId: "key_a", name: "Pikachu", tokensTotal: 4_200_000 }),
+        rosterKey({ apiKeyId: "key_b", name: "Snorlax", tokensTotal: 900_000 }),
+      ]),
+    );
+
+    expect(await screen.findByRole("button", { name: /key_a/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /key_b/ })).toBeTruthy();
+    expect(screen.getByText("Pikachu")).toBeTruthy();
+    expect(screen.getByText("Snorlax")).toBeTruthy();
   });
 
-  test("keeps the field usable for a key id longer than one character", async () => {
-    // The regression this guards: the field committed on every keystroke, so the
-    // first character replaced the field with a lookup of a one-character key
-    // and the id could never be finished. Typing the whole id is the only way to
-    // see it — a single `change` event with the final value passes either way.
-    const stub = renderCompanion(serving(view({ tokensTotal: 12 })));
-    await lookUp(KEY);
+  test("opens the companion of the key that was picked", async () => {
+    const stub = renderCompanion(
+      withKeys(
+        [rosterKey({ apiKeyId: "key_other", name: "Snorlax" }), rosterKey({ apiKeyId: KEY })],
+        view({ tokensTotal: 12 }),
+      ),
+    );
 
-    expect(await screen.findByRole("heading", { name: "Companion" })).toBeTruthy();
-    expect(stub.calls.map((call) => call.url)).toEqual([`/api/plugins/pokemon/keys/${KEY}`]);
+    await userEvent.click(await screen.findByRole("button", { name: new RegExp(KEY) }));
+
+    await openCompanion();
+    expect(stub.calls.map((call) => call.url)).toEqual([
+      "/api/plugins/pokemon/keys",
+      `/api/plugins/pokemon/keys/${KEY}`,
+    ]);
+  });
+
+  test("skips the roster entirely when there is only one key to pick", async () => {
+    // A picker offering one choice is a click asked for nothing. Most installs
+    // have exactly one key doing the work.
+    const stub = renderCompanion(serving(view({ tokensTotal: 12 })));
+
+    await openCompanion();
+    expect(screen.queryByRole("button", { name: new RegExp(KEY) })).toBeNull();
+    expect(stub.calls.map((call) => call.url)).toEqual([
+      "/api/plugins/pokemon/keys",
+      `/api/plugins/pokemon/keys/${KEY}`,
+    ]);
+  });
+
+  test("goes back to the roster from a companion", async () => {
+    renderCompanion(
+      withKeys([
+        rosterKey({ apiKeyId: "key_other", name: "Snorlax" }),
+        rosterKey({ apiKeyId: KEY }),
+      ]),
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: new RegExp(KEY) }));
+    await openCompanion();
+    await userEvent.click(screen.getByRole("button", { name: "All keys" }));
+
+    expect(await screen.findByRole("button", { name: /key_other/ })).toBeTruthy();
+  });
+
+  test("can leave a key the panel opened by itself", async () => {
+    // This asserted the opposite until the auto-open was fixed, on the theory
+    // that returning to a roster of one would be undone immediately. It would
+    // have been — that was the bug. Now the roster stays put once it has been
+    // returned to, which makes the picker reachable, which matters because the
+    // key-id field lives there: on a one-key install this is the only route to
+    // a key too new to have a companion row, and that is exactly the key the
+    // roster cannot list.
+    renderCompanion(serving(view()));
+
+    await openCompanion();
+    await userEvent.click(screen.getByRole("button", { name: "All keys" }));
+
+    expect(await screen.findByRole("textbox", { name: "API key id" })).toBeTruthy();
+    // And it stayed: the single key on the roster did not pull the panel back in.
+    expect(screen.queryByRole("heading", { name: "Egg" })).toBeNull();
+  });
+
+  test("stays on the companion when a second key appears on the roster", async () => {
+    // The panel opened this key by itself, and "opened by itself" used to be
+    // stored as "nothing has been chosen" — so the moment the roster stopped
+    // having exactly one key, the same expression that opened the companion
+    // closed it again. A purchase refetches the roster, so an operator buying a
+    // rare candy on a one-key install was one new key away from being thrown
+    // back to the picker mid-transaction.
+    let rosterKeys = [rosterKey()];
+    renderCompanion({
+      [GET_ROSTER]: () => ({ body: { keys: rosterKeys } }),
+      [GET_KEY]: () => ({
+        body: view({ wallet: 500, shop: [{ entry: { kind: "item", item: "mint" }, price: 100 }] }),
+      }),
+      [POST_PURCHASE]: () => {
+        // A second key earns its first tokens while the panel is open.
+        rosterKeys = [rosterKey(), rosterKey({ apiKeyId: "key_new", name: "Snorlax" })];
+        return { body: {} };
+      },
+    });
+
+    await openCompanion();
+    await userEvent.click(await screen.findByRole("button", { name: "mint · 100" }));
+
+    // Still here. The roster grew underneath, which is not a navigation.
+    expect(await screen.findByRole("heading", { name: "Egg" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /key_new/ })).toBeNull();
+  });
+
+  test("stays on the roster after going back, even if it shrinks to one key", async () => {
+    // The mirror of the case above, and the reason the two states have to be
+    // told apart: "go back" is a decision, and a roster that later happens to
+    // hold one key must not overturn it.
+    let rosterKeys = [rosterKey(), rosterKey({ apiKeyId: "key_other", name: "Snorlax" })];
+    renderCompanion({
+      [GET_ROSTER]: () => ({ body: { keys: rosterKeys } }),
+      [GET_KEY]: () => ({
+        body: view({ wallet: 500, shop: [{ entry: { kind: "item", item: "mint" }, price: 100 }] }),
+      }),
+      [POST_PURCHASE]: () => {
+        rosterKeys = [rosterKey()];
+        return { body: {} };
+      },
+    });
+
+    await userEvent.click(await screen.findByRole("button", { name: new RegExp(KEY) }));
+    await openCompanion();
+    // Shrinks the roster to one key behind the panel's back.
+    await userEvent.click(await screen.findByRole("button", { name: "mint · 100" }));
+    await userEvent.click(await screen.findByRole("button", { name: "All keys" }));
+
+    expect(await screen.findByRole("textbox", { name: "API key id" })).toBeTruthy();
+  });
+
+  test("lets a key reached by id be left again", async () => {
+    // The trap this closes: the way back was offered only when the roster held
+    // more than one key, so an operator whose roster was empty or unreachable
+    // typed an id, arrived, and had no way to look up a second key short of
+    // reloading the console. The roster is exactly the thing that is missing in
+    // that case, so keying the control off its length was backwards.
+    renderCompanion({
+      [GET_ROSTER]: () => ({ body: { keys: [] } }),
+      [GET_KEY]: () => ({ body: view({ tokensTotal: 12 }) }),
+    });
+
+    await lookUp(KEY);
+    await openCompanion();
+    await userEvent.click(screen.getByRole("button", { name: "All keys" }));
+
+    expect(await screen.findByRole("textbox", { name: "API key id" })).toBeTruthy();
+  });
+
+  test("says an empty roster is empty, and explains what fills it", async () => {
+    // Not an error. A fresh install has this state, and a companion appears on
+    // a key's first request rather than when the key is minted.
+    renderCompanion({ [GET_ROSTER]: () => ({ body: { keys: [] } }) });
+
+    expect(await screen.findByText(/No key has spent a token yet/)).toBeTruthy();
+  });
+
+  test("falls back to the field when the roster cannot be reached", async () => {
+    // A half-registered backend, or a gateway too old to serve the route. The
+    // companion is still reachable by id, so the panel degrades to what it used
+    // to be rather than showing nothing at all.
+    renderCompanion({
+      [GET_ROSTER]: () => ({ status: 501, body: { error: { code: "INTERNAL", message: "no" } } }),
+      [GET_KEY]: () => ({ body: view({ tokensTotal: 12 }) }),
+    });
+
+    await lookUp(KEY);
+    await openCompanion();
+  });
+
+  test("names a species by number when the cache has no name for it yet", async () => {
+    // The cold-cache case reaches the roster too, and a card that said "null"
+    // under a sprite would be the first thing an operator saw on a fresh
+    // install.
+    renderCompanion(
+      withKeys([
+        rosterKey({ apiKeyId: "key_a", name: null, speciesId: 25 }),
+        rosterKey({ apiKeyId: "key_b", name: "Snorlax" }),
+      ]),
+    );
+
+    expect(await screen.findByText("#25")).toBeTruthy();
+    expect(screen.queryByText("null")).toBeNull();
+  });
+
+  test("draws an egg for a key whose companion has not hatched", async () => {
+    renderCompanion(
+      withKeys([
+        rosterKey({ apiKeyId: "key_a", speciesId: null, name: null, rarity: null }),
+        rosterKey({ apiKeyId: "key_b", name: "Snorlax" }),
+      ]),
+    );
+
+    expect(await screen.findByRole("img", { name: "An egg, not yet hatched" })).toBeTruthy();
+  });
+
+  test("lists a key whose save cannot be read, and says that is what it is", async () => {
+    // The key an operator most needs to find. Leaving it off the roster is how
+    // a corrupt companion stays invisible.
+    renderCompanion(
+      withKeys([
+        rosterKey({ apiKeyId: "key_broken", unreadable: true, speciesId: null, name: null }),
+        rosterKey({ apiKeyId: "key_b", name: "Snorlax" }),
+      ]),
+    );
+
+    expect(await screen.findByRole("button", { name: /key_broken/ })).toBeTruthy();
+    expect(screen.getByText("Save unreadable")).toBeTruthy();
   });
 });
 
@@ -233,7 +498,7 @@ describe("a save that could not be read", () => {
     // place the distinction can be lost — silently, and in the direction that
     // tells an operator everything is fine.
     renderCompanion(serving(view({ state: null, tokensTotal: 900_000, wallet: 40 })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText(/could not be read/)).toBeTruthy();
     expect(screen.getByText(/left untouched rather than replaced/)).toBeTruthy();
@@ -266,21 +531,30 @@ describe("an egg", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByRole("img", { name: "An egg, not yet hatched" })).toBeTruthy();
     expect(screen.getByText("1.2M / 5.0M tokens incubated")).toBeTruthy();
-    expect(screen.getByText("9.0M tokens earned · 2,500 to spend")).toBeTruthy();
-    expect(screen.getByText("Egg")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Egg" })).toBeTruthy();
+
+    // Three quantities, three labelled cells. Run together in one sentence they
+    // read as one fact about tokens, and an operator deciding whether to buy a
+    // rare candy is looking for exactly one of them.
+    expect(screen.getByText("Earned").nextSibling?.textContent).toBe("9.0M");
+    expect(screen.getByText("To spend").nextSibling?.textContent).toBe("2,500");
+    expect(screen.getByText("Graduated").nextSibling?.textContent).toBe("0");
   });
 
   test("names the tier a guaranteed egg was bought at", async () => {
     renderCompanion(
       serving(view({ state: { active: null, eggUsage: 0, eggTier: "rare", inventory: {} } })),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
-    expect(await screen.findByText("Egg (rare+ guaranteed)")).toBeTruthy();
+    // The guarantee is a property of the egg, so it sits beside it as a chip
+    // rather than inside the heading. An egg is an egg however it was bought.
+    expect(await screen.findByRole("heading", { name: "Egg" })).toBeTruthy();
+    expect(screen.getByText("rare+ guaranteed")).toBeTruthy();
   });
 });
 
@@ -298,15 +572,92 @@ describe("an active companion", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     // The sprite is the current stage of the planned path, not its first or last.
     const sprite = await screen.findByRole("img", { name: "Species 25" });
     expect(sprite.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/25");
 
-    expect(screen.getByText("Stage 2 of 3 · rare")).toBeTruthy();
+    expect(screen.getByText("Stage 2 of 3")).toBeTruthy();
+    expect(screen.getByText("rare")).toBeTruthy();
     expect(screen.getByText("brave")).toBeTruthy();
     expect(screen.queryByRole("img", { name: "An egg, not yet hatched" })).toBeNull();
+  });
+
+  test("calls the companion by name once the cache has one", async () => {
+    // The number is what the panel could always say. The name is what an
+    // operator recognises, and it is a fact the plugin already had on disk and
+    // was throwing away.
+    renderCompanion(
+      serving(
+        view({
+          name: "Pikachu",
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} },
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByRole("heading", { name: "Pikachu" })).toBeTruthy();
+    // And the sprite is named the same way, rather than keeping the number in
+    // its alt text while the heading says something else.
+    expect(screen.getByRole("img", { name: "Pikachu" })).toBeTruthy();
+  });
+
+  test("falls back to the species number when the cache has no name", async () => {
+    renderCompanion(
+      serving(
+        view({
+          name: null,
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} },
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByRole("heading", { name: "#25" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "null" })).toBeNull();
+  });
+
+  test("draws the whole evolution line, with growth on the stage it is standing at", async () => {
+    // The one thing on the panel that is not a number or a label: the planned
+    // path is three species long and the companion is on the second, so there
+    // are three segments and the progress belongs to the middle one. A single
+    // bar could not say how far through the *line* a companion is, which is the
+    // question an operator watching one grow actually has.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} },
+          progress: 1_240_000,
+          nextThreshold: 5_000_000,
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const track = await screen.findByRole("progressbar", { name: "Growth to the next evolution" });
+    expect(track.getAttribute("aria-valuenow")).toBe("1240000");
+    expect(track.getAttribute("aria-valuemax")).toBe("5000000");
+    expect(track.getAttribute("aria-valuetext")).toBe("stage 2 of 3, 1.2M of 5.0M tokens");
+  });
+
+  test("an incubating egg has one segment, because it has no line yet", async () => {
+    // An egg's planned path is not rolled until it hatches. Drawing three empty
+    // segments would be inventing a line the save does not have.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: null, eggUsage: 0, eggTier: null, inventory: {} },
+          progress: 1_240_000,
+          nextThreshold: 5_000_000,
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const track = await screen.findByRole("progressbar", { name: "Incubation" });
+    expect(track.getAttribute("aria-valuetext")).toBe("1.2M of 5.0M tokens incubated");
   });
 
   test("says a shiny is shiny, in the sprite's name as well as the line", async () => {
@@ -322,11 +673,15 @@ describe("an active companion", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     const sprite = await screen.findByRole("img", { name: "Species 25, shiny" });
     expect(sprite.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/25?shiny=1");
-    expect(screen.getByText("Stage 2 of 3 · rare · shiny")).toBeTruthy();
+    // Said in words, not carried by a colour. The console's rule is that colour
+    // means provider identity or state, and shininess is neither — so the mark
+    // beside it is a glyph and the word is what makes it legible.
+    expect(screen.getByText("shiny")).toBeTruthy();
+    expect(screen.getByText("rare")).toBeTruthy();
   });
 });
 
@@ -338,7 +693,7 @@ describe("the shop", () => {
 
   test("disables an offer the wallet cannot afford and enables one it exactly can", async () => {
     renderCompanion(serving(view({ wallet: 100, shop })));
-    await lookUp(KEY);
+    await openCompanion();
 
     // The label is derived, so the accessible name is the assertion: an operator
     // reads "rare candy", not the field name it was stored under.
@@ -355,7 +710,7 @@ describe("the shop", () => {
       ...serving(view({ wallet: 100, shop })),
       [POST_PURCHASE]: () => ({ body: {} }),
     });
-    await lookUp(KEY);
+    await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: "rare candy · 100" }));
 
@@ -370,7 +725,7 @@ describe("the shop", () => {
       ...serving(view({ wallet: 100, shop })),
       [POST_PURCHASE]: () => ({ body: {} }),
     });
-    await lookUp(KEY);
+    await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: "fresh egg (rare+) · 101" }));
 
@@ -381,7 +736,7 @@ describe("the shop", () => {
 describe("the Pokédex", () => {
   test("says it is empty rather than drawing an empty grid", async () => {
     renderCompanion(serving(view({ dex: [] })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("Nothing graduated yet.")).toBeTruthy();
     // The egg is the only image on the panel: no stray cells, no placeholders.
@@ -414,7 +769,7 @@ describe("the Pokédex", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByRole("img", { name: "legendary shiny species 134" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "common species 3" })).toBeTruthy();
@@ -448,7 +803,7 @@ describe("the Pokédex", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     const graduate = await screen.findByRole("img", { name: "common species 12" });
     expect(graduate.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/12");
@@ -472,17 +827,40 @@ describe("the Pokédex", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("modest")).toBeTruthy();
     expect(screen.getByText("adamant")).toBeTruthy();
+  });
+
+  test("names a graduate the way an operator would, and captions it too", async () => {
+    // Two entries, only one named: the cold-cache fallback has to survive
+    // sitting next to a resolved one, which is the state a filling cache is
+    // actually in.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexEntry({ id: "d1", finalId: 134, name: "Vaporeon", rarity: "legendary" }),
+            dexEntry({ id: "d2", finalId: 3, name: null }),
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByRole("img", { name: "legendary Vaporeon" })).toBeTruthy();
+    expect(screen.getByText("Vaporeon")).toBeTruthy();
+    // The unnamed one keeps the number, in the alt text and under the sprite.
+    expect(screen.getByRole("img", { name: "common species 3" })).toBeTruthy();
+    expect(screen.getByText("#3")).toBeTruthy();
   });
 
   test("omits the nature of an entry recorded before natures were stored", async () => {
     // Nullable in the store, so the cell has to survive it without printing
     // "null" under a sprite.
     renderCompanion(serving(view({ dex: [dexEntry({ id: "d1", finalId: 3, nature: null })] })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByRole("img", { name: "common species 3" })).toBeTruthy();
     expect(screen.queryByText("null")).toBeNull();
@@ -499,7 +877,7 @@ describe("the Dex rarity filter", () => {
 
   test("shows every graduate until a rarity is chosen", async () => {
     renderCompanion(serving(view({ dex: mixed })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByRole("img", { name: "common species 3" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "rare species 26" })).toBeTruthy();
@@ -520,7 +898,7 @@ describe("the Dex rarity filter", () => {
       dexEntry({ id: "p2", finalId: 12, rarity: "uncommon", nature: "timid" }),
     ];
     renderCompanion(serving(view({ dex: pair })));
-    await lookUp(KEY);
+    await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "common" }));
 
     expect(screen.getByRole("img", { name: "common species 3" })).toBeTruthy();
@@ -529,7 +907,7 @@ describe("the Dex rarity filter", () => {
 
   test("narrows to the chosen rarity and hides the rest", async () => {
     renderCompanion(serving(view({ dex: mixed })));
-    await lookUp(KEY);
+    await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "legendary" }));
 
     expect(screen.getByRole("img", { name: "legendary shiny species 134" })).toBeTruthy();
@@ -541,7 +919,7 @@ describe("the Dex rarity filter", () => {
     // The grid alone cannot answer "why am I seeing three of two hundred" for
     // somebody who arrived at the panel after the click.
     renderCompanion(serving(view({ dex: mixed })));
-    await lookUp(KEY);
+    await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "rare" }));
 
     expect(screen.getByRole("button", { name: "rare", pressed: true })).toBeTruthy();
@@ -550,7 +928,7 @@ describe("the Dex rarity filter", () => {
 
   test("goes back to everything when the filter is cleared", async () => {
     renderCompanion(serving(view({ dex: mixed })));
-    await lookUp(KEY);
+    await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "legendary" }));
     await userEvent.click(screen.getByRole("button", { name: "all" }));
 
@@ -563,7 +941,7 @@ describe("the Dex rarity filter", () => {
     // graduates and filters to a rarity they have never caught must not be told
     // their collection is empty — that reads as a bug in the panel.
     renderCompanion(serving(view({ dex: mixed })));
-    await lookUp(KEY);
+    await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "uncommon" }));
 
     expect(screen.getByText("No uncommon graduates yet.")).toBeTruthy();
@@ -575,7 +953,7 @@ describe("the Dex rarity filter", () => {
 
   test("offers no filter at all when nothing has graduated", async () => {
     renderCompanion(serving(view({ dex: [] })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("Nothing graduated yet.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "legendary" })).toBeNull();
@@ -595,7 +973,7 @@ describe("the bag", () => {
     // Distinct counts. Two items sharing one would pass against a component
     // that printed the first item's count beside every name.
     renderCompanion(serving(withInventory({ rareCandy: 3, mint: 7 })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("rare candy · 3")).toBeTruthy();
     expect(screen.getByText("mint · 7")).toBeTruthy();
@@ -609,7 +987,7 @@ describe("the bag", () => {
       ...serving(withInventory({ rareCandy: 2 })),
       [POST_USE]: () => ({ body: { ok: true } }),
     });
-    await lookUp(KEY);
+    await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: "Use rare candy" }));
 
@@ -622,19 +1000,24 @@ describe("the bag", () => {
   test("refetches the panel after a use, so the count it shows is the new one", async () => {
     let candies = 2;
     const stub = renderCompanion({
+      [GET_ROSTER]: () => ({ body: { keys: [rosterKey()] } }),
       [GET_KEY]: () => ({ body: withInventory({ rareCandy: candies }) }),
       [POST_USE]: () => {
         candies -= 1;
         return { body: { ok: true } };
       },
     });
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("rare candy · 2")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Use rare candy" }));
 
     expect(await screen.findByText("rare candy · 1")).toBeTruthy();
-    expect(stub.calls.filter((call) => call.method === "GET")).toHaveLength(2);
+    // Twice for this key: once on open, once because the use invalidated it.
+    // Counted per route, since the roster is fetched on mount as well.
+    expect(
+      stub.calls.filter((call) => call.url === `/api/plugins/pokemon/keys/${KEY}`),
+    ).toHaveLength(2);
   });
 
   test("shows a refusal rather than a panel that silently looks unchanged", async () => {
@@ -645,14 +1028,18 @@ describe("the bag", () => {
         body: { error: { code: "CONFLICT", message: "none-held" } },
       }),
     });
-    await lookUp(KEY);
+    await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: "Use rare candy" }));
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByText("none-held")).toBeTruthy();
-    // Refused, so nothing was refetched: the alert is the whole outcome.
-    expect(stub.calls.filter((call) => call.method === "GET")).toHaveLength(1);
+    // Refused, so the companion was not refetched: the alert is the whole
+    // outcome. Counted per route rather than across every GET, because the
+    // panel also fetches the roster once on mount.
+    expect(
+      stub.calls.filter((call) => call.url === `/api/plugins/pokemon/keys/${KEY}`),
+    ).toHaveLength(1);
   });
 
   test("offers no way to spend the charm, which the server would refuse anyway", async () => {
@@ -660,7 +1047,7 @@ describe("the bag", () => {
     // `shinyCharm` is a 400. A button here would be a button whose only
     // possible outcome is an error.
     renderCompanion(serving(withInventory({ shinyCharm: 1, mint: 4 })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("shiny charm · 1")).toBeTruthy();
     expect(screen.getByText("held")).toBeTruthy();
@@ -674,7 +1061,7 @@ describe("the bag", () => {
     // `freshState` writes every item at zero, so an unfiltered bag lists the
     // whole catalogue as if it were owned.
     renderCompanion(serving(withInventory({ rareCandy: 0, mint: 5, shinyCharm: 0 })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("mint · 5")).toBeTruthy();
     expect(screen.queryByText(/rare candy/)).toBeNull();
@@ -683,7 +1070,7 @@ describe("the bag", () => {
 
   test("says the bag is empty when nothing is held", async () => {
     renderCompanion(serving(withInventory({ rareCandy: 0, mint: 0, shinyCharm: 0 })));
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByText("Nothing in the bag.")).toBeTruthy();
   });
@@ -738,7 +1125,7 @@ describe("the activity state", () => {
   for (const { ago, state } of cases) {
     test(`reads ${ago === null ? "never" : `${ago}ms`} since the last credit as ${state}`, async () => {
       renderCompanion(serving(earning(ago)));
-      await lookUp(KEY);
+      await openCompanion();
 
       // The name and the visible text both, because the rule is that the state
       // is legible without colour — not merely announced.
@@ -765,7 +1152,7 @@ describe("the activity state", () => {
         }),
       ),
     );
-    await lookUp(KEY);
+    await openCompanion();
 
     expect(await screen.findByRole("status", { name: "Activity: egg" })).toBeTruthy();
     expect(screen.queryByRole("status", { name: "Activity: working" })).toBeNull();
@@ -773,8 +1160,12 @@ describe("the activity state", () => {
 });
 
 describe("a request that fails", () => {
+  // Reached through the fallback field on purpose: a key the roster cannot
+  // offer is exactly the key an operator types an id for, and the roster in
+  // these fixtures is unreachable too.
   test("renders a message instead of throwing into the host's error boundary", async () => {
     renderCompanion({
+      [GET_ROSTER]: () => ({ body: { keys: [] } }),
       [GET_KEY]: () => ({
         status: 404,
         body: { error: { code: "NOT_FOUND", message: "no such key" } },
@@ -787,7 +1178,8 @@ describe("a request that fails", () => {
 
   test("survives a route the gateway does not serve at all", async () => {
     // The stub's 501, which is what a mistyped prefix or a half-registered
-    // plugin backend looks like from the panel's side.
+    // plugin backend looks like from the panel's side — for the roster and for
+    // the companion both.
     renderCompanion({});
     await lookUp(KEY);
 

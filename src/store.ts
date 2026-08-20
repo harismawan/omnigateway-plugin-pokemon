@@ -139,6 +139,39 @@ export function readCompanion(storage: PluginStorage, apiKeyId: string): Compani
 }
 
 /**
+ * Every key that has a companion, most recent earner first.
+ *
+ * This is what a plugin *can* enumerate. It is not the host's key list — no
+ * capability offers that, and the design said so — but it is the set that
+ * matters to this panel: a key with no row has never spent a token, so it has
+ * no companion to show and nothing a picker could usefully offer.
+ *
+ * **Fails open, like `readDex` and unlike `settle`.** An unreadable save comes
+ * back with `state: null` and keeps its place. Dropping it would make a corrupt
+ * companion invisible on the one surface that lists companions, which is where
+ * an operator would go looking for it.
+ *
+ * `last_credit_at IS NULL` leads the ordering rather than `NULLS LAST`: SQLite
+ * sorts NULL as smallest, so a bare `DESC` floats every never-observed key to
+ * the top of the roster. Written as a boolean key it needs no version of SQLite
+ * newer than the one the gateway happens to link.
+ */
+export function listCompanions(storage: PluginStorage): CompanionRow[] {
+  const rows = storage.all<StoredCompanion>(
+    `SELECT api_key_id, state, tokens_total, tokens_spent, last_credit_at
+     FROM {{companion}}
+     ORDER BY last_credit_at IS NULL, last_credit_at DESC, tokens_total DESC, api_key_id ASC`,
+  );
+  return rows.map((row) => ({
+    apiKeyId: row.api_key_id,
+    state: parseState(row.state),
+    tokensTotal: row.tokens_total,
+    tokensSpent: row.tokens_spent,
+    lastCreditAt: row.last_credit_at,
+  }));
+}
+
+/**
  * Credits tokens to a key, creating its companion on first sight.
  *
  * Created lazily rather than when a key is minted: a companion measures from
