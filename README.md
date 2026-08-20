@@ -1,4 +1,4 @@
-# omnigateway-plugin-pokemon
+# @omnigateway/pokemon
 
 A Pokémon companion for [OmniGateway](https://github.com/harismawan/omnigateway).
 
@@ -21,7 +21,7 @@ The gateway resolves a plugin by name through npm, so the host needs no checkout
 and no build toolchain:
 
 ```bash
-omni plugin install omnigateway-plugin-pokemon
+omni plugin install @omnigateway/pokemon
 omni plugin verify pokemon && omni restart
 ```
 

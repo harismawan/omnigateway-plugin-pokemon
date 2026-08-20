@@ -82,8 +82,8 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p "require('./package.json').version")
-          if [ "$(npm view "omnigateway-plugin-pokemon@$version" version 2>/dev/null || true)" = "$version" ]; then
-            echo "omnigateway-plugin-pokemon@$version is already published; skipping"
+          if [ "$(npm view "@omnigateway/pokemon@$version" version 2>/dev/null || true)" = "$version" ]; then
+            echo "@omnigateway/pokemon@$version is already published; skipping"
           else
             npm publish --access public
           fi
