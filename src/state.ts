@@ -44,6 +44,16 @@ export type MonState = {
    * it priceable at all — see `ITEM_PRICES.sootheBell`.
    */
   soothe: boolean;
+  /**
+   * Raw tokens this companion has absorbed while holding a soothe bell.
+   *
+   * Kept so the bell's bonus is `floor(soothedRaw × SOOTHE_BONUS)` computed
+   * against the running total, rather than a rounded slice of each delta. The
+   * per-delta form made growth depend on how the traffic arrived: ten credits of
+   * two tokens rounded up ten times and out-granted one credit of twenty by
+   * 20%. Growth has to be a function of tokens earned.
+   */
+  soothedRaw: number;
 };
 
 export type CompanionState = {
@@ -263,6 +273,10 @@ export function parseState(raw: string): CompanionState | null {
        * cannot silently *grant* one, which is the direction that would matter.
        */
       soothe: storedActive.soothe === true,
+      // Degrades to zero, which under-grants rather than over-grants: the bell
+      // starts counting again from here. The opposite default would hand back
+      // bonus already paid out.
+      soothedRaw: Math.max(0, asInt(storedActive.soothedRaw, 0)),
     };
   }
 

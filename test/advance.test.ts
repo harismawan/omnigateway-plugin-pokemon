@@ -325,6 +325,7 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
       dittoRevealed: false,
       everstone: false,
       soothe: false,
+      soothedRaw: 0,
     },
   };
 
@@ -375,6 +376,7 @@ function disguisedMon(over: Partial<NonNullable<CompanionState["active"]>> = {})
     dittoRevealed: false,
     everstone: false,
     soothe: false,
+    soothedRaw: 0,
     ...over,
   };
 }
@@ -477,6 +479,7 @@ function pinnable(over: Partial<NonNullable<CompanionState["active"]>> = {}): Co
       dittoRevealed: false,
       everstone: false,
       soothe: false,
+      soothedRaw: 0,
       ...over,
     },
   };
@@ -555,4 +558,37 @@ test("a soothe bell does nothing for an egg", () => {
   // should scale incubation.
   const egg = { ...freshState(), eggUsage: 0 };
   expect(advance(egg, 1_000).state.eggUsage).toBe(1_000);
+});
+
+test("a soothe bell grants the same growth however the credits were chunked", () => {
+  // The rounding defect. `Math.round(gained * 1.25)` landed on an exact .5
+  // whenever `gained ≡ 2 (mod 4)` and rounded it up, so ten credits of 2 gave
+  // 10 × 3 = 30 where one credit of 20 gave 25 — a 20% over-grant decided by
+  // nothing but how the traffic happened to arrive. Growth has to be a function
+  // of tokens earned, not of how they were delivered.
+  const belled = pinnable({ soothe: true });
+
+  let chunked = belled;
+  for (let credit = 1; credit <= 10; credit++) {
+    chunked = advance(chunked, credit * 2).state;
+  }
+  const oneShot = advance(belled, 20).state;
+
+  expect(chunked.active?.usedAtStage).toBe(oneShot.active?.usedAtStage as number);
+  // And the total is the honest one: 20 earned plus a quarter of it.
+  expect(oneShot.active?.usedAtStage).toBe(25);
+});
+
+test("a soothe bell never grants more than its share of what was earned", () => {
+  // The bound the item is priced against. Any drift upward makes the "cannot
+  // repay itself" argument in ITEM_PRICES.sootheBell false.
+  for (const size of [1, 2, 3, 5, 7, 999]) {
+    let state = pinnable({ soothe: true });
+    let earned = 0;
+    for (let credit = 0; credit < 20; credit++) {
+      earned += size;
+      state = advance(state, earned).state;
+    }
+    expect(state.active?.usedAtStage).toBe(earned + Math.floor(earned * SOOTHE_BONUS));
+  }
 });

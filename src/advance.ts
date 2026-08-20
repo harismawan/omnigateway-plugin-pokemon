@@ -74,31 +74,42 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
   // request happened to arrive. On a revoked key that request never comes.
   if (gained > 0) {
     /*
-      A soothe bell scales what reaches the companion and nothing else.
+      A soothe bell adds to what reaches the companion, and nothing else.
 
       `consumedTotal` above still absorbs the raw figure, which is what keeps
-      this idempotent — the bonus is applied to a delta, so a second settle at
-      the same total computes a delta of zero and adds nothing. And `tokensTotal`
-      is the caller's, untouched here, which is the property that matters most:
-      the wallet is derived from it, so a bell that grew the ledger would print
-      the tokens to buy the next bell.
+      this idempotent: a second settle at the same total computes a delta of
+      zero. And `tokensTotal` is the caller's, untouched here, which is the
+      property that matters most — the wallet is derived from it, so a bell that
+      grew the ledger would print the tokens to buy the next bell.
+
+      The bonus is computed against the running total rather than this delta,
+      and that is not a refinement. Rounding a slice of each delta made growth
+      depend on how the traffic arrived: `gained × 1.25` lands on an exact .5
+      whenever `gained ≡ 2 (mod 4)` and rounds up, so ten credits of two tokens
+      granted 30 where one credit of twenty granted 25. Upward bias, averaging
+      +0.125 per settle, which quietly falsified the "cannot repay its own cost"
+      argument the item is priced on.
 
       Eggs are excluded because the bell is applied to a companion and an egg is
       not one.
      */
     const active = next.active;
-    next =
-      active === null
-        ? { ...next, eggUsage: next.eggUsage + gained }
-        : {
-            ...next,
-            active: {
-              ...active,
-              usedAtStage:
-                active.usedAtStage +
-                (active.soothe ? Math.round(gained * (1 + SOOTHE_BONUS)) : gained),
-            },
-          };
+    if (active === null) {
+      next = { ...next, eggUsage: next.eggUsage + gained };
+    } else if (!active.soothe) {
+      next = { ...next, active: { ...active, usedAtStage: active.usedAtStage + gained } };
+    } else {
+      // Against the running total, not this delta. The bonus owed is always
+      // `floor(soothedRaw × BONUS)`, so what this credit adds is the difference
+      // between that and what has already been granted — which makes the total
+      // identical however the tokens arrived.
+      const raw = active.soothedRaw + gained;
+      const owed = Math.floor(raw * SOOTHE_BONUS) - Math.floor(active.soothedRaw * SOOTHE_BONUS);
+      next = {
+        ...next,
+        active: { ...active, soothedRaw: raw, usedAtStage: active.usedAtStage + gained + owed },
+      };
+    }
   }
 
   for (let step = 0; step < MAX_TRANSITIONS_PER_ADVANCE; step++) {
@@ -127,6 +138,7 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
         // the one this replaced took its own with it.
         everstone: false,
         soothe: false,
+        soothedRaw: 0,
       };
       events.push({
         kind: "hatched",
