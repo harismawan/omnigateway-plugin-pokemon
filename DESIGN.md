@@ -530,8 +530,20 @@ is "discard this one", a stone is "keep this one", and two opposite operations a
 one price are legible from the shop row alone. It blocks graduation as well as
 evolution because the case for it is a shiny, and a shiny is most at risk exactly
 when it is about to graduate away — which also makes it self-limiting, since
-pinning costs Dex progress. **Open:** removal needs a verb; `use` is a one-way
-consume.
+pinning costs Dex progress.
+
+**Removal is `POST /keys/:id/unpin`, and it had to be its own route.** The
+obvious shape — `use` toggling the stone — cannot work: `use` runs through
+`consume`, `consume` refuses an item held zero times, so releasing would require
+holding a *spare* stone and would then spend it to undo the first. Pinning would
+be a trap rather than a choice, which is the opposite of the item. The stone is
+not returned on release; it was spent to pin, and this is the pin ending.
+
+The panel draws a pinned companion as **held**, not as one stuck mid-meter. Its
+progress runs past the threshold and keeps going, so "X / Y to the next stage"
+would show a number sitting above a line it should already have crossed — which
+is precisely how a deliberate state gets diagnosed as a broken one. It reads
+"held at this stage · N banked" instead, and the release control sits under it.
 
 **Lure — 1B, consumable, spent at the next roll.** Filters candidates to
 uncollected finals rather than merely halving their weight. A modifier rather

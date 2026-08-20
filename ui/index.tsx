@@ -134,6 +134,17 @@ function Companion({ pluginId, api }: PluginUiProps) {
     onSuccess: invalidate,
   });
 
+  // Its own mutation rather than another `use`, mirroring the server: taking an
+  // everstone off spends nothing, and routing it through the item path would
+  // require holding a spare stone to release the one already on.
+  const release = useMutation({
+    mutationFn: () => api.post(`keys/${showing}/unpin`),
+    onMutate: () => setRefusal(null),
+    onError: (error: unknown) =>
+      setRefusal(error instanceof Error ? error.message : "the companion could not be released"),
+    onSuccess: invalidate,
+  });
+
   if (roster.isPending) return <Panel>Loading…</Panel>;
 
   if (showing === null) {
@@ -177,10 +188,12 @@ function Companion({ pluginId, api }: PluginUiProps) {
         buy={buy.mutate}
         buying={buy.isPending}
         keyId={showing}
+        onRelease={() => release.mutate()}
         onUse={use.mutate}
         pluginId={pluginId}
         query={companion}
         refusal={refusal}
+        releasing={release.isPending}
         using={use.isPending}
       />
     </Panel>
@@ -199,8 +212,10 @@ function CompanionBody({
   pluginId,
   buy,
   onUse,
+  onRelease,
   buying,
   using,
+  releasing,
   refusal,
 }: {
   query: { isPending: boolean; isError: boolean; data: CompanionView | undefined };
@@ -208,8 +223,10 @@ function CompanionBody({
   pluginId: string;
   buy: (entry: ShopEntry) => void;
   onUse: (item: string) => void;
+  onRelease: () => void;
   buying: boolean;
   using: boolean;
+  releasing: boolean;
   refusal: string | null;
 }) {
   if (query.isPending) return <Dim>Loading…</Dim>;
@@ -238,7 +255,13 @@ function CompanionBody({
 
   return (
     <>
-      <Hero activity={activity} pluginId={pluginId} view={view} />
+      <Hero
+        activity={activity}
+        onRelease={onRelease}
+        pluginId={pluginId}
+        releasing={releasing}
+        view={view}
+      />
 
       <SectionHead>Shop</SectionHead>
       <Shop offers={view.shop} onBuy={buy} pending={buying} wallet={view.wallet} />

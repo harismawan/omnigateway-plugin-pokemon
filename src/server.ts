@@ -685,6 +685,46 @@ export default definePlugin({
       },
       {
         method: "POST",
+        path: "/keys/:id/unpin",
+        /**
+         * Takes an everstone off, which is the one companion action that spends
+         * nothing.
+         *
+         * A route of its own rather than another `use`, because `use` runs
+         * through `consume` and `consume` refuses an item held zero times — so
+         * releasing through it would require holding a *spare* stone and would
+         * then spend that one to undo the first. Pinning would become a trap
+         * instead of a choice, which is the opposite of what the item is for.
+         *
+         * The stone is not returned. It was spent to pin, and this is simply the
+         * pin ending.
+         */
+        handler: (request) => {
+          const apiKeyId = request.params.id ?? "";
+          const row = readCompanion(storage, apiKeyId);
+          if (row === null) return { status: 404, json: { error: "no companion for that key" } };
+          if (row.state === null) return { status: 409, json: { error: "unreadable" } };
+
+          const active = row.state.active;
+          if (active === null) return { status: 409, json: { error: "no-companion" } };
+          // Refused rather than treated as a no-op, so a panel that has drifted
+          // out of date is told rather than shown a success that changed nothing.
+          if (!active.everstone) return { status: 409, json: { error: "nothing-new" } };
+
+          storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
+            JSON.stringify({ ...row.state, active: { ...active, everstone: false } }),
+            ctx.now(),
+            apiKeyId,
+          ]);
+          // Everything banked while pinned is still in `usedAtStage`, so this is
+          // the moment it spends itself — possibly through several stages at
+          // once, which `advance`'s transition cap already handles.
+          settleAndRecord(apiKeyId);
+          return { json: { ok: true } };
+        },
+      },
+      {
+        method: "POST",
         path: "/keys/:id/purchase",
         handler: (request) => {
           const apiKeyId = request.params.id ?? "";
@@ -834,11 +874,13 @@ function useItem(state: CompanionState, item: HeldItem): ItemOutcome {
     if (active === null) return { refused: "no-companion" };
 
     if (item === "everstone") {
-      // A toggle, and the only item here that gives something back. The stone is
-      // spent to pin and the release is free: charging a second stone to undo
-      // the first would make pinning a trap rather than a choice, and there is
-      // nothing to return it to once it is on.
-      return { applied: { ...state, active: { ...active, everstone: !active.everstone } } };
+      // Pinning only. Releasing is `POST /keys/:id/unpin` and needs no item,
+      // because a toggle here could not work: `consume` refuses when the count
+      // is zero, so releasing would require holding a *spare* stone — and it
+      // would then spend that one to undo the first. Pinning would be a trap
+      // rather than a choice.
+      if (active.everstone) return { refused: "nothing-new" };
+      return { applied: { ...state, active: { ...active, everstone: true } } };
     }
     if (item === "sootheBell") {
       // Refused rather than silently re-applied. A bell already on this

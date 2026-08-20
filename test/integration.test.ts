@@ -324,6 +324,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
     "GET /keys/:id",
     "GET /sprite/:species",
     "POST /keys/:id/purchase",
+    "POST /keys/:id/unpin",
     "POST /keys/:id/use",
   ]);
 });
@@ -642,6 +643,127 @@ test("an item that cannot do anything is refused rather than burned", async () =
   expect(refused?.json).toMatchObject({ error: "no-companion" });
   // The whole point: still two.
   expect(readCompanion(storage, KEY)?.state?.inventory.mint).toBe(2);
+});
+
+/** A companion with an everstone already on it. */
+function pinnedCompanion(): void {
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ everstone: true }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+}
+
+test("a pinned companion is released without spending a second stone", async () => {
+  // Release cannot go through `use`: `consume` refuses when the count is zero,
+  // so releasing would mean holding a *spare* stone and then spending it to undo
+  // the first. Pinning would be a trap rather than a choice.
+  await boot();
+  spend(1_000);
+  pinnedCompanion();
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  const released = await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(released?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.active?.everstone).toBe(false);
+  expect(state?.inventory.everstone).toBe(0);
+});
+
+test("releasing a companion that is not pinned is refused", async () => {
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon(),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  const refused = await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(refused?.status).toBe(409);
+});
+
+test("a second everstone is refused rather than spent on an already-pinned companion", async () => {
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ everstone: true }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: { ...emptyInventory(), everstone: 1 },
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { item: "everstone" },
+  });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.everstone).toBe(1);
+});
+
+test("releasing a pinned companion lets its banked growth spend itself", async () => {
+  // End to end: the growth accrued while pinned is still there and settles the
+  // moment the stone comes off.
+  await boot();
+  spend(graduationTotal("common") * 2);
+  plant({
+    consumedTotal: graduationTotal("common") * 2,
+    // Banked *in* `usedAtStage`, which is where a pinned companion's growth
+    // accumulates. Setting only `consumedTotal` would leave nothing to release:
+    // `advance` works from the difference, and that difference is already spent.
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      everstone: true,
+      usedAtStage: graduationTotal("common"),
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  // Pinned, so nothing moved.
+  expect(readCompanion(storage, KEY)?.state?.active?.stageIndex).toBe(0);
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
+  expect(readDex(storage, KEY)).toHaveLength(1);
 });
 
 test("a lure steers the next roll and is spent by it", async () => {

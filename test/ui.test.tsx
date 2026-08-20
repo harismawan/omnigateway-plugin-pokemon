@@ -128,6 +128,8 @@ type Active = {
   nature: string;
   dittoDisguise: number | null;
   dittoRevealed: boolean;
+  everstone: boolean;
+  soothe: boolean;
 };
 
 type CompanionState = {
@@ -176,6 +178,8 @@ function active(patch: Partial<Active> = {}): Active {
     nature: "brave",
     dittoDisguise: null,
     dittoRevealed: false,
+    everstone: false,
+    soothe: false,
     ...patch,
   };
 }
@@ -703,6 +707,67 @@ describe("an active companion", () => {
     await screen.findByRole("img", { name: "Species 25" });
 
     expect(screen.getByText("?")).toBeTruthy();
+  });
+
+  test("says a pinned companion is held rather than showing it stuck", async () => {
+    // A pinned companion's progress runs past its threshold and keeps going, so
+    // the usual "X / Y to the next stage" would read as a number stuck above a
+    // line it should already have crossed — which is how a deliberate state gets
+    // diagnosed as a broken one.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ everstone: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+          progress: 9_000_000,
+          nextThreshold: 5_000_000,
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText(/Held at this stage/)).toBeTruthy();
+    expect(screen.queryByText(/to the next stage/)).toBeNull();
+    expect(screen.getByText("everstone")).toBeTruthy();
+  });
+
+  test("offers to release a pinned companion and asks the route that spends nothing", async () => {
+    const stub = renderCompanion({
+      ...serving(
+        view({
+          state: {
+            active: active({ everstone: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+      [`POST /api/plugins/pokemon/keys/${KEY}/unpin`]: () => ({ body: { ok: true } }),
+    });
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Release" }));
+
+    // The unpin route, not `use`: releasing through the item path would need a
+    // spare stone in hand and would spend it.
+    expect(
+      stub.calls.some((call) => call.method === "POST" && call.url.endsWith(`/keys/${KEY}/unpin`)),
+    ).toBe(true);
+  });
+
+  test("offers no release control when nothing is pinned", async () => {
+    renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.queryByRole("button", { name: "Release" })).toBeNull();
   });
 
   test("stops hinting once the disguise has dropped", async () => {
