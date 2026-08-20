@@ -570,11 +570,23 @@ new shop-entry shape and an id reaching the candidate set that would have to be
 range-validated. Excluding *the current companion's final form* needs no
 parameter, adds no wire shape, and complements the lure's positive filter.
 
-**Dependency.** Everstone and Soothe Bell are held, which makes the missing
-repurchase guard load-bearing rather than cosmetic. `applyPurchase` increments
-without refusing a second copy; today that wastes 3B on a duplicate charm, but a
-stacking Soothe Bell is an exploit the moment anything reads the count rather
-than a boolean. The guard comes first.
+**Dependency — `consume` must check preconditions before it decrements.** All
+five are consumables with a precondition: the stone and the bell need an active
+companion, the lure needs an uncollected final to exist, the repel needs a
+current line. `consume` (`src/store.ts:375`) rejects only an empty inventory,
+then decrements and writes unconditionally — so an effect that declines to act
+returns `{ ok: true }` with the item gone. Today that is one path, a mint used on
+an egg. These would make it five. The fix is ordering plus a 409, and it comes
+before any of them.
+
+Distinct from the missing **repurchase** guard, which is worth fixing but blocks
+nothing here: `applyPurchase` never refuses a second copy of a passive, which
+wastes 3B on a duplicate shiny charm. That only bites items where owning *is* the
+effect, and none of these five are that shape — each is spent on a companion, so
+holding two is as ordinary as holding two candies. An earlier draft of this
+section called the stone and the bell "held" and drew the dependency from that;
+it was wrong, and the correction is recorded rather than quietly edited because
+the two guards defend different things and the difference is easy to re-confuse.
 
 ## Out of scope
 
