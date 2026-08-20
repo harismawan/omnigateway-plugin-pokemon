@@ -211,6 +211,33 @@ several of the numbers encode a fixed bug:
 - Shiny 1/64, 1/48 holding the charm. Ditto disguise 1/128 on common multi-form
   hatches.
 
+**The Ditto reveal.** A disguise is not a costume the companion wears forever: a
+Ditto cannot evolve, so the threshold that would have evolved it is the moment it
+stops pretending. It becomes Ditto proper — new line, new rarity, `stageIndex`
+back to 0 — keeping the shininess and nature that were rolled for this
+individual, and carrying the overflow across exactly as an evolution does.
+`dittoRevealed` is what keeps it from firing again at every later threshold.
+
+The reveal *replaces* the evolution rather than following it, and the ordering is
+the point: run after, a disguise would reach its second form first, and a Ditto
+that got to evolve once is a different creature from the one the roll promised.
+
+It needs Ditto's own line and rarity, which live behind PokéAPI — and `advance`
+has no capabilities. So it takes the shape `pendingHatch` already established:
+the server resolves the answer into `pendingReveal` while the disguise is still
+growing, and the transition itself stays local. **A reveal that cannot be
+resolved holds at the threshold** rather than evolving or guessing, the same rule
+an egg follows when it has met its threshold and has nothing to become. Progress
+waits instead of draining, so the reveal happens with its growth intact. The
+alternative — hardcoding "Ditto is rare" — would pick the graduation total the
+revealed companion carries for life out of a constant, and put a second copy of a
+PokéAPI fact in `balance.ts`.
+
+The panel's `?` chip is keyed on `dittoRevealed`, not on the disguise being
+present: `dittoDisguise` stays set afterwards because it records what this one
+was pretending to be, so a hint keyed on it alone would mark a revealed Ditto as
+still hiding something forever.
+
 The fresh-egg pricing comment is the one to preserve most carefully: priced by
 probability ratio instead, two uncommon eggs beat one rare egg on *every* axis,
 making the higher tier a strictly inferior product. `sortRank` ordering has a

@@ -37,6 +37,8 @@ export type CompanionView = {
       isShiny: boolean;
       nature: string;
       dittoDisguise: number | null;
+      /** True once the disguise has been dropped, which is when the hint stops. */
+      dittoRevealed: boolean;
     } | null;
     eggUsage: number;
     eggTier: Rarity | null;

@@ -81,8 +81,15 @@ export function Hero({
                   A Ditto in disguise is a secret the panel is allowed to hint
                   at and not to spoil, which is the whole joke: the question
                   mark says something is off about this one.
+
+                  It stops once the disguise drops. `dittoDisguise` stays set
+                  after a reveal — it records what this one was pretending to
+                  be, which the Dex still wants — so the hint is keyed on
+                  `dittoRevealed` rather than on the disguise being present. Left
+                  on the first field it would mark a revealed Ditto as still
+                  hiding something, forever.
                 */}
-                {active.dittoDisguise === null ? null : <Chip>?</Chip>}
+                {active.dittoDisguise === null || active.dittoRevealed ? null : <Chip>?</Chip>}
               </>
             )}
             {/*

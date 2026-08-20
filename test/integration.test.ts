@@ -549,6 +549,70 @@ test("an unaffordable purchase is refused and changes nothing", async () => {
   expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
 });
 
+test("a disguised companion has its reveal resolved before it needs it", async () => {
+  // The half of the reveal that `advance` cannot do. Ditto's line and rarity
+  // live behind PokéAPI and the transition must not need them, so the answer is
+  // written into the save while the disguise is still growing.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      dittoDisguise: 10,
+      dittoRevealed: false,
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const pending = readCompanion(storage, KEY)?.state?.pendingReveal;
+    if (pending != null) {
+      expect(pending.path[0]).toBe(132);
+      // Derived from the fetched capture rate rather than written down here, so
+      // a hardcoded "Ditto is rare" cannot drift from what PokéAPI says.
+      expect(pending.rarity).toBe("common");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the reveal was never resolved");
+});
+
+test("an ordinary companion never resolves a reveal it will not use", async () => {
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(readCompanion(storage, KEY)?.state?.pendingReveal).toBeNull();
+  expect(online.calls.filter((url) => url.endsWith("/pokemon-species/132"))).toEqual([]);
+});
+
 test("the shop is listed cheapest first", async () => {
   // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
   // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed

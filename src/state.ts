@@ -78,6 +78,24 @@ export type CompanionState = {
     nature: Nature;
     ditto: boolean;
   } | null;
+  /**
+   * What a disguised companion becomes when it drops the act, resolved ahead of
+   * the moment it does.
+   *
+   * The same trick as `pendingHatch` and for the same reason. A reveal needs
+   * Ditto's own line and rarity, which live behind PokéAPI, and `advance` has no
+   * capabilities — so the answer is written down while the disguise is still
+   * growing and the transition itself stays a local one.
+   *
+   * Null is an ordinary state, not an error: a companion that is not disguised
+   * has nothing to resolve, and a disguised one on a cold cache holds at its
+   * threshold until this arrives. The alternative is inventing Ditto's rarity,
+   * which decides what the revealed companion costs to graduate.
+   */
+  pendingReveal: {
+    path: readonly number[];
+    rarity: Rarity;
+  } | null;
   inventory: Record<ItemKind, number>;
   /**
    * Whether the first-run seeding of limit-window grants has happened.
@@ -94,6 +112,7 @@ export function freshState(): CompanionState {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
+    pendingReveal: null,
     inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
   };
 }
@@ -207,6 +226,18 @@ export function parseState(raw: string): CompanionState | null {
     }
   }
 
+  const storedReveal = parsed.pendingReveal;
+  let pendingReveal: CompanionState["pendingReveal"] = null;
+  if (isRecord(storedReveal)) {
+    const rarity = asRarity(storedReveal.rarity);
+    const path = Array.isArray(storedReveal.path)
+      ? storedReveal.path.filter((id): id is number => typeof id === "number" && id > 0)
+      : [];
+    // Dropped and re-resolved rather than refusing the save, exactly like
+    // `pendingHatch`: it is a prefetch, and losing one costs a round trip.
+    if (rarity !== null && path.length > 0) pendingReveal = { path, rarity };
+  }
+
   const eggTier = asRarity(parsed.eggTier);
 
   return {
@@ -217,6 +248,7 @@ export function parseState(raw: string): CompanionState | null {
     // direction: it declines to invent a promise nobody paid for.
     eggTier: eggTier === null || eggTier === "legendary" ? null : eggTier,
     pendingHatch,
+    pendingReveal,
     inventory,
   };
 }

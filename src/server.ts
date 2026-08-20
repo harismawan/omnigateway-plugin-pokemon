@@ -5,6 +5,7 @@
 import { definePlugin, type PluginContext, type PluginRoute } from "@omnigateway/plugin-api/define";
 import type { CompanionEvent } from "./advance.ts";
 import {
+  DITTO_SPECIES_ID,
   EGG_HATCH_THRESHOLD,
   freshEggPrice,
   ITEM_KINDS,
@@ -139,7 +140,14 @@ export default definePlugin({
     const prefetchOnce = (apiKeyId: string, state: CompanionState): Promise<void> => {
       const existing = inFlight.get(apiKeyId);
       if (existing !== undefined) return existing;
-      const started = prefetchHatch(apiKeyId, state).finally(() => inFlight.delete(apiKeyId));
+      // Both prefetches behind one latch, because they are two answers to the
+      // same question — what does this companion become next — and exactly one
+      // of them applies at a time: a hatch needs no active Pokémon, a reveal
+      // needs one. A second latch would only let a poll start a reveal while a
+      // hatch was still running for the same key.
+      const started = prefetchHatch(apiKeyId, state)
+        .then(() => prefetchReveal(apiKeyId, state))
+        .finally(() => inFlight.delete(apiKeyId));
       inFlight.set(apiKeyId, started);
       return started;
     };
@@ -287,6 +295,56 @@ export default definePlugin({
         );
         ctx.logger.info("companion graduated", { event: "companion.graduated", count: 1 });
       }
+    };
+
+    /**
+     * Resolves what a disguised companion will turn out to be, before it does.
+     *
+     * The counterpart to `prefetchHatch` and the reason `advance` can stay pure
+     * through a reveal: Ditto's line and rarity live behind PokéAPI, and the
+     * transition itself must not need them. Resolved as soon as a disguise is
+     * seen rather than at its threshold, so the answer is already on disk by the
+     * time it is wanted — a reveal that had to wait for a fetch would stall a
+     * companion at a threshold it had already paid for.
+     *
+     * Rarity is derived from the fetched detail rather than written down here,
+     * for the same reason the hatch derives it: a hardcoded "Ditto is rare"
+     * decides the graduation total the revealed companion carries for life, and
+     * it would be a second copy of a fact PokéAPI already answers.
+     */
+    const prefetchReveal = async (apiKeyId: string, state: CompanionState): Promise<void> => {
+      const mon = state.active;
+      if (mon === null || mon.dittoDisguise === null || mon.dittoRevealed) return;
+      if (state.pendingReveal !== null) return;
+      if (net === undefined || files === undefined) return;
+
+      const detail = await speciesDetail({ net, files }, DITTO_SPECIES_ID);
+      if (detail === null) return;
+
+      const current = readCompanion(storage, apiKeyId);
+      // Re-read rather than trusting the state this started from: an await
+      // happened, and a credit may have landed — or the reveal may already have
+      // been resolved by a poll that overlapped this one.
+      if (current?.state == null) return;
+      const latest = current.state.active;
+      if (latest === null || latest.dittoDisguise === null || latest.dittoRevealed) return;
+      if (current.state.pendingReveal !== null) return;
+
+      storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
+        JSON.stringify({
+          ...current.state,
+          pendingReveal: {
+            path: detail.chain,
+            rarity: rarityFromCaptureRate(
+              detail.captureRate,
+              detail.isLegendary,
+              detail.isMythical,
+            ),
+          },
+        }),
+        ctx.now(),
+        apiKeyId,
+      ]);
     };
 
     /**

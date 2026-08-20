@@ -321,3 +321,108 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
   expect(again.state.active?.stageIndex).toBeGreaterThan(result.state.active?.stageIndex ?? 0);
   expect(again.events.length).toBeLessThanOrEqual(64);
 });
+
+// --- the Ditto reveal ----------------------------------------------------------
+
+/**
+ * A Ditto wearing a common two-form line, one token short of the first
+ * threshold it will never actually cross as its disguise.
+ *
+ * `common` and two forms because that is the only shape a disguise is rolled
+ * onto — `roll` refuses the rest, so a fixture outside it would be testing a
+ * state the game cannot produce.
+ */
+function disguisedMon(over: Partial<NonNullable<CompanionState["active"]>> = {}) {
+  return {
+    baseId: 10,
+    plannedPath: [10, 11],
+    stageIndex: 0,
+    usedAtStage: 0,
+    rarity: "common" as const,
+    isShiny: false,
+    nature: "jolly" as const,
+    dittoDisguise: 10,
+    dittoRevealed: false,
+    ...over,
+  };
+}
+
+function disguised(over: Partial<CompanionState> = {}): CompanionState {
+  return {
+    ...freshState(),
+    consumedTotal: 0,
+    active: disguisedMon(),
+    pendingReveal: { path: [132], rarity: "rare" },
+    ...over,
+  };
+}
+
+/** What the disguise would have cost to leave, had it been going to evolve. */
+const DISGUISE_THRESHOLD = phaseThreshold("common", 2, 0);
+
+test("a disguised companion reveals instead of taking its first evolution", () => {
+  const result = advance(disguised(), DISGUISE_THRESHOLD);
+
+  expect(result.events).toEqual([{ kind: "revealed", disguisedAs: 10, speciesId: 132 }]);
+  expect(result.state.active?.plannedPath).toEqual([132]);
+  expect(result.state.active?.rarity).toBe("rare");
+  expect(result.state.active?.dittoRevealed).toBe(true);
+  // Nothing evolved: the reveal replaces that transition rather than following
+  // it, so a Ditto never wears its disguise's second form.
+  expect(result.events.some((event) => event.kind === "evolved")).toBe(false);
+});
+
+test("the reveal carries the overflow and keeps what was rolled at hatch", () => {
+  const result = advance(
+    disguised({ active: disguisedMon({ isShiny: true }) }),
+    DISGUISE_THRESHOLD + 7_000,
+  );
+
+  expect(result.state.active?.usedAtStage).toBe(7_000);
+  // Pinned alongside the overflow, because the overflow alone does not
+  // distinguish a reveal from an ordinary evolution: leaving stage 0 of the
+  // disguise would leave exactly the same 7,000 behind. Without these three the
+  // test passes against a version that has no reveal at all.
+  expect(result.state.active?.plannedPath).toEqual([132]);
+  expect(result.state.active?.rarity).toBe("rare");
+  expect(result.state.active?.dittoRevealed).toBe(true);
+  // Shininess and nature are facts about this individual, not about the species
+  // it was pretending to be.
+  expect(result.state.active?.isShiny).toBe(true);
+  expect(result.state.active?.nature).toBe("jolly");
+});
+
+test("a reveal that has not been resolved holds at the threshold", () => {
+  // The offline case, and the same rule the egg follows: progress waits rather
+  // than draining, so the moment the line arrives the reveal happens with its
+  // growth intact. Inventing Ditto's rarity here would decide what the revealed
+  // companion costs to graduate.
+  const result = advance(disguised({ pendingReveal: null }), DISGUISE_THRESHOLD + 7_000);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.dittoRevealed).toBe(false);
+  expect(result.state.active?.plannedPath).toEqual([10, 11]);
+  // Held, not lost.
+  expect(result.state.active?.usedAtStage).toBe(DISGUISE_THRESHOLD + 7_000);
+  // And the ledger still moved, or the gap would grow on every blocked call.
+  expect(result.state.consumedTotal).toBe(DISGUISE_THRESHOLD + 7_000);
+});
+
+test("an already-revealed Ditto evolves and graduates as an ordinary companion", () => {
+  // `dittoRevealed` is what stops the reveal firing twice. Without it a Ditto
+  // would re-reveal at every threshold and never graduate.
+  const revealed = disguised({
+    active: disguisedMon({
+      baseId: 132,
+      plannedPath: [132],
+      rarity: "rare",
+      dittoRevealed: true,
+    }),
+    pendingReveal: null,
+  });
+
+  const result = advance(revealed, graduationTotal("rare"));
+
+  expect(result.events.map((event) => event.kind)).toEqual(["graduated"]);
+  expect(result.events[0]).toMatchObject({ baseId: 132, finalId: 132 });
+});

@@ -127,6 +127,7 @@ type Active = {
   isShiny: boolean;
   nature: string;
   dittoDisguise: number | null;
+  dittoRevealed: boolean;
 };
 
 type CompanionState = {
@@ -174,6 +175,7 @@ function active(patch: Partial<Active> = {}): Active {
     isShiny: false,
     nature: "brave",
     dittoDisguise: null,
+    dittoRevealed: false,
     ...patch,
   };
 }
@@ -682,6 +684,47 @@ describe("an active companion", () => {
     // beside it is a glyph and the word is what makes it legible.
     expect(screen.getByText("shiny")).toBeTruthy();
     expect(screen.getByText("rare")).toBeTruthy();
+  });
+
+  test("hints that a disguised companion is not what it looks like", async () => {
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ dittoDisguise: 172, dittoRevealed: false }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.getByText("?")).toBeTruthy();
+  });
+
+  test("stops hinting once the disguise has dropped", async () => {
+    // `dittoDisguise` stays set after a reveal — it records what this one was
+    // pretending to be — so a hint keyed on it alone would mark a revealed Ditto
+    // as still hiding something for the rest of its life.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ dittoDisguise: 172, dittoRevealed: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.queryByText("?")).toBeNull();
   });
 });
 

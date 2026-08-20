@@ -13,6 +13,12 @@ import type { CompanionState, MonState } from "./state.ts";
 export type CompanionEvent =
   | { kind: "hatched"; speciesId: number; isShiny: boolean; ditto: boolean }
   | { kind: "evolved"; from: number; to: number }
+  /**
+   * A disguise dropped. Carries what it was pretending to be, because after
+   * this the state no longer says — `plannedPath` is Ditto's from here on, and
+   * the notification worth sending names the species that vanished.
+   */
+  | { kind: "revealed"; disguisedAs: number; speciesId: number }
   | {
       kind: "graduated";
       baseId: number;
@@ -111,6 +117,49 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
     if (mon.usedAtStage < needed) break;
 
     const excess = mon.usedAtStage - needed;
+
+    /*
+      A Ditto cannot evolve, so the threshold that would have evolved it is the
+      moment it stops pretending. Checked before the evolution branch because it
+      *replaces* that transition — running it after would let a disguise reach
+      its second form first, and a Ditto that got to evolve once is a different
+      creature from the one the roll promised.
+
+      `dittoRevealed` is what keeps this from firing at every later threshold.
+    */
+    if (mon.dittoDisguise !== null && !mon.dittoRevealed) {
+      // No resolved line, no reveal. The progress waits rather than draining, so
+      // the reveal happens with its growth intact once the line arrives — the
+      // same rule the egg follows when it has met its threshold and has nothing
+      // to become. Inventing Ditto's rarity here would pick a graduation total
+      // out of the air and the companion would carry it for the rest of its
+      // life.
+      if (next.pendingReveal === null) break;
+
+      const reveal = next.pendingReveal;
+      events.push({
+        kind: "revealed",
+        disguisedAs: mon.plannedPath[mon.stageIndex] ?? mon.baseId,
+        speciesId: reveal.path[0] as number,
+      });
+      next = {
+        ...next,
+        active: {
+          ...mon,
+          baseId: reveal.path[0] as number,
+          plannedPath: reveal.path,
+          stageIndex: 0,
+          // The disguise's overflow is this individual's growth and follows it
+          // across, exactly as it does through an evolution.
+          usedAtStage: excess,
+          rarity: reveal.rarity,
+          dittoRevealed: true,
+        },
+        pendingReveal: null,
+      };
+      continue;
+    }
+
     if (mon.stageIndex < mon.plannedPath.length - 1) {
       events.push({
         kind: "evolved",
