@@ -3,8 +3,8 @@ import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
   Chip,
   ChipRow,
-  Dim,
   EggMark,
+  Fact,
   Row,
   ShinyChip,
   Sprite,
@@ -105,9 +105,9 @@ export function Hero({
                 threshold={view.nextThreshold}
                 valueText={`${formatTokens(view.progress)} of ${formatTokens(view.nextThreshold)} tokens incubated`}
               />
-              <Dim>
+              <Fact>
                 {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} tokens incubated
-              </Dim>
+              </Fact>
             </>
           ) : (
             <>
@@ -124,12 +124,12 @@ export function Hero({
                   view.nextThreshold,
                 )}
               />
-              <Dim>
+              <Fact>
                 Stage {active.stageIndex + 1} of {active.plannedPath.length}
-              </Dim>
-              <Dim>
+              </Fact>
+              <Fact>
                 {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} to the next stage
-              </Dim>
+              </Fact>
             </>
           )}
         </div>

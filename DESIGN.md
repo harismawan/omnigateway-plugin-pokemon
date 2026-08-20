@@ -427,6 +427,21 @@ borrowing `Row`'s zero, because it is the only row on the panel with a meter
 directly beneath it: flush against the growth track the qualifiers read as part
 of it, and a chip that wrapped to a second line touched it outright.
 
+**The two facts under the meter each take a line, and this was a real
+misreading rather than a cosmetic one.** `Dim` is a span, and JSX strips
+whitespace containing a newline, so two adjacent ones rendered with no separator
+at all: "Stage 1 of 2" and "76.9M / 250.0M to the next stage" came out as `Stage
+1 of 276.9M / 250.0M`, which reads as a companion sitting 26.9M past a threshold
+it should already have evolved through. An operator's first conclusion is that
+the growth meter is broken. `Fact` is `Dim` set `display: block` for exactly
+this pairing.
+
+Worth recording that **no test covers it**: happy-dom performs no layout, so
+`textContent` is identical whether the element is inline or block, and the only
+assertion that could tell them apart is one about `display` — a component
+internal, which the testing rules rule out for good reasons that still apply
+here. This is a class of bug this suite cannot catch.
+
 Rarity and shininess are set in letterspaced small caps and a glyph, never a
 hue. The console's rule is that colour means provider identity or state, and a
 rarity drawn as a colour would be the one decorative colour in the product — and

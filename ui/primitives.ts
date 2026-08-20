@@ -102,6 +102,22 @@ export const Dim = styled.span`
   color: var(--ink-dim);
 `;
 
+/**
+ * A dimmed fact that takes a line of its own.
+ *
+ * `Dim` is a span, which is right where it sits inside a sentence and wrong
+ * where two of them are stacked as separate facts. Adjacent inline elements with
+ * only a JSX newline between them render with **no separator at all** — JSX
+ * strips whitespace containing a newline — so "Stage 1 of 2" followed by "76.9M
+ * / 250.0M to the next stage" came out as `Stage 1 of 276.9M / 250.0M`. Which
+ * does not merely look cramped: it reads as a companion sitting 26.9M past a
+ * threshold it should already have evolved through, so the first thing it costs
+ * is trust in the growth meter.
+ */
+export const Fact = styled(Dim)`
+  display: block;
+`;
+
 export const Notice = styled.p`
   color: var(--warn);
   background: var(--warn-wash);
