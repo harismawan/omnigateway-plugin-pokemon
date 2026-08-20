@@ -18,7 +18,7 @@ import {
 } from "../src/balance.ts";
 import companion from "../src/server.ts";
 import { freshState, serialiseState } from "../src/state.ts";
-import { readCompanion, readDex } from "../src/store.ts";
+import { readCompanion, readDex, recordGraduation } from "../src/store.ts";
 import { createTestStorage, type TestStorage } from "./helpers/storage.ts";
 
 /**
@@ -228,6 +228,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
   expect(onRequest).not.toBeNull();
   expect(onLimit).not.toBeNull();
   expect(routes.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+    "GET /keys",
     "GET /keys/:id",
     "GET /sprite/:species",
     "POST /keys/:id/purchase",
@@ -873,4 +874,166 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
     speciesId: 20,
     rarity: "rare",
   });
+});
+
+// --- the roster and the names --------------------------------------------------
+
+test("the roster route lists each key that has a companion, with what it is showing", async () => {
+  // The route the panel opens on. Before it existed an operator had to already
+  // know a key id to see anything at all, and nothing in the console shows the
+  // ids of keys that have companions.
+  await boot({}, cachedSpecies());
+  clock = 1_700_000_100_000;
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0, rarity: "rare" }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  clock = 1_700_000_200_000;
+  onRequest?.(
+    completed({
+      requestId: "req_other",
+      apiKeyId: "key_other",
+      tokens: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }),
+  );
+
+  const route = routes.find((r) => r.path === "/keys");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const listed = await route.handler({ params: {}, query: {}, body: null });
+  expect(listed.status).toBeUndefined();
+  expect(listed.json).toEqual({
+    keys: [
+      // The later earner first, which is the order the roster is sorted in.
+      {
+        apiKeyId: "key_other",
+        speciesId: null,
+        name: null,
+        rarity: null,
+        isShiny: false,
+        tokensTotal: 7,
+        wallet: 7,
+        lastCreditAt: 1_700_000_200_000,
+        unreadable: false,
+      },
+      {
+        apiKeyId: KEY,
+        speciesId: 10,
+        name: "species-10",
+        rarity: "rare",
+        isShiny: false,
+        tokensTotal: 5_000,
+        wallet: 5_000,
+        lastCreditAt: 1_700_000_100_000,
+        unreadable: false,
+      },
+    ],
+  });
+});
+
+test("a key whose save cannot be read is listed as unreadable rather than dropped", async () => {
+  // The one key an operator most needs to find is the broken one. Hiding it
+  // from the only surface that lists companions is how it stays broken.
+  await boot();
+  spend(1_000);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
+
+  const route = routes.find((r) => r.path === "/keys");
+  const listed = await route?.handler({ params: {}, query: {}, body: null });
+  expect(listed?.json).toMatchObject({
+    keys: [{ apiKeyId: KEY, unreadable: true, speciesId: null, name: null }],
+  });
+});
+
+test("the roster is empty on an install where nothing has spent a token", async () => {
+  await boot();
+  const route = routes.find((r) => r.path === "/keys");
+  const listed = await route?.handler({ params: {}, query: {}, body: null });
+  expect(listed?.json).toEqual({ keys: [] });
+});
+
+test("the panel names the stage the companion is standing at, not its base", async () => {
+  await boot(
+    {},
+    cachedSpecies([
+      { id: 10, captureRate: 255, forms: 3, finalId: 12 },
+      { id: 11, captureRate: 255, forms: 3, finalId: 12 },
+    ]),
+  );
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: "species-11" });
+});
+
+test("a species the cache has never seen shows no name rather than a wrong one", async () => {
+  // The cold-cache case and the offline install are the same case here: the
+  // name is decoration, and the panel falls back to the species number.
+  await boot();
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+});
+
+test("an egg has no species to name", async () => {
+  await boot({}, cachedSpecies());
+  spend(100);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+});
+
+test("a dex entry carries the name of what it graduated into", async () => {
+  await boot({}, cachedSpecies([{ id: 12, captureRate: 255, forms: 1, finalId: 12 }]));
+  spend(1_000);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as { dex: Array<{ finalId: number; name: string | null }> };
+  expect(dex).toHaveLength(1);
+  expect(dex[0]).toMatchObject({ finalId: 12, name: "species-12" });
 });

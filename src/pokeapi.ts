@@ -139,8 +139,18 @@ function asFiniteNumber(value: unknown): number | null {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** Cached JSON, or null for absent, unreadable, or unparseable. All three mean "refetch". */
-async function readJson(deps: PokeApiDeps, path: string): Promise<unknown> {
+/**
+ * Cached JSON, or null for absent, unreadable, or unparseable. All three mean
+ * "refetch".
+ *
+ * Takes `files` and not the whole `PokeApiDeps`, which is what lets
+ * `cachedSpeciesName` promise it cannot reach the network. A `net` in this
+ * signature would make that promise a comment: the `catch` below swallows
+ * everything, so a fetch fallback added here would degrade to `null` silently
+ * rather than failing anywhere a test could see it. Narrowing the parameter
+ * moves the guarantee into the type, where adding one stops compiling.
+ */
+async function readJson(deps: Pick<PokeApiDeps, "files">, path: string): Promise<unknown> {
   try {
     const bytes = await deps.files.read(path);
     if (bytes === null) return null;
@@ -440,6 +450,41 @@ async function loadDetail(
  */
 export function speciesDetail(deps: PokeApiDeps, id: number): Promise<SpeciesDetail | null> {
   return loadDetail(deps, id, new Map());
+}
+
+/**
+ * What a species is called, from the cache and from nowhere else.
+ *
+ * `files` alone, and enforced by the type rather than asserted here: `readJson`
+ * takes `files` too, so no path out of this function reaches a `fetch`. The
+ * missing `net` is the whole contract. This is
+ * called once per rendered sprite, so a roster of twenty keys polling every
+ * fifteen seconds is eighty name lookups a minute; behind `speciesDetail` that
+ * would be eighty requests a minute against an unpaid public API for
+ * decoration, which is exactly the impoliteness `prefetchOnce` exists to avoid.
+ * Taking the narrower dependency makes that impossible rather than discouraged.
+ *
+ * A miss is ordinary and not an error: a fresh install has fetched nothing yet.
+ * The caller shows the species number and the name appears once the index has
+ * been built — which it will be, because `speciesIndex` caches every document it
+ * reads, so a hatched companion's species is on disk by definition.
+ *
+ * English or nothing. Falling back to another language would put a name on the
+ * panel that most readers of an English console cannot match to the sprite, and
+ * the species number at least reads the same everywhere.
+ */
+export async function cachedSpeciesName(
+  deps: Pick<PokeApiDeps, "files">,
+  id: number,
+): Promise<string | null> {
+  // The same gate as every other public function here, for the same reason: an
+  // id that has not been through it must not reach a path.
+  if (!isFetchableSpeciesId(id)) return null;
+  // `deps` straight through, with no `net` invented to satisfy a signature:
+  // `readJson` takes `files` alone, so there is nothing here that could fetch
+  // even if somebody later wanted it to.
+  const cached = parseCachedDetail(await readJson(deps, speciesPath(id)), id);
+  return cached?.names.en ?? null;
 }
 
 // --- the candidate index -----------------------------------------------------

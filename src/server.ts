@@ -15,7 +15,7 @@ import {
   rarityFromCaptureRate,
 } from "./balance.ts";
 import { decideGrant, windowKey } from "./grants.ts";
-import { speciesDetail, speciesIndex, spriteBytes } from "./pokeapi.ts";
+import { cachedSpeciesName, speciesDetail, speciesIndex, spriteBytes } from "./pokeapi.ts";
 import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
@@ -23,6 +23,7 @@ import {
   consume,
   creditTokens,
   lastGrantedAt,
+  listCompanions,
   MIGRATIONS,
   purchase,
   readCompanion,
@@ -105,6 +106,29 @@ export default definePlugin({
       const started = prefetchHatch(apiKeyId, state).finally(() => inFlight.delete(apiKeyId));
       inFlight.set(apiKeyId, started);
       return started;
+    };
+
+    /**
+     * Species names already on disk, held for the life of the process.
+     *
+     * **Only hits are remembered.** Caching a miss would be the obvious thing
+     * and the wrong one: a miss means the species index has not been built yet,
+     * which is a state that ends — the prefetch is building it right now — and a
+     * remembered `null` would keep the panel showing `#25` until the gateway
+     * restarted. A miss costs one absent-file read on the next poll; a
+     * remembered miss costs the feature.
+     *
+     * A name is an immutable fact about a species, so a hit never needs
+     * invalidating.
+     */
+    const names = new Map<number, string>();
+    const nameOf = async (speciesId: number | null): Promise<string | null> => {
+      if (speciesId === null || files === undefined) return null;
+      const known = names.get(speciesId);
+      if (known !== undefined) return known;
+      const found = await cachedSpeciesName({ files }, speciesId);
+      if (found !== null) names.set(speciesId, found);
+      return found;
     };
 
     /**
@@ -258,8 +282,53 @@ export default definePlugin({
     const routes: PluginRoute[] = [
       {
         method: "GET",
+        path: "/keys",
+        /**
+         * Every key that has a companion, for the panel to open on.
+         *
+         * The design said a plugin cannot enumerate API keys, and that is still
+         * true — this enumerates the plugin's **own saves**, which is a
+         * different set and the one the panel actually wants. A key with no row
+         * has never spent a token, so it has no companion to show; listing it
+         * would offer an operator a card that leads to a 404.
+         *
+         * Deliberately *not* settled. A roster is a list of front doors and an
+         * operator may have fifty; settling every save on every poll would turn
+         * opening the panel into fifty state-machine runs and fifty writes. The
+         * key's own route settles it on the way in, which is the moment the
+         * numbers are actually looked at.
+         */
+        handler: async () => {
+          const rows = listCompanions(storage);
+          const keys = await Promise.all(
+            rows.map(async (row) => {
+              const active = row.state?.active ?? null;
+              const speciesId =
+                active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
+              return {
+                apiKeyId: row.apiKeyId,
+                // Null for an egg and null for an unreadable save. The card
+                // draws an egg for the first and says so for the second, which
+                // is why `unreadable` is a field of its own rather than
+                // something the panel infers from a missing species.
+                speciesId,
+                name: await nameOf(speciesId),
+                rarity: active?.rarity ?? null,
+                isShiny: active?.isShiny ?? false,
+                tokensTotal: row.tokensTotal,
+                wallet: wallet(row),
+                lastCreditAt: row.lastCreditAt,
+                unreadable: row.state === null,
+              };
+            }),
+          );
+          return { json: { keys } };
+        },
+      },
+      {
+        method: "GET",
         path: "/keys/:id",
-        handler: (request) => {
+        handler: async (request) => {
           const apiKeyId = request.params.id ?? "";
           settleAndRecord(apiKeyId);
           const row = readCompanion(storage, apiKeyId);
@@ -270,6 +339,7 @@ export default definePlugin({
           if (row.state !== null) void prefetchOnce(apiKeyId, row.state).catch(() => {});
 
           const active = row.state?.active ?? null;
+          const dex = readDex(storage, apiKeyId);
           return {
             json: {
               // Null rather than a fresh companion, so "cannot be read" and "has
@@ -289,7 +359,24 @@ export default definePlugin({
                * fact the panel renders rather than one it guesses around.
                */
               lastCreditAt: row.lastCreditAt,
-              dex: readDex(storage, apiKeyId),
+              /**
+               * What this companion is called right now — the stage it is
+               * standing at, not the species it hatched as.
+               *
+               * Resolved here rather than in the browser because the name lives
+               * in the plugin's own cache directory, which the panel has no
+               * route to and no business having one to. Null is an ordinary
+               * answer: an egg has no species, and a cold cache has no name yet.
+               */
+              name: await nameOf(
+                active === null ? null : (active.plannedPath[active.stageIndex] ?? null),
+              ),
+              // The name of what each entry graduated into, added alongside the
+              // stored row rather than into it: the Dex table holds facts about
+              // a graduation, and a species' name is a fact about PokéAPI.
+              dex: await Promise.all(
+                dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
+              ),
               shop: shopCatalogue(),
               /**
                * What the current stage costs, so the panel can draw a meter that

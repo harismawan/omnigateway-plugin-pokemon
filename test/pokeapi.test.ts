@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 import type { PluginFetch, PluginFiles } from "@omnigateway/plugin-api";
 import { ANIMATED_SPECIES_MAX } from "../src/balance.ts";
-import { type PokeApiDeps, speciesDetail, speciesIndex, spriteBytes } from "../src/pokeapi.ts";
+import {
+  cachedSpeciesName,
+  type PokeApiDeps,
+  speciesDetail,
+  speciesIndex,
+  spriteBytes,
+} from "../src/pokeapi.ts";
 
 /**
  * Both capabilities are stubs, and that is the point of taking them as
@@ -504,4 +510,56 @@ test("the index reports the line length as forms, deduplicating shared chains", 
   expect(shared).toEqual([{ id: 1, captureRate: 45, forms: 3, finalId: 3 }]);
   // Bulbasaur, Ivysaur and Venusaur share one chain, which is fetched once.
   expect(chainFetches.filter((url) => url.endsWith("/evolution-chain/1")).length).toBe(1);
+});
+
+// --- names from the cache alone ----------------------------------------------
+
+test("a cached species yields its English name without any capability to fetch", async () => {
+  // Takes `files` and nothing else, which is the guarantee rather than a
+  // convenience: the panel renders one name per roster card per poll, and a
+  // helper that *could* fetch would turn a repainting panel into a crawl of an
+  // unpaid public API.
+  const { files } = memoryFiles();
+  const { net } = stubNet(wholeApi);
+  await speciesDetail(deps(net, files), 25);
+
+  expect(await cachedSpeciesName({ files }, 25)).toBe("species-25");
+});
+
+test("a species that has never been cached has no name yet, rather than an error", () => {
+  // The cold-cache case, and an ordinary one: a fresh install has fetched
+  // nothing. The panel falls back to the number and fills in later.
+  const { files } = memoryFiles();
+  expect(cachedSpeciesName({ files }, 25)).resolves.toBeNull();
+});
+
+test("an id outside the animated range never becomes a cache path", async () => {
+  const reads: string[] = [];
+  const files: PluginFiles = {
+    read: async (path) => {
+      reads.push(path);
+      return null;
+    },
+    write: async () => {},
+    exists: async () => false,
+  };
+
+  expect(await cachedSpeciesName({ files }, ANIMATED_SPECIES_MAX + 1)).toBeNull();
+  expect(await cachedSpeciesName({ files }, 2.5)).toBeNull();
+  expect(reads).toEqual([]);
+});
+
+test("a species cached without an English name has no name to show", async () => {
+  // Null rather than the first name in the record. A Japanese name on an
+  // English console is a worse answer than the species number, which at least
+  // reads the same in every language.
+  const { files } = memoryFiles();
+  const { net } = stubNet((url) =>
+    /\/pokemon-species\/\d+$/.test(url)
+      ? json(speciesDoc(25, { names: [{ language: { name: "ja" }, name: "ピカチュウ" }] }))
+      : wholeApi(url),
+  );
+  await speciesDetail(deps(net, files), 25);
+
+  expect(await cachedSpeciesName({ files }, 25)).toBeNull();
 });
