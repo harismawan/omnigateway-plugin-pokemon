@@ -58,6 +58,19 @@ if (manifest.version !== source.version) {
   );
 }
 
+// And when a tag drove this build, it is the third name for the same release.
+// Nothing else compares them: the workflow triggers on `v*` but publishes
+// whatever `package.json` says, so tagging `v1.0.0` on a tree reading `1.1.0`
+// would publish 1.1.0 under a release announced as 1.0.0 — silently, and
+// irreversibly once npm has it.
+const tag = process.env.GITHUB_REF_NAME;
+if (tag?.startsWith("v") && tag.slice(1) !== source.version) {
+  throw new Error(
+    `tag ${tag} does not name version ${source.version}; ` +
+      "bump package.json and omni-plugin.json, or move the tag",
+  );
+}
+
 await mkdir(out, { recursive: true });
 
 await writeFile(
