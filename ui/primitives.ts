@@ -139,6 +139,14 @@ export const Dim = styled.span`
 export const Fact = styled(Dim)`
   display: block;
   margin-top: ${SPACE.sm};
+
+  /* Two facts about one meter are closer to each other than either is to the
+     meter, because that is what they are: "stage 1 of 2" and the tokens under
+     it are one reading, not two. Spaced evenly they read as a list of unrelated
+     numbers that happen to be stacked. */
+  & + & {
+    margin-top: ${SPACE.xs};
+  }
 `;
 
 /**
