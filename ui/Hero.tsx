@@ -2,6 +2,7 @@ import { type Activity, formatTokens, speciesLabel, spriteAlt, spriteUrl } from 
 import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
   Chip,
+  ChipRow,
   Dim,
   EggMark,
   Row,
@@ -58,7 +59,7 @@ export function Hero({
         <div>
           <h3>{speciesId === null ? "Egg" : speciesLabel(view.name, speciesId)}</h3>
 
-          <Row>
+          <ChipRow>
             {active === null ? (
               state.eggTier === null ? null : (
                 <Chip>{state.eggTier}+ guaranteed</Chip>
@@ -92,7 +93,7 @@ export function Hero({
             <Chip aria-label={`Activity: ${activity}`} role="status">
               {activity}
             </Chip>
-          </Row>
+          </ChipRow>
 
           {active === null ? (
             <>

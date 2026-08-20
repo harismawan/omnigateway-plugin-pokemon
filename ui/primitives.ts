@@ -27,6 +27,25 @@ import styled from "styled-components";
 export const SPACE = { xs: "4px", sm: "8px", md: "12px", lg: "20px", xl: "32px" } as const;
 
 /**
+ * How big a companion is drawn — and why this number and not a rounder one.
+ *
+ * The animated Gen-V set the plugin fetches is a 96px canvas, and it is pixel
+ * art rendered with `image-rendering: pixelated`, so the scale factor has to be
+ * a whole number. At 128px — the obvious "a bit larger" — 96 goes into it 1.333
+ * times, and nearest-neighbour turns that into alternating one- and two-pixel
+ * source pixels: the sprite is bigger and visibly lumpier, in a way that reads
+ * as a broken image rather than as a design decision. 192px is 2× exactly.
+ *
+ * The sprite, the egg and the unreadable mark all take it, because they occupy
+ * the same slot on the same two surfaces: a roster whose cards were one size for
+ * an egg and another for a Pokémon would reflow every time one hatched. The
+ * marks are `border-box` so their 2px border is inside that figure rather than
+ * four pixels on top of it, which is what makes "the same size" true rather than
+ * approximately true.
+ */
+const COMPANION_SIZE = "192px";
+
+/**
  * The data face.
  *
  * A system monospace stack rather than a webfont: a plugin bundle that shipped
@@ -112,6 +131,19 @@ export const Chip = styled.span`
   white-space: nowrap;
 `;
 
+/**
+ * The band of chips under the companion's name.
+ *
+ * A `Row` of its own rather than the bare one, because this is the only row on
+ * the panel with a meter directly beneath it. `Row` carries no vertical margin —
+ * correctly, since most of its uses are a line of controls — so the qualifiers
+ * sat flush against the growth track and read as part of it, and a chip that
+ * wrapped to a second line touched it outright.
+ */
+export const ChipRow = styled(Row)`
+  margin: ${SPACE.sm} 0 ${SPACE.md};
+`;
+
 /** The one chip that is emphasised, because a shiny is a 1-in-64 fact. */
 export const ShinyChip = styled(Chip)`
   border-color: var(--rule-strong);
@@ -119,19 +151,27 @@ export const ShinyChip = styled(Chip)`
   font-weight: 600;
 `;
 
+/**
+ * The companion itself, on nothing.
+ *
+ * No fill and no frame, deliberately. These are transparent GIFs, so a sunk
+ * background and a rule were a box drawn *behind* the Pokémon rather than around
+ * it — in the dark theme that reads as a black plate the sprite is sitting on,
+ * which is the one place on the panel where a surface appeared that no data
+ * asked for. The egg and the unreadable mark keep theirs because they are drawn
+ * shapes: the box *is* the graphic there, where here it only obscured one.
+ */
 export const Sprite = styled.img`
-  width: 96px;
-  height: 96px;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   image-rendering: pixelated;
-  background: var(--panel-sunk);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
 `;
 
 /** An egg, drawn rather than fetched — there is no sprite for one. */
 export const EggMark = styled.div`
-  width: 96px;
-  height: 96px;
+  box-sizing: border-box;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   border-radius: 50% 50% 45% 45%;
   background: var(--panel-sunk);
   border: 2px solid var(--rule-strong);
@@ -146,8 +186,9 @@ export const EggMark = styled.div`
  * claim about health.
  */
 export const BrokenMark = styled.div`
-  width: 96px;
-  height: 96px;
+  box-sizing: border-box;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   border-radius: 6px;
   background: var(--warn-wash);
   border: 2px dashed var(--warn);
@@ -306,9 +347,17 @@ export const Caption = styled.figcaption`
   overflow-wrap: anywhere;
 `;
 
+/**
+ * The roster's track minimum is derived from `COMPANION_SIZE`, not chosen.
+ *
+ * 192px of companion, plus `KeyCard`'s 12px padding and 1px border on each side,
+ * is 218 — so a 220px floor is the narrowest track that cannot clip a sprite.
+ * The two numbers have to move together, and the previous 168px was sized
+ * against a 96px companion that no longer exists.
+ */
 export const RosterGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: ${SPACE.md};
 `;
 

@@ -138,6 +138,91 @@ function cachedSpecies(species: readonly CachedSpecies[] = [COMMON_SPECIES]): Ca
 }
 
 /**
+ * A cold cache with the network reachable, which is exactly what a restore
+ * leaves behind: `data/` is excluded from database snapshots, so every species
+ * document a hatched companion's name came from is gone while PokéAPI is still
+ * there. `calls` is asserted rather than ignored — the whole risk in warming a
+ * name is that it becomes a crawl.
+ */
+function coldCacheOnline(
+  options: {
+    /** Species PokéAPI answers 404 for, which is a permanent failure and not an outage. */
+    missing?: readonly number[];
+    /** Which evolution chain a species belongs to. Its own, unless a test shares one. */
+    chainOf?: (id: number) => number;
+  } = {},
+): Capabilities & { calls: string[] } {
+  const store = new Map<string, Uint8Array>();
+  const calls: string[] = [];
+  const missing = new Set(options.missing ?? []);
+  const chainOf = options.chainOf ?? ((id: number) => id);
+
+  return {
+    calls,
+    files: {
+      read: async (path) => store.get(path) ?? null,
+      write: async (path, data) => {
+        store.set(path, data);
+      },
+      exists: async (path) => store.has(path),
+    },
+    net: async (url) => {
+      calls.push(url);
+      const species = /\/pokemon-species\/(\d+)$/.exec(url);
+      if (species !== null) {
+        const id = Number(species[1]);
+        if (missing.has(id)) return new Response("not found", { status: 404 });
+        return new Response(
+          JSON.stringify({
+            capture_rate: 255,
+            is_legendary: false,
+            is_mythical: false,
+            names: [{ language: { name: "en" }, name: `species-${id}` }],
+            evolution_chain: {
+              url: `https://pokeapi.co/api/v2/evolution-chain/${chainOf(id)}/`,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const chain = /\/evolution-chain\/(\d+)$/.exec(url);
+      if (chain !== null) {
+        const root = Number(chain[1]);
+        // Every species this chain claims, so a shared chain resolves a line for
+        // each of its members rather than only for the one that asked.
+        const members = [root, root + 1].map((id) => ({
+          species: { url: `https://pokeapi.co/api/v2/pokemon-species/${id}/` },
+          evolves_to: [],
+        }));
+        return new Response(
+          JSON.stringify({
+            chain: { ...members[0], evolves_to: [members[1]] },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    },
+  };
+}
+
+/**
+ * Polls the key route until it carries a name, the way the panel does.
+ *
+ * Bounded and throwing, for the same reason as `prefetched`: a warm that never
+ * lands has to fail as a warm that never landed.
+ */
+async function namedBy(route: PluginRoute, apiKeyId: string): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: apiKeyId }, query: {}, body: null });
+    const { name } = found.json as { name: string | null };
+    if (name !== null) return name;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`no name ever landed for ${apiKeyId}`);
+}
+
+/**
  * Waits for the panel's prefetch to land a roll.
  *
  * The route fires it unawaited on purpose — a prefetch is an optimisation for
@@ -176,7 +261,10 @@ type Capabilities = { net: PluginFetch; files: PluginFiles };
 
 async function boot(
   config: Record<string, unknown> = {},
-  capabilities: Capabilities | null = null,
+  // Partial, because a capability the manifest declares can still be absent and
+  // the plugin has to degrade rather than throw — and the two halves degrade
+  // differently, so a test needs to be able to withhold exactly one.
+  capabilities: Partial<Capabilities> | null = null,
 ): Promise<void> {
   storage.migrate(companion.migrations ?? []);
 
@@ -999,6 +1087,350 @@ test("a species the cache has never seen shows no name rather than a wrong one",
   const route = routes.find((r) => r.path === "/keys/:id");
   const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
   expect(found?.json).toMatchObject({ name: null });
+});
+
+test("a hatched companion whose species cache was wiped gets its name back", async () => {
+  // The bug this closes: `prefetchHatch` is the only thing that ever filled the
+  // species cache, and it returns early once a companion is active. So a save
+  // that hatched before a restore showed `#11` on every poll for the life of the
+  // install — the cache could not refill, because the one thing that filled it
+  // only ran for eggs.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  // The first poll still answers with the number: warming is best effort and
+  // unawaited, so the panel renders now and the name arrives later.
+  const first = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(first.json).toMatchObject({ name: null });
+
+  expect(await namedBy(route, KEY)).toBe("species-11");
+});
+
+test("a name that has already been warmed is never fetched twice", async () => {
+  // The reason `cachedSpeciesName` has no `net` in the first place. A panel
+  // polling every fifteen seconds must not turn into a request per poll, so a
+  // species is asked for once per process and answered from disk after that.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  expect(await namedBy(route, KEY)).toBe("species-11");
+  const settled = online.calls.length;
+
+  for (let poll = 0; poll < 5; poll++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    expect(found.json).toMatchObject({ name: "species-11" });
+  }
+  expect(online.calls.length).toBe(settled);
+});
+
+test("a dex entry the cache has never seen is warmed too", async () => {
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  // An *active* companion, and that is the fixture decision the test turns on:
+  // an egg would set `prefetchHatch` building the whole species index, which
+  // caches every document there is and would name the Dex entry without any of
+  // the warming this test is about.
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 20,
+      finalId: 22,
+      chainOrder: [20, 21, 22],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const { dex } = found.json as { dex: Array<{ name: string | null }> };
+    if (dex[0]?.name === "species-22") return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the dex entry never got its name");
+});
+
+test("a species PokéAPI has forgotten is asked for once, not once per poll", async () => {
+  // The bug the first version of the warm-up shipped. `fetchJson` collapses a
+  // 404 and an outage into the same null, so "it failed, the network must be
+  // down" is an assumption that never expires — and a species PokéAPI has no
+  // document for was re-fetched on every poll, forever, for as long as any
+  // operator left the panel open.
+  const online = coldCacheOnline({ missing: [11] });
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let poll = 0; poll < 10; poll++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    // Still honest about what it does not know, on every one of them.
+    expect(found.json).toMatchObject({ name: null });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  // `clock` never moves in this test, so the backoff never expires and one
+  // attempt is the whole budget. A clock that advanced past an hour would
+  // legitimately see a second.
+  expect(online.calls.filter((url) => url.endsWith("/pokemon-species/11"))).toHaveLength(1);
+});
+
+test("a forgotten species does not starve the entries behind it", async () => {
+  // The other half of the same bug, and the worse half: the warm budget is
+  // eight per poll and `readDex` orders by `caught_at`, so eight permanently
+  // unnameable rows sat at the front of the queue and every entry behind them
+  // was unreachable for the life of the process.
+  const dead = [30, 31, 32, 33, 34, 35, 36, 37];
+  const online = coldCacheOnline({ missing: dead });
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  // The eight dead rows are the newest, so they are what a poll reaches first.
+  dead.forEach((finalId, index) => {
+    recordGraduation(
+      storage,
+      KEY,
+      {
+        baseId: finalId,
+        finalId,
+        chainOrder: [finalId],
+        rarity: "common",
+        isShiny: false,
+        nature: "sassy",
+        caughtAt: 1_700_000_500_000 + index,
+      },
+      `dex_dead_${finalId}`,
+    );
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 22,
+      finalId: 22,
+      chainOrder: [22],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_live",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const { dex } = found.json as { dex: Array<{ finalId: number; name: string | null }> };
+    if (dex.find((entry) => entry.finalId === 22)?.name === "species-22") return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the reachable entry was starved by the unreachable ones");
+});
+
+test("one poll's warms share a chain rather than fetching it once each", async () => {
+  // A Dex holds one row per graduation, so two rows commonly sit on one
+  // evolution line. `speciesDetail` builds a fresh chain cache per call, which
+  // is right for a lone lookup and would have fetched — and rewritten — the same
+  // chain document once per species in a batch.
+  const online = coldCacheOnline({ chainOf: () => 40 });
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 40, plannedPath: [40, 41], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 40,
+      finalId: 41,
+      chainOrder: [40, 41],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  expect(await namedBy(route, KEY)).toBe("species-40");
+  expect(online.calls.filter((url) => url.endsWith("/evolution-chain/40"))).toHaveLength(1);
+});
+
+test("the roster never warms a name, however many keys it lists", async () => {
+  // A regression guard rather than a check on anything this route does: the
+  // roster has never warmed and the point is that it stays that way. It is a
+  // list of front doors and an operator may have fifty of them; the key's own
+  // route warms what it is showing, because that is the one companion being
+  // looked at.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+  // A second key, so "however many" is a claim the fixture actually makes.
+  onRequest?.(
+    completed({
+      requestId: "req_other",
+      apiKeyId: "key_2",
+      tokens: { input: 3_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }),
+  );
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify({
+      consumedTotal: 0,
+      active: activeMon({ baseId: 20, plannedPath: [20, 21], stageIndex: 0 }),
+      eggUsage: 0,
+      eggTier: null,
+      pendingHatch: null,
+      inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    }),
+    "key_2",
+  ]);
+
+  const route = routes.find((r) => r.path === "/keys");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: {}, query: {}, body: null });
+  const { keys } = found.json as { keys: Array<{ apiKeyId: string; name: string | null }> };
+  expect(keys).toHaveLength(2);
+  expect(keys.every((key) => key.name === null)).toBe(true);
+  expect(online.calls).toEqual([]);
+});
+
+test("an install with no outbound access warms nothing and shows the number", async () => {
+  // `net` absent is a supported configuration, not a broken one. There is no
+  // stub to observe in this direction — that is the point of the capability
+  // being missing — so what this pins is that the route still answers, and
+  // answers honestly, rather than throwing on a `net` that is not there.
+  const online = coldCacheOnline();
+  await boot({}, { files: online.files });
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+});
+
+test("an install with no files capability never reaches the network to warm", async () => {
+  // The observable half of the same guard, and the one that could actually go
+  // wrong: `warmNames` checks both capabilities, and dropping the `files` half
+  // would fetch a species document there is nowhere to cache — a request made
+  // once per poll, forever, whose result is discarded every time.
+  const reached: string[] = [];
+  await boot(
+    {},
+    {
+      net: async (url) => {
+        reached.push(url);
+        throw new Error(`warmed ${url} with nowhere to cache it`);
+      },
+    },
+  );
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+  // A tick, so a warm fired unawaited would have reached the stub by now.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(reached).toEqual([]);
 });
 
 test("an egg has no species to name", async () => {

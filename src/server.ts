@@ -15,7 +15,13 @@ import {
   rarityFromCaptureRate,
 } from "./balance.ts";
 import { decideGrant, windowKey } from "./grants.ts";
-import { cachedSpeciesName, speciesDetail, speciesIndex, spriteBytes } from "./pokeapi.ts";
+import {
+  cachedSpeciesName,
+  speciesDetail,
+  speciesDetails,
+  speciesIndex,
+  spriteBytes,
+} from "./pokeapi.ts";
 import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
@@ -44,6 +50,36 @@ import {
  * de-evolves anything.
  */
 const MAX_MULTIPLIER = 1_000;
+
+/**
+ * How many unknown species one poll of the key route may go and look up.
+ *
+ * A Dex holds one row per graduation, so an install that has been running for
+ * months can present a hundred names at once — and warming them unbounded would
+ * be the burst `INDEX_FETCH_CONCURRENCY` exists to avoid, fired from a request
+ * path rather than from a background prefetch. Eight per poll chews through a
+ * large Dex over a few minutes of an open panel, which is the right pace for
+ * something nobody is waiting on.
+ */
+const WARM_PER_POLL = 8;
+
+/**
+ * How long a species that could not be named is left alone, and the ceiling
+ * that backoff climbs to.
+ *
+ * Both extremes here are wrong, and the first version of this shipped one of
+ * them. Retrying on the next poll turns a species PokéAPI answers 404 for into
+ * four requests a minute for as long as any panel is open — `fetchJson` cannot
+ * tell a permanent 404 from an outage, so "it failed, the network must be down"
+ * is an assumption that never expires. Never retrying loses a name to one bad
+ * afternoon, which is the failure this whole warm-up exists to undo.
+ *
+ * Doubling from a minute to an hour costs a handful of attempts to establish
+ * that something is permanently missing, and still recovers on its own from an
+ * outage of any length.
+ */
+const WARM_BACKOFF_MS = 60_000;
+const WARM_BACKOFF_MAX_MS = 60 * 60_000;
 
 function multiplierFrom(config: Readonly<Record<string, unknown>>): number {
   const raw = config.multiplier;
@@ -129,6 +165,98 @@ export default definePlugin({
       const found = await cachedSpeciesName({ files }, speciesId);
       if (found !== null) names.set(speciesId, found);
       return found;
+    };
+
+    /**
+     * Species being fetched right now, so a poll that lands while an earlier
+     * one is still in flight does not ask for the same documents again.
+     *
+     * Membership only — what to do about a species once its request *finishes*
+     * is `cold`'s question, and conflating the two is what made the first
+     * version retry a permanent 404 forever. This empties on settle by design.
+     */
+    const warming = new Set<number>();
+
+    /**
+     * Species that could not be named, and the instant it is worth asking again.
+     *
+     * The counterpart to `names` remembering only hits, and the two are not in
+     * conflict: a hit is an immutable fact and is kept forever, a miss is a
+     * guess about the world and is kept only as long as the guess is cheap to
+     * hold. Without this the only dedup was `warming`, which empties the moment
+     * a request settles — so a species that fails *deterministically* was asked
+     * for again on the very next poll, and again, forever.
+     *
+     * `failures` is kept rather than just the deadline because the backoff
+     * doubles, and a counter that reset on every attempt would never leave the
+     * first rung.
+     */
+    const cold = new Map<number, { until: number; failures: number }>();
+
+    /**
+     * Fetches the species documents behind a set of missing names, in the
+     * background, at a bounded rate, and never in a tight loop.
+     *
+     * This is the counterpart to `cachedSpeciesName` having no `net`, not a hole
+     * in it. That function stays cache-only and stays cheap, because it is
+     * called once per rendered sprite on every poll; this runs from the one
+     * route that is showing a single companion. The roster deliberately does not
+     * call it — see `GET /keys`.
+     *
+     * Needed because `prefetchHatch`, which is what fills the species cache,
+     * returns early once a companion is active. A save that hatched before its
+     * cache was lost — `data/` is excluded from database snapshots, so every
+     * restore does exactly that — could never refill it, and showed `#11` for
+     * the rest of the install's life.
+     */
+    const warmNames = (ids: readonly number[]): void => {
+      if (net === undefined || files === undefined) return;
+      const now = ctx.now();
+
+      const batch: number[] = [];
+      for (const id of ids) {
+        if (batch.length >= WARM_PER_POLL) break;
+        // Belt and braces at this call site, which only ever passes ids `nameOf`
+        // has just missed on — and load-bearing for any other, which is the
+        // point of a function that takes a list of ids rather than reading one.
+        if (names.has(id) || warming.has(id)) continue;
+        const chilled = cold.get(id);
+        // Skipped without consuming a slot, so eight species PokéAPI has
+        // forgotten cannot starve the ninth. `readDex` orders by `caught_at`,
+        // so without this the same eight were retried on every poll and every
+        // entry behind them was unreachable for the life of the process.
+        if (chilled !== undefined && now < chilled.until) continue;
+        batch.push(id);
+        // Written before the next iteration, so a Dex holding one species twice
+        // still produces one request.
+        warming.add(id);
+      }
+      if (batch.length === 0) return;
+
+      // One call rather than one per id, so a poll's warms share chain
+      // resolution instead of fetching one evolution line eight times.
+      void speciesDetails({ net, files }, batch)
+        .then((details) => {
+          batch.forEach((id, index) => {
+            // "Did this produce a name", not "did this produce a document". A
+            // cached species with no English entry parses perfectly and still
+            // leaves the panel showing a number, and retrying it every poll
+            // would burn a slot forever for a document already on disk.
+            if (details[index]?.names.en !== undefined) {
+              cold.delete(id);
+              return;
+            }
+            const failures = (cold.get(id)?.failures ?? 0) + 1;
+            const wait = Math.min(WARM_BACKOFF_MS * 2 ** (failures - 1), WARM_BACKOFF_MAX_MS);
+            cold.set(id, { until: now + wait, failures });
+          });
+        })
+        // `speciesDetails` answers `null` per id rather than throwing; this is
+        // for the case it cannot cover, a capability that rejects outright.
+        .catch(() => {})
+        .finally(() => {
+          for (const id of batch) warming.delete(id);
+        });
     };
 
     /**
@@ -340,6 +468,25 @@ export default definePlugin({
 
           const active = row.state?.active ?? null;
           const dex = readDex(storage, apiKeyId);
+
+          const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
+          const stageName = await nameOf(stageId);
+          // The name of what each entry graduated into, added alongside the
+          // stored row rather than into it: the Dex table holds facts about a
+          // graduation, and a species' name is a fact about PokéAPI.
+          const named = await Promise.all(
+            dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
+          );
+
+          // Best effort and deliberately not awaited, like the prefetch above.
+          // The companion first, so the heading fills in before the trophy case:
+          // a poll's warming budget is small, and the name an operator is
+          // looking at is worth more of it than one in a grid of sprites.
+          warmNames([
+            ...(stageId !== null && stageName === null ? [stageId] : []),
+            ...named.filter((entry) => entry.name === null).map((entry) => entry.finalId),
+          ]);
+
           return {
             json: {
               // Null rather than a fresh companion, so "cannot be read" and "has
@@ -366,17 +513,11 @@ export default definePlugin({
                * Resolved here rather than in the browser because the name lives
                * in the plugin's own cache directory, which the panel has no
                * route to and no business having one to. Null is an ordinary
-               * answer: an egg has no species, and a cold cache has no name yet.
+               * answer: an egg has no species, a cold cache has no name yet, and
+               * `warmNames` above has just gone to fetch the second case.
                */
-              name: await nameOf(
-                active === null ? null : (active.plannedPath[active.stageIndex] ?? null),
-              ),
-              // The name of what each entry graduated into, added alongside the
-              // stored row rather than into it: the Dex table holds facts about
-              // a graduation, and a species' name is a fact about PokéAPI.
-              dex: await Promise.all(
-                dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
-              ),
+              name: stageName,
+              dex: named,
               shop: shopCatalogue(),
               /**
                * What the current stage costs, so the panel can draw a meter that

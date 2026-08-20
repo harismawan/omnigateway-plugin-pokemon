@@ -234,6 +234,42 @@ Assets are fetched once and cached indefinitely — the sprite for #25 does not
 change. The species index is prefetched in the background after install so a
 roll needs no network at the moment it happens.
 
+**Amendment: the key route warms the names it is about to show.** The prefetch
+above is the only thing that ever filled the species cache, and it returns early
+once a companion is active — it exists to pre-roll the *next* hatch. So a save
+that hatched before its cache was lost could never refill it, and since `data/`
+is excluded from database snapshots, every restore produces exactly that: a
+hatched companion whose panel read `#11` on every poll for the rest of the
+install's life, with nothing able to fix it short of buying a fresh egg.
+
+`GET /keys/:id` now fetches the species documents behind the names it could not
+resolve — the active stage first, then unnamed Dex entries — in the background,
+capped at eight per poll, deduplicated against what is already in flight, and
+skipped entirely without both `net` and `files`. The bound matters: a
+long-running install's Dex has a row per graduation, and warming those unbounded
+would be a burst fired from a request path. One batch resolves through a single
+shared chain cache, because a Dex commonly holds several rows from one evolution
+line and `speciesDetail` builds its cache per call.
+
+**A failed warm is remembered, with backoff, and that is a deliberate departure
+from how `nameOf` treats a miss.** The first version of this reasoned that a
+failure means the network is down and so is a state that ends — the same
+argument that makes `names` remember only hits. That argument is false here:
+`fetchJson` collapses a 404 and an outage into one `null`, so a species PokéAPI
+genuinely has no document for was re-fetched on every poll, at four a minute,
+for as long as any operator left the panel open. Worse, since the budget is
+eight and `readDex` orders by `caught_at`, eight such rows at the front of the
+queue starved every entry behind them for the life of the process — the same
+permanent-`#11` failure this feature exists to fix, arriving by a different
+route. Failures now back off from a minute to an hour, which costs a handful of
+attempts to establish that something is missing and still recovers on its own
+from an outage of any length. What counts as failure is "did not yield a name",
+not "did not yield a document": a cached species with no English entry parses
+perfectly and would otherwise hold a slot forever.
+
+`cachedSpeciesName` is unchanged and stays `files`-only — see the UI section for
+why that signature is the guarantee. The roster does not warm at all.
+
 **Hatching must work offline.** PokeTokenBar pre-rolls the next species into
 `pendingHatchId` while the egg is still incubating, so the hatch itself is a
 local state transition. That ports, and it is what makes the game survive a
@@ -358,7 +394,9 @@ contacts `pokeapi.co` or `raw.githubusercontent.com`. **Species names are
 resolved server-side and cache-only** — `cachedSpeciesName` takes `files` and
 not `net`, so a roster of twenty keys repainting on a poll cannot become twenty
 requests against an unpaid public API for decoration. A cold cache shows `#25`
-and fills in on a later poll.
+and fills in on a later poll — filled by the key route's bounded warm-up, which
+is a separate call and not a fetch smuggled into the name lookup. See the
+amendment under *Species data and sprites*.
 
 The panel's one non-obvious element is the **growth track**: the companion's
 `plannedPath` drawn as one segment per stage, filled behind the current stage,
@@ -367,6 +405,27 @@ to the next evolution"; the track answers "how far through the line", which is
 the question somebody watching a companion grow actually has. An egg gets one
 segment, because its line is not rolled until it hatches and drawing three empty
 ones would be inventing a shape the save does not have.
+
+**Amendment: the sprite has no plate.** It was drawn on `--panel-sunk` inside a
+`--rule` border, which is a box *behind* a transparent GIF rather than around
+it — in the dark theme that reads as the Pokémon sitting on a black tile, and it
+was the one surface on the panel that no data had asked for. The sprite is now
+transparent and unframed and takes the card's own background. The egg and the
+unreadable mark keep their fill and border, because there the box *is* the
+graphic; all three share one size constant, and the marks are `border-box`, so a
+card does not reflow the moment an egg hatches.
+
+That constant is **192px and not a rounder number**. The animated Gen-V set is a
+96px canvas drawn with `image-rendering: pixelated`, so the scale has to be a
+whole number — at 128px, nearest-neighbour renders alternating one- and
+two-pixel source pixels and the sprite reads as a broken image rather than a
+larger one. `RosterGrid`'s track minimum is derived from it rather than chosen:
+192 plus the card's padding and border is 218, so the floor is 220px.
+
+The chip band under the name carries its own vertical margin rather than
+borrowing `Row`'s zero, because it is the only row on the panel with a meter
+directly beneath it: flush against the growth track the qualifiers read as part
+of it, and a chip that wrapped to a second line touched it outright.
 
 Rarity and shininess are set in letterspaced small caps and a glyph, never a
 hue. The console's rule is that colour means provider identity or state, and a
@@ -409,6 +468,18 @@ boundary and the unreadable-save state.
 
 ## Out of scope
 
+- **Showing a key's console label instead of its id.** Wanted, and not reachable
+  from this repository. The host calls it `api_keys.label`, and three separate
+  host decisions stand between it and a plugin: `CAPABILITIES` is a closed enum
+  with nothing for reading keys, `CORE_TABLES` refuses plugin SQL that names
+  `api_keys`, and `RequestCompleted` deliberately carries `apiKeyId` and no
+  label — widening that payload is documented there as a security change on the
+  same terms as widening `LogFields`. The panel calling the console's own
+  `/api/keys` is refused by the SDK and by this plugin's own boundary rule. So
+  this needs a host amendment, adding `label` to the event payload and this
+  plugin storing it beside `tokens_total` on credit. Until then the card shows
+  the id, which is at least the string an operator can match against the
+  console's key list.
 - Save transfer between PokeTokenBar and this plugin. The state shapes are
   deliberately close enough to make it possible later; it is not a goal now.
 - A shared install-wide Dex. Per-key was chosen; a union view can be added
