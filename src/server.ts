@@ -363,6 +363,22 @@ export default definePlugin({
       if (candidates.length === 0) return;
 
       const collected = new Set(readDex(storage, apiKeyId).map((entry) => entry.finalId));
+      /**
+       * Whether a lure has anything left to find.
+       *
+       * A lure filters to uncollected finals, so on a complete Dex it would empty
+       * the pool and the roll would answer null — indistinguishable from "the
+       * candidate index has not arrived", and the egg would simply never hatch.
+       *
+       * Checked here rather than refused when the lure is used, because that is
+       * the only place the candidate list exists: the Dex says what has been
+       * collected but nothing on the save says what *could* be. An unusable lure
+       * therefore stays armed rather than being spent — it is not refused, it
+       * waits, and the next roll that has something new to offer uses it.
+       */
+      const lureUsable =
+        state.lure && candidates.some((candidate) => !collected.has(candidate.finalId));
+
       const rolled = roll({
         candidates,
         // Seeded from facts rather than from a clock, so a retried prefetch
@@ -371,6 +387,13 @@ export default definePlugin({
         guarantee: state.eggTier,
         hasShinyCharm: hasShinyCharm(state),
         collectedFinals: collected,
+        // The three bought modifiers. None of them touch the seed — they change
+        // which candidates are on the table, not which way the dice fall — so a
+        // retried prefetch with the same modifiers still produces the same
+        // Pokémon.
+        onlyUncollected: lureUsable,
+        preferLongLines: state.incense,
+        excludeFinal: state.repel,
       });
       if (rolled === null) return;
 
@@ -408,6 +431,17 @@ export default definePlugin({
             nature: rolled.nature,
             ditto: rolled.ditto,
           },
+          // Spent in the same write that stores the roll they shaped, so one
+          // purchase buys one hatch. Cleared here rather than at hatch time
+          // because the roll is the moment they did their work — leaving them
+          // set until the egg opens would let a second prefetch, after a fresh
+          // egg replaced this one, reuse a modifier that has already been used.
+          //
+          // A lure that had nothing to find is the exception: it did no work, so
+          // it is not spent.
+          lure: state.lure && !lureUsable,
+          incense: false,
+          repel: null,
         }),
         ctx.now(),
         apiKeyId,
@@ -753,12 +787,31 @@ function applyPurchase(state: CompanionState, entry: ShopEntry): CompanionState 
 }
 
 /** Items a player holds and spends, as opposed to the passive charm. */
-export type HeldItem = "rareCandy" | "mint";
+/**
+ * Items a player holds and spends, as opposed to the passive charm.
+ *
+ * A closed list rather than "every `ItemKind` that is not the charm", because
+ * this is the enforcement boundary: an item added to `ITEM_PRICES` must be given
+ * an effect deliberately, and a derived allowlist would admit it to the `use`
+ * route the moment it was priced — with `useItem` falling through to whatever
+ * its last branch happens to be.
+ */
+export const HELD_ITEMS = [
+  "rareCandy",
+  "mint",
+  "everstone",
+  "lure",
+  "sootheBell",
+  "incense",
+  "repel",
+] as const;
+
+export type HeldItem = (typeof HELD_ITEMS)[number];
 
 function parseHeldItem(body: unknown): HeldItem | null {
   if (typeof body !== "object" || body === null) return null;
   const item = (body as Record<string, unknown>).item;
-  return item === "rareCandy" || item === "mint" ? item : null;
+  return HELD_ITEMS.includes(item as HeldItem) ? (item as HeldItem) : null;
 }
 
 /**
@@ -773,6 +826,47 @@ function parseHeldItem(body: unknown): HeldItem | null {
  * that counter, pinning the no-op as correct.
  */
 function useItem(state: CompanionState, item: HeldItem): ItemOutcome {
+  // The four that act on the companion itself. Each refuses without one rather
+  // than returning the state unchanged — see `consume` for why the difference is
+  // the item.
+  if (item === "everstone" || item === "sootheBell" || item === "repel") {
+    const active = state.active;
+    if (active === null) return { refused: "no-companion" };
+
+    if (item === "everstone") {
+      // A toggle, and the only item here that gives something back. The stone is
+      // spent to pin and the release is free: charging a second stone to undo
+      // the first would make pinning a trap rather than a choice, and there is
+      // nothing to return it to once it is on.
+      return { applied: { ...state, active: { ...active, everstone: !active.everstone } } };
+    }
+    if (item === "sootheBell") {
+      // Refused rather than silently re-applied. A bell already on this
+      // companion cannot be improved by a second, and spending one to learn
+      // that is the burn this whole ordering exists to prevent.
+      if (active.soothe) return { refused: "nothing-new" };
+      return { applied: { ...state, active: { ...active, soothe: true } } };
+    }
+    // The repel names the line it is refusing, resolved here rather than at roll
+    // time: this is the companion the player is looking at when they decide they
+    // do not want another, and by the time the next roll happens it is gone.
+    const finalId = active.plannedPath[active.plannedPath.length - 1];
+    if (finalId === undefined) return { refused: "no-companion" };
+    return { applied: { ...state, repel: finalId } };
+  }
+
+  if (item === "lure" || item === "incense") {
+    // Modifiers for a roll that has not happened. They need no companion — an
+    // egg is exactly when they are worth buying — but re-arming one that is
+    // already armed spends it for nothing.
+    if (item === "lure") {
+      if (state.lure) return { refused: "nothing-new" };
+      return { applied: { ...state, lure: true } };
+    }
+    if (state.incense) return { refused: "nothing-new" };
+    return { applied: { ...state, incense: true } };
+  }
+
   if (item === "mint") {
     // Refused rather than returned unchanged. The two were indistinguishable to
     // `consume`, which is how a mint used on an egg was spent for nothing.

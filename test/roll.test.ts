@@ -208,3 +208,79 @@ test("every roll carries one of the 25 natures", () => {
     expect(NATURES).toContain(nature as (typeof NATURES)[number]);
   }
 });
+
+// --- the bought modifiers ------------------------------------------------------
+
+test("a lure never produces a species already in the Dex", () => {
+  // The difference from the diversity weighting, which is what is being bought:
+  // that makes a duplicate unlikely, this makes it impossible for one hatch.
+  const collectedFinals = new Set([3, 12, 100, 144]);
+
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { collectedFinals, onlyUncollected: true });
+    expect(result).not.toBeNull();
+    if (result === null) continue;
+    const candidate = CANDIDATES.find((one) => one.id === result.speciesId);
+    expect(collectedFinals.has(candidate?.finalId as number)).toBe(false);
+  }
+});
+
+test("a lure with nothing left to find empties the pool rather than repeating", () => {
+  // Which is why the caller checks first and leaves the lure armed instead of
+  // spending it: null here is indistinguishable from "no candidate index yet",
+  // so an egg with an unusable lure would simply never hatch.
+  const everything = new Set(CANDIDATES.map((one) => one.finalId));
+  expect(rollWith(1, { collectedFinals: everything, onlyUncollected: true })).toBeNull();
+});
+
+test("a repel refuses the whole line, not just the form that was held", () => {
+  // It names a final, so a player holding the middle form of a line is not
+  // handed its base on the next roll.
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { excludeFinal: 12 });
+    expect(result?.speciesId).not.toBe(10);
+  }
+});
+
+test("a repel leaves everything else reachable", () => {
+  // Guards the implementation that satisfies the test above by excluding too
+  // much, or by refusing to roll at all.
+  const species = new Set<number>();
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { excludeFinal: 12 });
+    if (result !== null) species.add(result.speciesId);
+  }
+  expect(species.size).toBeGreaterThan(1);
+});
+
+test("an incense tilts toward longer lines without flattening rarity", () => {
+  const multiForm = (r: Roll): boolean =>
+    (CANDIDATES.find((one) => one.id === r.speciesId)?.forms ?? 1) > 1;
+
+  const plain = rate(multiForm, 400);
+  const incensed = rate(multiForm, 400, { preferLongLines: true });
+  expect(incensed).toBeGreaterThan(plain);
+
+  // Still a tilt and not a rewrite: the rare band is weighted by capture rate,
+  // and a three-stage rare must not become common just because it is long.
+  const rareRate = rate(
+    (r) =>
+      rarityFromCaptureRate(
+        CANDIDATES.find((one) => one.id === r.speciesId)?.captureRate ?? 255,
+        false,
+        false,
+      ) === "rare",
+    400,
+    { preferLongLines: true },
+  );
+  expect(rareRate).toBeLessThan(0.5);
+});
+
+test("the modifiers do not disturb the seed", () => {
+  // They change which candidates are on the table, not which way the dice fall.
+  // If a modifier consumed a random draw, an unrelated roll would shift under it
+  // and a retried prefetch would stop reproducing.
+  const withNone = rollWith(7, { collectedFinals: new Set() });
+  const withInertRepel = rollWith(7, { collectedFinals: new Set(), excludeFinal: 999 });
+  expect(withInertRepel).toEqual(withNone);
+});

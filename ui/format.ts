@@ -62,12 +62,25 @@ export function shopLabel(entry: ShopEntry): string {
 /**
  * Items the `use` route will accept.
  *
- * A mirror of `parseHeldItem`'s allowlist on the server, and deliberately a
- * mirror rather than a fetched fact: `shinyCharm` is passive, so posting it is a
- * 400 and offering the button would be offering a guaranteed error. The server
- * stays the enforcement — this only keeps the panel from asking.
+ * A mirror of `HELD_ITEMS` on the server, and deliberately a mirror rather than
+ * a fetched fact: `shinyCharm` is passive, so posting it is a 400 and offering
+ * the button would be offering a guaranteed error. The server stays the
+ * enforcement — this only keeps the panel from asking.
+ *
+ * Being a mirror, it drifts. The failure is mild in one direction and not the
+ * other: an item missing here is one the panel will not offer to spend, which
+ * looks like a bug in the bag; an item listed here that the server rejects is a
+ * button that always 400s. Both are visible, neither loses anything.
  */
-export const CONSUMABLE_ITEMS: readonly string[] = ["rareCandy", "mint"];
+export const CONSUMABLE_ITEMS: readonly string[] = [
+  "rareCandy",
+  "mint",
+  "everstone",
+  "lure",
+  "sootheBell",
+  "incense",
+  "repel",
+];
 
 /** Rarity filters, with `null` meaning no filter at all. */
 export const RARITY_FILTERS: ReadonlyArray<Rarity | null> = [

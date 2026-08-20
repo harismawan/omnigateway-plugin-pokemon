@@ -644,6 +644,97 @@ test("an item that cannot do anything is refused rather than burned", async () =
   expect(readCompanion(storage, KEY)?.state?.inventory.mint).toBe(2);
 });
 
+test("a lure steers the next roll and is spent by it", async () => {
+  await boot(
+    {},
+    cachedSpecies([
+      { id: 10, captureRate: 255, forms: 3, finalId: 12 },
+      { id: 20, captureRate: 255, forms: 3, finalId: 22 },
+    ]),
+  );
+  spend(100);
+  // Species 12 already collected, so a lure must produce the other line.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.pendingHatch?.speciesId).toBe(20);
+  // Spent by the roll it shaped, so one purchase buys one hatch.
+  expect(state?.lure).toBe(false);
+});
+
+test("a lure with nothing left to find waits rather than being spent", async () => {
+  // The whole Dex collected. Filtering to uncollected would empty the candidate
+  // pool, and an empty pool is indistinguishable from "the index has not
+  // arrived" — so the egg would quietly never hatch and the lure would be gone.
+  await boot({}, cachedSpecies([{ id: 10, captureRate: 255, forms: 3, finalId: 12 }]));
+  spend(100);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  // It hatched anyway — a duplicate is better than a companion that never comes.
+  expect(state?.pendingHatch?.speciesId).toBe(10);
+  // And the lure is still there, to be used the day something new exists.
+  expect(state?.lure).toBe(true);
+});
+
 test("the shop is listed cheapest first", async () => {
   // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
   // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed

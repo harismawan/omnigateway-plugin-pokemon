@@ -1,4 +1,4 @@
-import { EGG_HATCH_THRESHOLD, phaseThreshold, type Rarity } from "./balance.ts";
+import { EGG_HATCH_THRESHOLD, phaseThreshold, type Rarity, SOOTHE_BONUS } from "./balance.ts";
 import type { Nature } from "./roll.ts";
 import type { CompanionState, MonState } from "./state.ts";
 
@@ -73,10 +73,32 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
   // `usedAtStage` past its threshold and did not evolve until the next real
   // request happened to arrive. On a revoked key that request never comes.
   if (gained > 0) {
+    /*
+      A soothe bell scales what reaches the companion and nothing else.
+
+      `consumedTotal` above still absorbs the raw figure, which is what keeps
+      this idempotent — the bonus is applied to a delta, so a second settle at
+      the same total computes a delta of zero and adds nothing. And `tokensTotal`
+      is the caller's, untouched here, which is the property that matters most:
+      the wallet is derived from it, so a bell that grew the ledger would print
+      the tokens to buy the next bell.
+
+      Eggs are excluded because the bell is applied to a companion and an egg is
+      not one.
+     */
+    const active = next.active;
     next =
-      next.active === null
+      active === null
         ? { ...next, eggUsage: next.eggUsage + gained }
-        : { ...next, active: { ...next.active, usedAtStage: next.active.usedAtStage + gained } };
+        : {
+            ...next,
+            active: {
+              ...active,
+              usedAtStage:
+                active.usedAtStage +
+                (active.soothe ? Math.round(gained * (1 + SOOTHE_BONUS)) : gained),
+            },
+          };
   }
 
   for (let step = 0; step < MAX_TRANSITIONS_PER_ADVANCE; step++) {
@@ -117,6 +139,21 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
     }
 
     const mon = next.active;
+    /*
+      An everstone stops every transition, not only evolution.
+
+      Blocking evolution alone would still let a one-form line — or a companion
+      standing at its last stage — graduate away, and that is precisely the
+      individual somebody pins a stone to keep. It blocks the Ditto reveal for
+      the same reason: a reveal hands back a different Pokémon, which is not
+      "keep this one as it is".
+
+      Checked before the threshold rather than after, because a pinned companion
+      is not waiting for anything — the growth simply accumulates in
+      `usedAtStage` and is spent the moment the stone comes off.
+     */
+    if (mon.everstone) break;
+
     const needed = phaseThreshold(mon.rarity, mon.plannedPath.length, mon.stageIndex);
     if (mon.usedAtStage < needed) break;
 

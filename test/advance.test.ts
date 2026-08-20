@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { advance } from "../src/advance.ts";
-import { EGG_HATCH_THRESHOLD, graduationTotal, phaseThreshold } from "../src/balance.ts";
+import {
+  EGG_HATCH_THRESHOLD,
+  graduationTotal,
+  phaseThreshold,
+  SOOTHE_BONUS,
+} from "../src/balance.ts";
 import { type CompanionState, freshState, parseState, serialiseState } from "../src/state.ts";
 
 /** An egg with a species already rolled, which is the normal steady state. */
@@ -429,4 +434,102 @@ test("an already-revealed Ditto evolves and graduates as an ordinary companion",
 
   expect(result.events.map((event) => event.kind)).toEqual(["graduated"]);
   expect(result.events[0]).toMatchObject({ baseId: 132, finalId: 132 });
+});
+
+// --- the everstone and the soothe bell -----------------------------------------
+
+/** A companion one token short of leaving its first stage, with nothing on it. */
+function pinnable(over: Partial<NonNullable<CompanionState["active"]>> = {}): CompanionState {
+  return {
+    ...freshState(),
+    active: {
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      usedAtStage: 0,
+      rarity: "common",
+      isShiny: false,
+      nature: "jolly",
+      dittoDisguise: null,
+      dittoRevealed: false,
+      everstone: false,
+      soothe: false,
+      ...over,
+    },
+  };
+}
+
+const FIRST_STAGE = phaseThreshold("common", 2, 0);
+
+test("an everstone holds a companion at its stage however much arrives", () => {
+  const result = advance(pinnable({ everstone: true }), FIRST_STAGE * 4);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.stageIndex).toBe(0);
+  // Held rather than discarded, which is what makes the stone reversible: the
+  // growth is all still there to be released.
+  expect(result.state.active?.usedAtStage).toBe(FIRST_STAGE * 4);
+});
+
+test("a pinned companion does not graduate either", () => {
+  // Blocking evolution alone would leave a one-form line, or a companion at its
+  // last stage, graduating away — which is exactly the individual somebody pins
+  // a stone to keep.
+  const single = pinnable({ plannedPath: [10], everstone: true });
+  const result = advance(single, graduationTotal("common") * 2);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active).not.toBeNull();
+});
+
+test("a disguised companion with an everstone does not reveal", () => {
+  // A reveal is a transition like any other, and "keep this one as it is" has to
+  // mean this one — a stone that let the disguise drop would hand back a
+  // different Pokémon than the one it was pinning.
+  const disguisedAndPinned = disguised({
+    active: disguisedMon({ everstone: true }),
+  });
+  const result = advance(disguisedAndPinned, DISGUISE_THRESHOLD * 3);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.dittoRevealed).toBe(false);
+});
+
+test("releasing an everstone lets the held growth spend itself", () => {
+  // The reversibility, end to end: a companion that banked four stages' worth
+  // while pinned catches up in one settle once the stone comes off.
+  const banked = advance(pinnable({ everstone: true }), FIRST_STAGE * 4).state;
+  const active = banked.active;
+  expect(active).not.toBeNull();
+  if (active === null) return;
+
+  const released = advance({ ...banked, active: { ...active, everstone: false } }, FIRST_STAGE * 4);
+
+  expect(released.events.map((event) => event.kind)).toContain("evolved");
+});
+
+test("a soothe bell grows the companion faster without earning it more", () => {
+  const plain = advance(pinnable(), 1_000_000);
+  const belled = advance(pinnable({ soothe: true }), 1_000_000);
+
+  expect(plain.state.active?.usedAtStage).toBe(1_000_000);
+  expect(belled.state.active?.usedAtStage).toBe(1_000_000 * (1 + SOOTHE_BONUS));
+  // The ledger is untouched, which is what keeps the bell from printing the
+  // tokens to buy the next one: growth is not earnings.
+  expect(belled.state.consumedTotal).toBe(1_000_000);
+  expect(belled.state.consumedTotal).toBe(plain.state.consumedTotal);
+});
+
+test("a soothe bell is still idempotent when the same total is settled twice", () => {
+  const once = advance(pinnable({ soothe: true }), 1_000_000);
+  const twice = advance(once.state, 1_000_000);
+
+  expect(twice.state.active?.usedAtStage).toBe(once.state.active?.usedAtStage as number);
+});
+
+test("a soothe bell does nothing for an egg", () => {
+  // The bell is applied to a companion, and an egg is not one. Nothing here
+  // should scale incubation.
+  const egg = { ...freshState(), eggUsage: 0 };
+  expect(advance(egg, 1_000).state.eggUsage).toBe(1_000);
 });
