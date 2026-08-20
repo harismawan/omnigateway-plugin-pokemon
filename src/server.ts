@@ -29,6 +29,7 @@ import { hasShinyCharm } from "./state.ts";
 import {
   consume,
   creditTokens,
+  type ItemOutcome,
   lastGrantedAt,
   listCompanions,
   MIGRATIONS,
@@ -771,20 +772,29 @@ function parseHeldItem(body: unknown): HeldItem | null {
  * previously a no-op that incremented a counter nobody read, and a test asserted
  * that counter, pinning the no-op as correct.
  */
-function useItem(state: CompanionState, item: HeldItem): CompanionState {
+function useItem(state: CompanionState, item: HeldItem): ItemOutcome {
   if (item === "mint") {
-    if (state.active === null) return state;
+    // Refused rather than returned unchanged. The two were indistinguishable to
+    // `consume`, which is how a mint used on an egg was spent for nothing.
+    if (state.active === null) return { refused: "no-companion" };
     const index = NATURES.indexOf(state.active.nature);
     // Deterministic rather than random: `advance` and everything around it is
     // pure, and a reroll that needed entropy would be the one call in the plugin
     // that could not be reproduced. Cycling is a reroll a player can repeat.
     const nature = NATURES[(index + 1) % NATURES.length] as (typeof NATURES)[number];
-    return { ...state, active: { ...state.active, nature } };
+    return { applied: { ...state, active: { ...state.active, nature } } };
   }
-  return state.active === null
-    ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
-    : {
-        ...state,
-        active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
-      };
+  // A candy works on an egg as well as on a companion — it is growth, and an
+  // egg grows. That is a deliberate divergence from the source app, which
+  // refuses it; here the overflow past the hatch threshold carries into the
+  // hatchling rather than being lost, so nothing is wasted.
+  return {
+    applied:
+      state.active === null
+        ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
+        : {
+            ...state,
+            active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
+          },
+  };
 }

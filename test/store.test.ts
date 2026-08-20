@@ -327,7 +327,7 @@ test("a held item is spent from inventory, not from the wallet", () => {
     KEY,
   ]);
 
-  const result = consume(storage, KEY, "rareCandy", (s) => s, 2);
+  const result = consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2);
   expect(result.ok).toBe(true);
 
   const row = readCompanion(storage, KEY);
@@ -335,9 +335,52 @@ test("a held item is spent from inventory, not from the wallet", () => {
   expect(row?.tokensSpent).toBe(0);
 });
 
+test("an effect that refuses spends nothing and writes nothing", () => {
+  // The ordering invariant, at the level it actually lives. `consume` used to
+  // decrement first and write whatever came back, so an effect that declined to
+  // act still cost the item — indistinguishable, from here, from one that ran.
+  creditTokens(storage, KEY, 1_000, 1);
+  const before = { ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } };
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify(before),
+    KEY,
+  ]);
+
+  const result = consume(storage, KEY, "rareCandy", () => ({ refused: "no-companion" }), 2);
+
+  expect(result).toEqual({ ok: false, reason: "no-companion" });
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(2);
+});
+
+test("the effect sees the inventory it will be spent from, not one already docked", () => {
+  // The decrement applies to what the effect produced, so an effect that reads
+  // its own count sees the truth. Handing it a pre-docked inventory made the
+  // count off by one for anything that looked.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify({ ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } }),
+    KEY,
+  ]);
+
+  let seen = -1;
+  consume(
+    storage,
+    KEY,
+    "rareCandy",
+    (state) => {
+      seen = state.inventory.rareCandy;
+      return { applied: state };
+    },
+    2,
+  );
+
+  expect(seen).toBe(2);
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(1);
+});
+
 test("an item nobody holds cannot be spent", () => {
   creditTokens(storage, KEY, 1_000, 1);
-  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+  expect(consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2)).toEqual({
     ok: false,
     reason: "none-held",
   });
@@ -346,7 +389,7 @@ test("an item nobody holds cannot be spent", () => {
 test("a held item cannot be spent against an unreadable save", () => {
   creditTokens(storage, KEY, 1_000, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["nonsense", KEY]);
-  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+  expect(consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2)).toEqual({
     ok: false,
     reason: "unreadable",
   });

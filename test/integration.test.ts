@@ -613,6 +613,33 @@ test("an ordinary companion never resolves a reveal it will not use", async () =
   expect(online.calls.filter((url) => url.endsWith("/pokemon-species/132"))).toEqual([]);
 });
 
+test("an item that cannot do anything is refused rather than burned", async () => {
+  // `consume` checked only that the item was held, then decremented and wrote
+  // whatever the effect returned — and `useItem` returns the state untouched
+  // when a mint has no companion to work on. So the mint vanished, nothing
+  // happened, and the route answered `{ ok: true }`.
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    // An egg: there is no nature to reroll.
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: { rareCandy: 0, mint: 2, shinyCharm: 0 },
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
+
+  expect(refused?.status).toBe(409);
+  expect(refused?.json).toMatchObject({ error: "no-companion" });
+  // The whole point: still two.
+  expect(readCompanion(storage, KEY)?.state?.inventory.mint).toBe(2);
+});
+
 test("the shop is listed cheapest first", async () => {
   // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
   // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed
@@ -698,6 +725,19 @@ test("shopping is not working: a purchase leaves the credit instant alone", asyn
   await boot();
   clock = 1_700_000_500_000;
   spend(ITEM_PRICES.mint * 2);
+  // An active companion, because a mint needs a nature to reroll and is now
+  // refused without one. This fixture used to be an egg and the assertion below
+  // was that using the mint succeeded — pinning the burn as correct, which is
+  // the same trap the mint's own comment already records it falling into once.
+  plant({
+    consumedTotal: ITEM_PRICES.mint * 2,
+    active: activeMon(),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+  });
 
   clock = 1_700_009_000_000;
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
