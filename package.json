@@ -1,0 +1,58 @@
+{
+  "name": "omnigateway-plugin-pokemon",
+  "version": "1.0.0",
+  "description": "A Pok\u00e9mon companion for OmniGateway. Each gateway key raises one that hatches, evolves, and graduates into a Pok\u00e9dex on the tokens that key spends.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Harismawan <mail@harismawan.com>",
+  "homepage": "https://github.com/harismawan/omnigateway-plugin-pokemon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/harismawan/omnigateway-plugin-pokemon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/harismawan/omnigateway-plugin-pokemon/issues"
+  },
+  "keywords": [
+    "omnigateway",
+    "omnigateway-plugin",
+    "pokemon"
+  ],
+  "dependencies": {
+    "@omnigateway/plugin-api": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@omnigateway/dashboard-sdk": "^0.1.0",
+    "@tanstack/react-query": "^5.101.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "styled-components": "^6.5.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.7",
+    "@happy-dom/global-registrator": "^20.11.2",
+    "@omnigateway/dashboard-sdk": "^0.1.0",
+    "@tanstack/react-query": "^5.101.4",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/bun": "^1.3.14",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "bun-types": "^1.3.14",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "styled-components": "^6.5.1",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "test": "bun test ./test/*.test.ts",
+    "test:ui": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/ui.test.tsx",
+    "build:server": "bun build src/server.ts --outfile dist/pokemon/server/index.js --target bun --format esm",
+    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/pokemon/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
+    "build": "bun run build:server && bun run build:ui && bun scripts/build-package.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check .",
+    "fmt": "biome format --write ."
+  },
+  "private": true
+}

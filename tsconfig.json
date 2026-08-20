@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    // `bundler`, not `node16`: both SDKs ship TypeScript sources rather than
+    // built `.js` + `.d.ts`, and their subpath exports point at `.ts` files.
+    // Any resolver that insists on emitted JavaScript cannot follow them.
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": ["bun-types"],
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["ESNext", "DOM"]
+  },
+  "include": ["src/**/*", "test/**/*", "ui/**/*"]
+}

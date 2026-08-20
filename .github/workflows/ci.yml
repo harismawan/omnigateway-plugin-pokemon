@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Canary, deliberately: `bun.lock` is lockfileVersion 2, which only Bun
+      # 1.4 writes and reads, and 1.4 is unreleased. A released pin cannot
+      # install this lockfile, and asking for "1.4.0" 404s — both were tried on
+      # this tag. CI therefore tracks the same Bun the repository is developed
+      # on. If a canary ever breaks a release, pin the exact build here rather
+      # than rewriting the lockfile.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Test (UI)
+        run: bun run test:ui
+
+      - name: Build
+        run: bun run build

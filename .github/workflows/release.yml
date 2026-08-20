@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # Trusted publishing (OIDC). See the note on the publish step: this only
+  # works once the name already exists on the registry.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Canary, deliberately: `bun.lock` is lockfileVersion 2, which only Bun
+      # 1.4 writes and reads, and 1.4 is unreleased. A released pin cannot
+      # install this lockfile, and asking for "1.4.0" 404s — both were tried on
+      # this tag. CI therefore tracks the same Bun the repository is developed
+      # on. If a canary ever breaks a release, pin the exact build here rather
+      # than rewriting the lockfile.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: canary
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Test
+        run: bun run test
+
+      - name: Test (UI)
+        run: bun run test:ui
+
+      - name: Build
+        run: bun run build
+
+      # npm is needed for the publish itself: `bun publish` does not participate
+      # in npm's OIDC trusted publishing.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # The FIRST publish of a new package name cannot use trusted publishing:
+      # npm resolves the trusted publisher from the existing package's settings,
+      # and there is no package yet to read them from (npm/cli#8544). Publish
+      # once by hand with a granular automation token, configure the trusted
+      # publisher on the package afterwards, and every later tag goes through
+      # this job with no token at all.
+      #
+      # Published from `dist/pokemon`, never from the repository root, and the
+      # difference decides whether the package works at all. `omni plugin
+      # install` strips one wrapping directory from a tarball and then requires
+      # `omni-plugin.json` at the root of what is left. Publishing from here
+      # would bury it at `dist/pokemon/omni-plugin.json` and every install would
+      # be refused — which is exactly what happened the first time this was
+      # built. `scripts/build-package.ts` assembles that directory and generates
+      # its manifest; see the comment there.
+      - name: Publish
+        run: npm publish --access public
+        working-directory: dist/pokemon
