@@ -233,6 +233,29 @@ test("an unreadable rarity refuses the whole save rather than guessing", () => {
   expect(parseState(JSON.stringify(corrupted))).toBeNull();
 });
 
+test("a damaged consumed total refuses the save rather than defaulting to zero", () => {
+  // The same rule as `rarity`, and it was on the wrong side of it. A defaulted
+  // zero does not read as "nothing has been spent yet" — `advance` computes
+  // `gained` as `tokensTotal - consumedTotal`, so on a key with billions of
+  // lifetime tokens it re-injects the entire history as growth, graduating the
+  // companion over and over and writing free Dex rows for work already paid
+  // for. That is a wrong guess nothing reports, which is what fail-closed is
+  // for.
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+
+  for (const damaged of [undefined, "lots", Number.NaN, null]) {
+    const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
+    corrupted.consumedTotal = damaged;
+    expect(parseState(JSON.stringify(corrupted))).toBeNull();
+  }
+});
+
+test("a consumed total of zero is still an ordinary save", () => {
+  // The boundary the refusal must not swallow: every companion starts here, and
+  // reading a fresh one as unreadable would be worse than the bug being fixed.
+  expect(parseState(serialiseState(freshState()))).toEqual(freshState());
+});
+
 test("an empty evolution path refuses the save", () => {
   const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;

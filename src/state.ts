@@ -302,10 +302,30 @@ export function parseState(raw: string): CompanionState | null {
     if (rarity !== null && path.length > 0) pendingReveal = { path, rarity };
   }
 
+  /*
+    Fails closed, on the same side of the line as `rarity` and `plannedPath`.
+
+    A default of zero does not mean "nothing spent yet" — `advance` computes
+    `gained` as `tokensTotal - consumedTotal`, so on a key with a billion tokens
+    of history a zero re-injects the whole lifetime as growth in one settle:
+    graduation after graduation up to the transition cap, then more on the next
+    settle, each writing a Dex row for work that was already paid for. Growth
+    and collection granted twice for one lifetime of tokens, silently.
+
+    This field decides how much work has already been accounted for, which makes
+    it exactly the kind of invisible wrong guess this function refuses to make
+    elsewhere. Zero remains perfectly valid when it is *stored* — every companion
+    starts there — it is an absent or unreadable value that is refused.
+  */
+  const storedConsumed = parsed.consumedTotal;
+  if (typeof storedConsumed !== "number" || !Number.isFinite(storedConsumed)) return null;
+
   const eggTier = asRarity(parsed.eggTier);
 
   return {
-    consumedTotal: Math.max(0, asInt(parsed.consumedTotal, 0)),
+    // Clamped, not defaulted: a negative here would make `gained` larger than
+    // the tokens actually credited.
+    consumedTotal: Math.max(0, Math.trunc(storedConsumed)),
     active,
     eggUsage: Math.max(0, asInt(parsed.eggUsage, 0)),
     // A tier that does not parse becomes no guarantee, which is the safe
