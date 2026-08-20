@@ -113,9 +113,15 @@ export const Dim = styled.span`
  * does not merely look cramped: it reads as a companion sitting 26.9M past a
  * threshold it should already have evolved through, so the first thing it costs
  * is trust in the growth meter.
+ *
+ * Its top margin is the one `ChipRow` puts below itself, deliberately the same
+ * value: the name, the qualifiers, the meter and the numbers beneath it are one
+ * column, and four elements each picking their own gap is how a column stops
+ * looking like one.
  */
 export const Fact = styled(Dim)`
   display: block;
+  margin-top: ${SPACE.sm};
 `;
 
 export const Notice = styled.p`
@@ -157,7 +163,7 @@ export const Chip = styled.span`
  * wrapped to a second line touched it outright.
  */
 export const ChipRow = styled(Row)`
-  margin: ${SPACE.sm} 0 ${SPACE.md};
+  margin: ${SPACE.xs} 0 ${SPACE.sm};
 `;
 
 /** The one chip that is emphasised, because a shiny is a 1-in-64 fact. */
