@@ -27,6 +27,25 @@ import styled from "styled-components";
 export const SPACE = { xs: "4px", sm: "8px", md: "12px", lg: "20px", xl: "32px" } as const;
 
 /**
+ * How big a companion is drawn — and why this number and not a rounder one.
+ *
+ * The animated Gen-V set the plugin fetches is a 96px canvas, and it is pixel
+ * art rendered with `image-rendering: pixelated`, so the scale factor has to be
+ * a whole number. At 128px — the obvious "a bit larger" — 96 goes into it 1.333
+ * times, and nearest-neighbour turns that into alternating one- and two-pixel
+ * source pixels: the sprite is bigger and visibly lumpier, in a way that reads
+ * as a broken image rather than as a design decision. 192px is 2× exactly.
+ *
+ * The sprite, the egg and the unreadable mark all take it, because they occupy
+ * the same slot on the same two surfaces: a roster whose cards were one size for
+ * an egg and another for a Pokémon would reflow every time one hatched. The
+ * marks are `border-box` so their 2px border is inside that figure rather than
+ * four pixels on top of it, which is what makes "the same size" true rather than
+ * approximately true.
+ */
+const COMPANION_SIZE = "192px";
+
+/**
  * The data face.
  *
  * A system monospace stack rather than a webfont: a plugin bundle that shipped
@@ -79,8 +98,70 @@ export const Row = styled.div`
   flex-wrap: wrap;
 `;
 
+/**
+ * A panel's title line: the heading, what it is showing, and the way back.
+ *
+ * `Row` centres its children, and that is only the same as centring them on the
+ * *heading* when the heading's own margins are symmetric. A heading is a block
+ * element carrying whatever margin the console's reset gives it — commonly some
+ * below and none above — and flex centres the margin box, so the words sit high
+ * while the key id and the button sit on the row's true middle. The heading is
+ * the tallest thing here, so it is the one that has to give up its margin;
+ * standalone headings elsewhere keep theirs.
+ */
+export const PanelHead = styled(Row)`
+  h2 {
+    margin: 0;
+  }
+`;
+
 export const Dim = styled.span`
   color: var(--ink-dim);
+`;
+
+/**
+ * A dimmed fact that takes a line of its own.
+ *
+ * `Dim` is a span, which is right where it sits inside a sentence and wrong
+ * where two of them are stacked as separate facts. Adjacent inline elements with
+ * only a JSX newline between them render with **no separator at all** — JSX
+ * strips whitespace containing a newline — so "Stage 1 of 2" followed by "76.9M
+ * / 250.0M to the next stage" came out as `Stage 1 of 276.9M / 250.0M`. Which
+ * does not merely look cramped: it reads as a companion sitting 26.9M past a
+ * threshold it should already have evolved through, so the first thing it costs
+ * is trust in the growth meter.
+ *
+ * Its top margin is the one `ChipRow` puts below itself, deliberately the same
+ * value: the name, the qualifiers, the meter and the numbers beneath it are one
+ * column, and four elements each picking their own gap is how a column stops
+ * looking like one.
+ */
+export const Fact = styled(Dim)`
+  display: block;
+  margin-top: ${SPACE.sm};
+
+  /* Two facts about one meter are closer to each other than either is to the
+     meter, because that is what they are: "stage 1 of 2" and the tokens under
+     it are one reading, not two. Spaced evenly they read as a list of unrelated
+     numbers that happen to be stacked. */
+  & + & {
+    margin-top: ${SPACE.xs};
+  }
+`;
+
+/**
+ * The line under a panel heading that says what the panel is for.
+ *
+ * A styled `p` rather than a bare one wrapping a `Dim`. A bare paragraph
+ * inherits whatever margin the console's own reset leaves it — a number this
+ * panel neither chose nor can see, and one that can change underneath it without
+ * anything here rendering differently in a test. Its bottom margin is the
+ * panel's `lg` step, so the roster starts at the same distance a section heading
+ * would.
+ */
+export const Lede = styled.p`
+  color: var(--ink-dim);
+  margin: ${SPACE.xs} 0 ${SPACE.lg};
 `;
 
 export const Notice = styled.p`
@@ -112,6 +193,19 @@ export const Chip = styled.span`
   white-space: nowrap;
 `;
 
+/**
+ * The band of chips under the companion's name.
+ *
+ * A `Row` of its own rather than the bare one, because this is the only row on
+ * the panel with a meter directly beneath it. `Row` carries no vertical margin —
+ * correctly, since most of its uses are a line of controls — so the qualifiers
+ * sat flush against the growth track and read as part of it, and a chip that
+ * wrapped to a second line touched it outright.
+ */
+export const ChipRow = styled(Row)`
+  margin: ${SPACE.xs} 0 ${SPACE.sm};
+`;
+
 /** The one chip that is emphasised, because a shiny is a 1-in-64 fact. */
 export const ShinyChip = styled(Chip)`
   border-color: var(--rule-strong);
@@ -119,19 +213,27 @@ export const ShinyChip = styled(Chip)`
   font-weight: 600;
 `;
 
+/**
+ * The companion itself, on nothing.
+ *
+ * No fill and no frame, deliberately. These are transparent GIFs, so a sunk
+ * background and a rule were a box drawn *behind* the Pokémon rather than around
+ * it — in the dark theme that reads as a black plate the sprite is sitting on,
+ * which is the one place on the panel where a surface appeared that no data
+ * asked for. The egg and the unreadable mark keep theirs because they are drawn
+ * shapes: the box *is* the graphic there, where here it only obscured one.
+ */
 export const Sprite = styled.img`
-  width: 96px;
-  height: 96px;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   image-rendering: pixelated;
-  background: var(--panel-sunk);
-  border: 1px solid var(--rule);
-  border-radius: 6px;
 `;
 
 /** An egg, drawn rather than fetched — there is no sprite for one. */
 export const EggMark = styled.div`
-  width: 96px;
-  height: 96px;
+  box-sizing: border-box;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   border-radius: 50% 50% 45% 45%;
   background: var(--panel-sunk);
   border: 2px solid var(--rule-strong);
@@ -146,8 +248,9 @@ export const EggMark = styled.div`
  * claim about health.
  */
 export const BrokenMark = styled.div`
-  width: 96px;
-  height: 96px;
+  box-sizing: border-box;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
   border-radius: 6px;
   background: var(--warn-wash);
   border: 2px dashed var(--warn);
@@ -306,9 +409,17 @@ export const Caption = styled.figcaption`
   overflow-wrap: anywhere;
 `;
 
+/**
+ * The roster's track minimum is derived from `COMPANION_SIZE`, not chosen.
+ *
+ * 192px of companion, plus `KeyCard`'s 12px padding and 1px border on each side,
+ * is 218 — so a 220px floor is the narrowest track that cannot clip a sprite.
+ * The two numbers have to move together, and the previous 168px was sized
+ * against a 96px companion that no longer exists.
+ */
 export const RosterGrid = styled.div`
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: ${SPACE.md};
 `;
 

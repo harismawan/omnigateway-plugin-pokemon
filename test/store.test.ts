@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
-import { freshState, serialiseState } from "../src/state.ts";
+import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import {
   consume,
   creditTokens,
@@ -116,7 +116,13 @@ test("an unreadable save is left alone rather than replaced", () => {
 test("a purchase spends the wallet and never the growth meter", () => {
   creditTokens(storage, KEY, ITEM_PRICES.rareCandy * 2, 1);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
   expect(result.ok).toBe(true);
 
   const row = readCompanion(storage, KEY);
@@ -135,8 +141,20 @@ test("a second purchase beyond the balance is refused", () => {
   // this name was caught.
   creditTokens(storage, KEY, ITEM_PRICES.rareCandy, 1);
 
-  const first = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
-  const second = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 3);
+  const first = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
+  const second = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    3,
+  );
 
   expect(first.ok).toBe(true);
   expect(second).toEqual({ ok: false, reason: "insufficient" });
@@ -147,7 +165,13 @@ test("a purchase that cannot afford itself changes nothing at all", () => {
   creditTokens(storage, KEY, 10, 1);
   const before = readCompanion(storage, KEY);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "shinyCharm" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "shinyCharm" },
+    (s) => ({ applied: s }),
+    2,
+  );
 
   expect(result).toEqual({ ok: false, reason: "insufficient" });
   expect(readCompanion(storage, KEY)).toEqual(before as never);
@@ -157,7 +181,13 @@ test("a purchase against an unreadable save is refused, not attempted", () => {
   creditTokens(storage, KEY, ITEM_PRICES.shinyCharm, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["nonsense", KEY]);
 
-  const result = purchase(storage, KEY, { kind: "item", item: "rareCandy" }, (s) => s, 2);
+  const result = purchase(
+    storage,
+    KEY,
+    { kind: "item", item: "rareCandy" },
+    (s) => ({ applied: s }),
+    2,
+  );
   expect(result).toEqual({ ok: false, reason: "unreadable" });
   expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
 });
@@ -191,7 +221,9 @@ test("a purchase applies its own effect to the state", () => {
     storage,
     KEY,
     { kind: "item", item: "rareCandy" },
-    (s) => ({ ...s, inventory: { ...s.inventory, rareCandy: s.inventory.rareCandy + 1 } }),
+    (s) => ({
+      applied: { ...s, inventory: { ...s.inventory, rareCandy: s.inventory.rareCandy + 1 } },
+    }),
     2,
   );
 
@@ -323,11 +355,14 @@ test("a held item is spent from inventory, not from the wallet", () => {
   // A granted candy was never bought. Charging for it would charge twice.
   creditTokens(storage, KEY, 1_000, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
-    JSON.stringify({ ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } }),
+    JSON.stringify({
+      ...freshState(),
+      inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+    }),
     KEY,
   ]);
 
-  const result = consume(storage, KEY, "rareCandy", (s) => s, 2);
+  const result = consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2);
   expect(result.ok).toBe(true);
 
   const row = readCompanion(storage, KEY);
@@ -335,9 +370,58 @@ test("a held item is spent from inventory, not from the wallet", () => {
   expect(row?.tokensSpent).toBe(0);
 });
 
+test("an effect that refuses spends nothing and writes nothing", () => {
+  // The ordering invariant, at the level it actually lives. `consume` used to
+  // decrement first and write whatever came back, so an effect that declined to
+  // act still cost the item — indistinguishable, from here, from one that ran.
+  creditTokens(storage, KEY, 1_000, 1);
+  const before = {
+    ...freshState(),
+    inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+  };
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify(before),
+    KEY,
+  ]);
+
+  const result = consume(storage, KEY, "rareCandy", () => ({ refused: "no-companion" }), 2);
+
+  expect(result).toEqual({ ok: false, reason: "no-companion" });
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(2);
+});
+
+test("the effect sees the inventory it will be spent from, not one already docked", () => {
+  // The decrement applies to what the effect produced, so an effect that reads
+  // its own count sees the truth. Handing it a pre-docked inventory made the
+  // count off by one for anything that looked.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify({
+      ...freshState(),
+      inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+    }),
+    KEY,
+  ]);
+
+  let seen = -1;
+  consume(
+    storage,
+    KEY,
+    "rareCandy",
+    (state) => {
+      seen = state.inventory.rareCandy;
+      return { applied: state };
+    },
+    2,
+  );
+
+  expect(seen).toBe(2);
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(1);
+});
+
 test("an item nobody holds cannot be spent", () => {
   creditTokens(storage, KEY, 1_000, 1);
-  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+  expect(consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2)).toEqual({
     ok: false,
     reason: "none-held",
   });
@@ -346,7 +430,7 @@ test("an item nobody holds cannot be spent", () => {
 test("a held item cannot be spent against an unreadable save", () => {
   creditTokens(storage, KEY, 1_000, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["nonsense", KEY]);
-  expect(consume(storage, KEY, "rareCandy", (s) => s, 2)).toEqual({
+  expect(consume(storage, KEY, "rareCandy", (s) => ({ applied: s }), 2)).toEqual({
     ok: false,
     reason: "unreadable",
   });

@@ -132,11 +132,76 @@ export const RARE_CANDY_XP = 100_000_000;
  * `shinyCharm` is bought once and never consumed, so it is priced against a
  * whole rare graduation.
  */
-export const ITEM_PRICES: Record<"rareCandy" | "mint" | "shinyCharm", number> = {
+export const ITEM_PRICES: Record<
+  "rareCandy" | "mint" | "shinyCharm" | "everstone" | "lure" | "sootheBell" | "incense" | "repel",
+  number
+> = {
   rareCandy: 500_000_000,
   mint: 100_000_000,
   shinyCharm: 3_000_000_000,
+  /**
+   * Priced at a fresh egg, and the symmetry is the argument.
+   *
+   * An egg is "discard this one", a stone is "keep this one" — two opposite
+   * operations at one price, which is legible from the shop row without knowing
+   * anything else about the economy. It grants no growth, so the double-use trap
+   * that sets the candy's price does not apply.
+   *
+   * It is also self-limiting: pinning a companion costs Dex progress, because a
+   * pinned one never graduates. Nobody over-buys a thing that slows their own
+   * collection.
+   */
+  everstone: 1_000_000_000,
+  /**
+   * A modifier rather than a replacement — the egg is still bought — so it has
+   * to sit below the grade guarantee beside it. A lure plus a plain egg is 2B
+   * for a guaranteed-new common, against 2.5B for a guaranteed-uncommon: novelty
+   * priced below grade, which is the ordering that keeps either worth buying.
+   */
+  lure: 1_000_000_000,
+  /**
+   * Deliberately a loss in raw tokens, at every rarity.
+   *
+   * The bound is what makes this priceable at all. As a permanent bonus on all
+   * future growth there is no price that works — any multiplier has a break-even
+   * past which it is free growth forever, which is rule one of this file
+   * inverted. Bounded to one companion its ceiling is `SOOTHE_BONUS` of a
+   * graduation total: 187M saved on a common, 750M on a rare, 1.5B on a
+   * legendary, against 3B paid.
+   *
+   * So it never repays itself and is least bad on the rarest companion, which
+   * makes it "get this one over the line sooner" rather than an investment.
+   * That asymmetry is the design, not a rough edge.
+   */
+  sootheBell: 3_000_000_000,
+  /**
+   * Cosmetic pricing, because it has no economy effect to price against.
+   *
+   * `phaseThreshold` sums to `T` whatever the form count, so a longer line costs
+   * exactly the same to graduate and simply yields more evolutions along the
+   * way. This buys events, not value.
+   *
+   * Note what it deliberately is *not*: a second shiny item. Stacking shiny odds
+   * would re-open a decision the source app closed — it considered 1/32,
+   * rejected it as excessive, and settled on 1/48 for the charm — and would put
+   * two items on one axis.
+   */
+  incense: 500_000_000,
+  /**
+   * Narrower than the lure — one line excluded rather than every collected one —
+   * so it prices below it, at the mint's tier.
+   */
+  repel: 500_000_000,
 };
+
+/**
+ * How much extra growth a soothe bell adds to the companion holding it.
+ *
+ * Applied to what lands in `usedAtStage` and never to `tokens_total`. Growing
+ * faster must not mean earning more, or an item bought with tokens would print
+ * the tokens to buy the next one.
+ */
+export const SOOTHE_BONUS = 0.25;
 
 export type ItemKind = keyof typeof ITEM_PRICES;
 

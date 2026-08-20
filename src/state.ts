@@ -28,6 +28,32 @@ export type MonState = {
   /** Set when this is a Ditto wearing another species; null for an ordinary hatch. */
   dittoDisguise: number | null;
   dittoRevealed: boolean;
+  /**
+   * An everstone is on this companion: it will not evolve, reveal, or graduate.
+   *
+   * A property of the individual rather than of the save, so it goes with the
+   * companion — a fresh egg does not inherit the stone that was pinning the one
+   * it replaced.
+   */
+  everstone: boolean;
+  /**
+   * A soothe bell is on this companion, adding `SOOTHE_BONUS` to its growth.
+   *
+   * Ends when the companion does. That is what bounds the item: it can never
+   * return more than its fraction of one graduation total, which is what makes
+   * it priceable at all — see `ITEM_PRICES.sootheBell`.
+   */
+  soothe: boolean;
+  /**
+   * Raw tokens this companion has absorbed while holding a soothe bell.
+   *
+   * Kept so the bell's bonus is `floor(soothedRaw × SOOTHE_BONUS)` computed
+   * against the running total, rather than a rounded slice of each delta. The
+   * per-delta form made growth depend on how the traffic arrived: ten credits of
+   * two tokens rounded up ten times and out-granted one credit of twenty by
+   * 20%. Growth has to be a function of tokens earned.
+   */
+  soothedRaw: number;
 };
 
 export type CompanionState = {
@@ -78,6 +104,40 @@ export type CompanionState = {
     nature: Nature;
     ditto: boolean;
   } | null;
+  /**
+   * What a disguised companion becomes when it drops the act, resolved ahead of
+   * the moment it does.
+   *
+   * The same trick as `pendingHatch` and for the same reason. A reveal needs
+   * Ditto's own line and rarity, which live behind PokéAPI, and `advance` has no
+   * capabilities — so the answer is written down while the disguise is still
+   * growing and the transition itself stays a local one.
+   *
+   * Null is an ordinary state, not an error: a companion that is not disguised
+   * has nothing to resolve, and a disguised one on a cold cache holds at its
+   * threshold until this arrives. The alternative is inventing Ditto's rarity,
+   * which decides what the revealed companion costs to graduate.
+   */
+  pendingReveal: {
+    path: readonly number[];
+    rarity: Rarity;
+  } | null;
+  /**
+   * Modifiers waiting to be spent on the next roll.
+   *
+   * They live on the save rather than on the egg because they are bought before
+   * there is anything to apply them to — the same reason `eggTier` is persisted.
+   * All three are cleared in the write that stores the roll they shaped, so one
+   * purchase buys one hatch.
+   *
+   * None of them touch the seed, so a retried prefetch still produces the same
+   * Pokémon; they change which candidates are on the table, not which way the
+   * dice fall.
+   */
+  lure: boolean;
+  incense: boolean;
+  /** A final form the next roll must not produce, or null. */
+  repel: number | null;
   inventory: Record<ItemKind, number>;
   /**
    * Whether the first-run seeding of limit-window grants has happened.
@@ -87,6 +147,22 @@ export type CompanionState = {
    */
 };
 
+/**
+ * A bag with one entry per item kind, all empty.
+ *
+ * Built from `ITEM_KINDS` rather than written out, because a literal is a list
+ * of every item that existed on the day it was typed. There were three such
+ * literals in `src/` and two dozen more across the tests, and each one is a
+ * place an added item is silently missing — `Record<ItemKind, number>` would
+ * catch it in `src/`, but a test fixture that builds its own object and never
+ * mentions the new key just carries a hole into whatever it is asserting.
+ */
+export function emptyInventory(): Record<ItemKind, number> {
+  const inventory = {} as Record<ItemKind, number>;
+  for (const kind of ITEM_KINDS) inventory[kind] = 0;
+  return inventory;
+}
+
 export function freshState(): CompanionState {
   return {
     consumedTotal: 0,
@@ -94,7 +170,11 @@ export function freshState(): CompanionState {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
   };
 }
 
@@ -136,7 +216,7 @@ export function parseState(raw: string): CompanionState | null {
   }
   if (!isRecord(parsed)) return null;
 
-  const inventory: Record<ItemKind, number> = { rareCandy: 0, mint: 0, shinyCharm: 0 };
+  const inventory = emptyInventory();
   const storedInventory = parsed.inventory;
   if (isRecord(storedInventory)) {
     for (const kind of ITEM_KINDS) {
@@ -180,6 +260,23 @@ export function parseState(raw: string): CompanionState | null {
       dittoDisguise:
         typeof storedActive.dittoDisguise === "number" ? storedActive.dittoDisguise : null,
       dittoRevealed: storedActive.dittoRevealed === true,
+      everstone: storedActive.everstone === true,
+      /**
+       * Degrades to "no bell", and this is the one degradation here that costs
+       * the player something they paid 3B for.
+       *
+       * It is still the right direction. The alternative is refusing the save,
+       * which renders as "this companion could not be read" and is a far worse
+       * outcome than a bonus quietly ending — and `=== true` only fails to be
+       * true for a field that is absent or corrupt, at which point the honest
+       * reading is that we do not know whether a bell was ever applied. It
+       * cannot silently *grant* one, which is the direction that would matter.
+       */
+      soothe: storedActive.soothe === true,
+      // Degrades to zero, which under-grants rather than over-grants: the bell
+      // starts counting again from here. The opposite default would hand back
+      // bonus already paid out.
+      soothedRaw: Math.max(0, asInt(storedActive.soothedRaw, 0)),
     };
   }
 
@@ -207,16 +304,58 @@ export function parseState(raw: string): CompanionState | null {
     }
   }
 
+  const storedReveal = parsed.pendingReveal;
+  let pendingReveal: CompanionState["pendingReveal"] = null;
+  if (isRecord(storedReveal)) {
+    const rarity = asRarity(storedReveal.rarity);
+    const path = Array.isArray(storedReveal.path)
+      ? storedReveal.path.filter((id): id is number => typeof id === "number" && id > 0)
+      : [];
+    // Dropped and re-resolved rather than refusing the save, exactly like
+    // `pendingHatch`: it is a prefetch, and losing one costs a round trip.
+    if (rarity !== null && path.length > 0) pendingReveal = { path, rarity };
+  }
+
+  /*
+    Fails closed, on the same side of the line as `rarity` and `plannedPath`.
+
+    A default of zero does not mean "nothing spent yet" — `advance` computes
+    `gained` as `tokensTotal - consumedTotal`, so on a key with a billion tokens
+    of history a zero re-injects the whole lifetime as growth in one settle:
+    graduation after graduation up to the transition cap, then more on the next
+    settle, each writing a Dex row for work that was already paid for. Growth
+    and collection granted twice for one lifetime of tokens, silently.
+
+    This field decides how much work has already been accounted for, which makes
+    it exactly the kind of invisible wrong guess this function refuses to make
+    elsewhere. Zero remains perfectly valid when it is *stored* — every companion
+    starts there — it is an absent or unreadable value that is refused.
+  */
+  const storedConsumed = parsed.consumedTotal;
+  if (typeof storedConsumed !== "number" || !Number.isFinite(storedConsumed)) return null;
+
   const eggTier = asRarity(parsed.eggTier);
 
   return {
-    consumedTotal: Math.max(0, asInt(parsed.consumedTotal, 0)),
+    // Clamped, not defaulted: a negative here would make `gained` larger than
+    // the tokens actually credited.
+    consumedTotal: Math.max(0, Math.trunc(storedConsumed)),
     active,
     eggUsage: Math.max(0, asInt(parsed.eggUsage, 0)),
     // A tier that does not parse becomes no guarantee, which is the safe
     // direction: it declines to invent a promise nobody paid for.
     eggTier: eggTier === null || eggTier === "legendary" ? null : eggTier,
     pendingHatch,
+    pendingReveal,
+    lure: parsed.lure === true,
+    incense: parsed.incense === true,
+    // Validated as a species id rather than trusted, because it reaches `roll`
+    // as an exclusion and a non-integer would silently match nothing — a repel
+    // that reads as spent and does not repel.
+    repel:
+      typeof parsed.repel === "number" && Number.isInteger(parsed.repel) && parsed.repel > 0
+        ? parsed.repel
+        : null,
     inventory,
   };
 }

@@ -6,7 +6,7 @@ import { Dex } from "./Dex.tsx";
 import { activityOf } from "./format.ts";
 import { Hero } from "./Hero.tsx";
 import { KeyPicker } from "./KeyPicker.tsx";
-import { Button, Dim, KeyId, Notice, Panel, Row, SectionHead } from "./primitives.ts";
+import { Button, Dim, KeyId, Notice, Panel, PanelHead, SectionHead } from "./primitives.ts";
 import { Shop } from "./Shop.tsx";
 import type { CompanionView, Roster, ShopEntry } from "./types.ts";
 
@@ -134,6 +134,17 @@ function Companion({ pluginId, api }: PluginUiProps) {
     onSuccess: invalidate,
   });
 
+  // Its own mutation rather than another `use`, mirroring the server: taking an
+  // everstone off spends nothing, and routing it through the item path would
+  // require holding a spare stone to release the one already on.
+  const release = useMutation({
+    mutationFn: () => api.post(`keys/${showing}/unpin`),
+    onMutate: () => setRefusal(null),
+    onError: (error: unknown) =>
+      setRefusal(error instanceof Error ? error.message : "the companion could not be released"),
+    onSuccess: invalidate,
+  });
+
   if (roster.isPending) return <Panel>Loading…</Panel>;
 
   if (showing === null) {
@@ -149,7 +160,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
 
   return (
     <Panel>
-      <Row>
+      <PanelHead>
         <h2>Companion</h2>
         <KeyId>{showing}</KeyId>
         {/*
@@ -171,16 +182,18 @@ function Companion({ pluginId, api }: PluginUiProps) {
         <Button onClick={() => setScreen({ at: "roster" })} type="button">
           All keys
         </Button>
-      </Row>
+      </PanelHead>
 
       <CompanionBody
         buy={buy.mutate}
         buying={buy.isPending}
         keyId={showing}
+        onRelease={() => release.mutate()}
         onUse={use.mutate}
         pluginId={pluginId}
         query={companion}
         refusal={refusal}
+        releasing={release.isPending}
         using={use.isPending}
       />
     </Panel>
@@ -199,8 +212,10 @@ function CompanionBody({
   pluginId,
   buy,
   onUse,
+  onRelease,
   buying,
   using,
+  releasing,
   refusal,
 }: {
   query: { isPending: boolean; isError: boolean; data: CompanionView | undefined };
@@ -208,8 +223,10 @@ function CompanionBody({
   pluginId: string;
   buy: (entry: ShopEntry) => void;
   onUse: (item: string) => void;
+  onRelease: () => void;
   buying: boolean;
   using: boolean;
+  releasing: boolean;
   refusal: string | null;
 }) {
   if (query.isPending) return <Dim>Loading…</Dim>;
@@ -238,10 +255,23 @@ function CompanionBody({
 
   return (
     <>
-      <Hero activity={activity} pluginId={pluginId} view={view} />
+      <Hero
+        activity={activity}
+        onRelease={onRelease}
+        pluginId={pluginId}
+        releasing={releasing}
+        view={view}
+      />
 
       <SectionHead>Shop</SectionHead>
-      <Shop offers={view.shop} onBuy={buy} pending={buying} wallet={view.wallet} />
+      <Shop
+        hasCompanion={view.state.active !== null}
+        inventory={view.state.inventory}
+        offers={view.shop}
+        onBuy={buy}
+        pending={buying}
+        wallet={view.wallet}
+      />
 
       <SectionHead>Bag</SectionHead>
       <Bag inventory={view.state.inventory} onUse={onUse} pending={using} />

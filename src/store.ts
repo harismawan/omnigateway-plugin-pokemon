@@ -347,9 +347,27 @@ export function shopPrice(entry: ShopEntry): number {
   return entry.kind === "item" ? ITEM_PRICES[entry.item] : freshEggPrice(entry.tier);
 }
 
+/**
+ * Why an item declined to act, as opposed to why it could not be reached.
+ *
+ * Separate from `none-held` and friends because the two are different facts to
+ * an operator: "you do not have one" is about the bag, and these are about the
+ * companion the item was aimed at.
+ */
+export type ItemRefusal = "no-companion" | "nothing-new" | "already-armed" | "already-owned";
+
 export type ConsumeResult =
   | { ok: true; row: CompanionRow }
-  | { ok: false; reason: "none-held" | "unreadable" | "missing" };
+  | { ok: false; reason: "none-held" | "unreadable" | "missing" | ItemRefusal };
+
+/**
+ * What an item's effect returns: the state it produced, or why it did nothing.
+ *
+ * A plain `CompanionState` cannot express the second, which is exactly how the
+ * mint bug worked — an effect with an unmet precondition returned its argument
+ * unchanged, indistinguishable from an effect that ran and changed nothing.
+ */
+export type ItemOutcome = { applied: CompanionState } | { refused: ItemRefusal };
 
 /**
  * Spends one held item.
@@ -361,12 +379,23 @@ export type ConsumeResult =
  * Refuses on an unreadable save for the same reason `purchase` does — the state
  * an effect mutates cannot be read, and writing a fresh one over it would
  * destroy what could not be read.
+ *
+ * **The effect runs before the item is spent, and the order is the whole point.**
+ * This used to decrement first and hand the reduced inventory to the effect,
+ * then write whatever came back — so an effect whose precondition was not met
+ * returned its argument unchanged and the item vanished for nothing, with
+ * `{ ok: true }` on the way out. A mint used on an egg was one item gone and
+ * no nature rerolled. Every item has a precondition, so that was one bug per
+ * item waiting to be written.
+ *
+ * The effect therefore sees the state as it stands, and the decrement is applied
+ * to what the effect produced rather than to what it was given.
  */
 export function consume(
   storage: PluginStorage,
   apiKeyId: string,
   item: ItemKind,
-  applyToState: (state: CompanionState) => CompanionState,
+  applyToState: (state: CompanionState) => ItemOutcome,
   now: number,
 ): ConsumeResult {
   const row = readCompanion(storage, apiKeyId);
@@ -374,10 +403,18 @@ export function consume(
   if (row.state === null) return { ok: false, reason: "unreadable" };
   if ((row.state.inventory[item] ?? 0) <= 0) return { ok: false, reason: "none-held" };
 
-  const nextState = applyToState({
-    ...row.state,
-    inventory: { ...row.state.inventory, [item]: (row.state.inventory[item] ?? 0) - 1 },
-  });
+  const outcome = applyToState(row.state);
+  // Nothing written, nothing spent. A refusal must leave the save exactly as it
+  // was, or it is not a refusal.
+  if ("refused" in outcome) return { ok: false, reason: outcome.refused };
+
+  const nextState: CompanionState = {
+    ...outcome.applied,
+    inventory: {
+      ...outcome.applied.inventory,
+      [item]: (outcome.applied.inventory[item] ?? 0) - 1,
+    },
+  };
   storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
     serialiseState(nextState),
     now,
@@ -388,7 +425,7 @@ export function consume(
 
 export type PurchaseResult =
   | { ok: true; row: CompanionRow }
-  | { ok: false; reason: "insufficient" | "unreadable" | "missing" };
+  | { ok: false; reason: "insufficient" | "unreadable" | "missing" | ItemRefusal };
 
 /**
  * Buys one shop entry.
@@ -418,7 +455,7 @@ export function purchase(
   storage: PluginStorage,
   apiKeyId: string,
   entry: ShopEntry,
-  applyToState: (state: CompanionState) => CompanionState,
+  applyToState: (state: CompanionState) => ItemOutcome,
   now: number,
 ): PurchaseResult {
   const price = shopPrice(entry);
@@ -432,7 +469,13 @@ export function purchase(
     if (row.state === null) return { ok: false, reason: "unreadable" };
     if (wallet(row) < price) return { ok: false, reason: "insufficient" };
 
-    const nextState = applyToState(row.state);
+    // The same channel `consume` has, and for the same reason: an effect that
+    // cannot do anything must be able to say so, or it is indistinguishable
+    // from one that ran and changed nothing — and here the wallet is debited
+    // either way. A second shiny charm was the live instance.
+    const outcome = applyToState(row.state);
+    if ("refused" in outcome) return { ok: false, reason: outcome.refused };
+    const nextState = outcome.applied;
     storage.run(
       "UPDATE {{companion}} SET state = ?, tokens_spent = tokens_spent + ?, updated_at = ? WHERE api_key_id = ?",
       [serialiseState(nextState), price, now, apiKeyId],

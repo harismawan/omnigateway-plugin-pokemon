@@ -84,6 +84,14 @@ export type Roll = {
   nature: Nature;
   /** True when this hatch is a Ditto wearing `speciesId` as a disguise. */
   ditto: boolean;
+  /**
+   * Whether a lure actually narrowed this roll.
+   *
+   * False when none was armed, and false when one was armed but had to be
+   * dropped to leave anything rollable. The caller spends the lure on `true`
+   * alone, so an item that did no work is still there tomorrow.
+   */
+  usedLure: boolean;
 };
 
 /**
@@ -120,10 +128,41 @@ export type RollInput = {
    * few species unreachable once everything else was collected.
    */
   collectedFinals: ReadonlySet<number>;
+  /**
+   * A lure: consider only species whose final form is not already in the Dex.
+   *
+   * A hard filter where `collectedFinals` is only a weighting, which is exactly
+   * what is being bought — the weighting makes a duplicate unlikely, the lure
+   * makes it impossible for one hatch.
+   *
+   * Safe to set unconditionally. It is a preference and never a veto: if
+   * honouring it would leave nothing rollable it is dropped, and `Roll.usedLure`
+   * reports which happened so the caller can decline to spend it.
+   */
+  onlyUncollected?: boolean;
+  /**
+   * An incense: weight toward lines with more forms.
+   *
+   * Free of economy consequences by construction. `phaseThreshold` sums to the
+   * same total whatever the form count, so a longer line costs no more to
+   * graduate — it just has more evolutions along the way. This buys events.
+   */
+  preferLongLines?: boolean;
+  /** A repel: one final form this roll must not produce. */
+  excludeFinal?: number | null;
 };
 
 /** How much less likely an already-collected species is. */
 const COLLECTED_WEIGHT = 0.25;
+
+/**
+ * How much a form is worth to the incense.
+ *
+ * Multiplicative on the existing weight rather than replacing it, so a rare
+ * three-stage line does not become common just because it is long — the incense
+ * tilts within the distribution instead of flattening it.
+ */
+const FORM_WEIGHT = 0.6;
 
 /**
  * Picks a species, its shininess, its nature, and whether it is a disguised
@@ -142,16 +181,48 @@ const COLLECTED_WEIGHT = 0.25;
 export function roll(input: RollInput): Roll | null {
   const random = mulberry32(input.seed);
 
-  const eligible = input.candidates.filter((candidate) => {
-    // A species with no animation is not a candidate at all: a still sprite
-    // beside moving ones reads as broken rather than as variety.
-    if (!hasAnimatedSprite(candidate.id)) return false;
-    // Ditto is reachable only by revealing a disguise, never by a hatch.
-    if (candidate.id === DITTO_SPECIES_ID) return false;
-    if (input.guarantee === null) return true;
-    const rarity = rarityFromCaptureRate(candidate.captureRate, false, false);
-    return sortRank(rarity) >= sortRank(input.guarantee);
-  });
+  const eligibleWith = (withLure: boolean): readonly SpeciesCandidate[] =>
+    input.candidates.filter((candidate) => {
+      // A species with no animation is not a candidate at all: a still sprite
+      // beside moving ones reads as broken rather than as variety.
+      if (!hasAnimatedSprite(candidate.id)) return false;
+      // Ditto is reachable only by revealing a disguise, never by a hatch.
+      if (candidate.id === DITTO_SPECIES_ID) return false;
+      // The repel, and it names a *final* form so it refuses the whole line
+      // rather than the one base the player happened to be looking at.
+      if (input.excludeFinal != null && candidate.finalId === input.excludeFinal) return false;
+      if (withLure && input.collectedFinals.has(candidate.finalId)) return false;
+      if (input.guarantee === null) return true;
+      const rarity = rarityFromCaptureRate(candidate.captureRate, false, false);
+      return sortRank(rarity) >= sortRank(input.guarantee);
+    });
+
+  /*
+    The lure is a preference, never a veto, and that decision belongs here rather
+    than in the caller.
+
+    It cannot be checked from outside: the caller would have to ask "is anything
+    uncollected", which is a weaker question than the one that matters — the
+    *intersection* of uncollected with the rarity floor and any armed repel. Ask
+    the weaker question and this happens: every rare-or-better final collected, a
+    guaranteed-rare egg bought, a lure armed. Uncollected species exist, so the
+    lure looks usable; the intersection is empty, `roll` answers null, and null
+    is indistinguishable from "no candidate index yet". The egg sits at its
+    threshold retrying identically on every poll, forever, with the lure still
+    armed to do it again to the next one.
+
+    So the lure is applied when it leaves something to roll and dropped when it
+    does not. `usedLure` tells the caller which happened, so a lure that did no
+    work is not spent.
+
+    The guarantee wins the collision on purpose: it costs up to 4B where the lure
+    costs 1B, and a rare egg hatching a common is the exact failure the tier
+    pricing exists to prevent.
+  */
+  const wanted = input.onlyUncollected === true;
+  const lured = wanted ? eligibleWith(true) : [];
+  const usedLure = wanted && lured.length > 0;
+  const eligible = usedLure ? lured : eligibleWith(false);
 
   if (eligible.length === 0) return null;
 
@@ -159,7 +230,12 @@ export function roll(input: RollInput): Roll | null {
   // 255 is common, a rate of 3 is not.
   const weights = eligible.map((candidate) => {
     const base = Math.max(1, candidate.captureRate);
-    return input.collectedFinals.has(candidate.finalId) ? base * COLLECTED_WEIGHT : base;
+    const collected = input.collectedFinals.has(candidate.finalId) ? base * COLLECTED_WEIGHT : base;
+    // A one-form line is unchanged, so the incense never makes a species *less*
+    // likely than it was — it only lifts the longer ones past it.
+    return input.preferLongLines === true
+      ? collected * (1 + FORM_WEIGHT * (Math.max(1, candidate.forms) - 1))
+      : collected;
   });
   const total = weights.reduce((a, b) => a + b, 0);
 
@@ -185,5 +261,5 @@ export function roll(input: RollInput): Roll | null {
   const dittoEligible = rarity === "common" && chosen.forms >= 2;
   const ditto = dittoEligible && random() < 1 / ODDS.dittoDisguise;
 
-  return { speciesId: chosen.id, isShiny, nature, ditto };
+  return { speciesId: chosen.id, isShiny, nature, ditto, usedLure };
 }

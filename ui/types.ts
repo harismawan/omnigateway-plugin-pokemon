@@ -37,6 +37,12 @@ export type CompanionView = {
       isShiny: boolean;
       nature: string;
       dittoDisguise: number | null;
+      /** True once the disguise has been dropped, which is when the hint stops. */
+      dittoRevealed: boolean;
+      /** Pinned: this companion will not evolve, reveal, or graduate. */
+      everstone: boolean;
+      /** Growing faster, for as long as this companion lasts. */
+      soothe: boolean;
     } | null;
     eggUsage: number;
     eggTier: Rarity | null;

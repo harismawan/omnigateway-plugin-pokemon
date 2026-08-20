@@ -6,7 +6,7 @@ import {
   rarityFromCaptureRate,
 } from "../src/balance.ts";
 import { NATURES, type Roll, roll, type SpeciesCandidate } from "../src/roll.ts";
-import { freshState, hasShinyCharm } from "../src/state.ts";
+import { emptyInventory, freshState, hasShinyCharm } from "../src/state.ts";
 
 /** A spread of candidates across every rarity band, all with animations. */
 /**
@@ -115,7 +115,10 @@ test("a charm in the bag reaches the roll, and an empty bag does not", () => {
   // same egg is shiny holding the charm and not shiny without it. The species is
   // drawn before the shiny check, so it is identical either way — which is what
   // makes the difference attributable to the charm and to nothing else.
-  const holding = { ...freshState(), inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 } };
+  const holding = {
+    ...freshState(),
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 0, shinyCharm: 1 },
+  };
   const empty = freshState();
 
   // The seam is asserted before the flag itself, deliberately: a failure here
@@ -204,4 +207,109 @@ test("every roll carries one of the 25 natures", () => {
     expect(nature).toBeDefined();
     expect(NATURES).toContain(nature as (typeof NATURES)[number]);
   }
+});
+
+// --- the bought modifiers ------------------------------------------------------
+
+test("a lure never produces a species already in the Dex", () => {
+  // The difference from the diversity weighting, which is what is being bought:
+  // that makes a duplicate unlikely, this makes it impossible for one hatch.
+  const collectedFinals = new Set([3, 12, 100, 144]);
+
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { collectedFinals, onlyUncollected: true });
+    expect(result).not.toBeNull();
+    if (result === null) continue;
+    const candidate = CANDIDATES.find((one) => one.id === result.speciesId);
+    expect(collectedFinals.has(candidate?.finalId as number)).toBe(false);
+  }
+});
+
+test("a lure with nothing left to find is dropped rather than emptying the pool", () => {
+  // The lure must never be able to stop a hatch. An empty pool returns null,
+  // which the caller cannot tell apart from "no candidate index yet" — so it
+  // would sit at the threshold retrying identically on every poll, forever.
+  const everything = new Set(CANDIDATES.map((one) => one.finalId));
+  const result = rollWith(1, { collectedFinals: everything, onlyUncollected: true });
+
+  expect(result).not.toBeNull();
+  // And it says so, which is what lets the caller leave the lure armed for a day
+  // when there is something new to find.
+  expect(result?.usedLure).toBe(false);
+});
+
+test("a lure the guarantee rules out is dropped, not left to brick the egg", () => {
+  // The case a collected-set check alone cannot see, and the one that stranded
+  // 5B: every rare-or-better final collected, a guaranteed-rare egg bought, and
+  // a lure armed. Uncollected species exist, so "is anything uncollected" says
+  // yes — but the *intersection* with the rarity floor is empty.
+  const collectedFinals = new Set([3, 144]);
+  const result = rollWith(1, { collectedFinals, guarantee: "rare", onlyUncollected: true });
+
+  expect(result).not.toBeNull();
+  expect(result?.usedLure).toBe(false);
+  // The guarantee is what must survive the collision: it was paid for, the lure
+  // is the cheaper of the two, and a rare egg that hatches a common is the
+  // failure the tier pricing exists to prevent.
+  const chosen = CANDIDATES.find((one) => one.id === result?.speciesId);
+  expect(rarityFromCaptureRate(chosen?.captureRate ?? 255, false, false)).toBe("rare");
+});
+
+test("a lure that can be honoured reports that it was", () => {
+  // Guards the implementation that satisfies the two above by never applying
+  // the filter at all.
+  const result = rollWith(1, { collectedFinals: new Set([3]), onlyUncollected: true });
+  expect(result?.usedLure).toBe(true);
+});
+
+test("a repel refuses the whole line, not just the form that was held", () => {
+  // It names a final, so a player holding the middle form of a line is not
+  // handed its base on the next roll.
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { excludeFinal: 12 });
+    expect(result?.speciesId).not.toBe(10);
+  }
+});
+
+test("a repel leaves everything else reachable", () => {
+  // Guards the implementation that satisfies the test above by excluding too
+  // much, or by refusing to roll at all.
+  const species = new Set<number>();
+  for (let seed = 1; seed <= 200; seed++) {
+    const result = rollWith(seed, { excludeFinal: 12 });
+    if (result !== null) species.add(result.speciesId);
+  }
+  expect(species.size).toBeGreaterThan(1);
+});
+
+test("an incense tilts toward longer lines without flattening rarity", () => {
+  const multiForm = (r: Roll): boolean =>
+    (CANDIDATES.find((one) => one.id === r.speciesId)?.forms ?? 1) > 1;
+
+  const plain = rate(multiForm, 400);
+  const incensed = rate(multiForm, 400, { preferLongLines: true });
+  expect(incensed).toBeGreaterThan(plain);
+
+  // Still a tilt and not a rewrite: the rare band is weighted by capture rate,
+  // and a three-stage rare must not become common just because it is long.
+  const rareRate = rate(
+    (r) =>
+      rarityFromCaptureRate(
+        CANDIDATES.find((one) => one.id === r.speciesId)?.captureRate ?? 255,
+        false,
+        false,
+      ) === "rare",
+    400,
+    { preferLongLines: true },
+  );
+  expect(rareRate).toBeLessThan(0.5);
+});
+
+test("the modifiers do not disturb the seed", () => {
+  // They change which candidates are on the table, not which way the dice fall.
+  // If a modifier consumed a random draw, an unrelated roll would shift under it
+  // and a retried prefetch would stop reproducing.
+  const withNone = rollWith(7, { collectedFinals: new Set() });
+  const withInertRepel = rollWith(7, { collectedFinals: new Set(), excludeFinal: 999 });
+  expect(withInertRepel).toEqual(withNone);
 });

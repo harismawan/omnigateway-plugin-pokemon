@@ -5,6 +5,7 @@
 import { definePlugin, type PluginContext, type PluginRoute } from "@omnigateway/plugin-api/define";
 import type { CompanionEvent } from "./advance.ts";
 import {
+  DITTO_SPECIES_ID,
   EGG_HATCH_THRESHOLD,
   freshEggPrice,
   ITEM_KINDS,
@@ -15,13 +16,20 @@ import {
   rarityFromCaptureRate,
 } from "./balance.ts";
 import { decideGrant, windowKey } from "./grants.ts";
-import { cachedSpeciesName, speciesDetail, speciesIndex, spriteBytes } from "./pokeapi.ts";
+import {
+  cachedSpeciesName,
+  speciesDetail,
+  speciesDetails,
+  speciesIndex,
+  spriteBytes,
+} from "./pokeapi.ts";
 import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
 import {
   consume,
   creditTokens,
+  type ItemOutcome,
   lastGrantedAt,
   listCompanions,
   MIGRATIONS,
@@ -44,6 +52,36 @@ import {
  * de-evolves anything.
  */
 const MAX_MULTIPLIER = 1_000;
+
+/**
+ * How many unknown species one poll of the key route may go and look up.
+ *
+ * A Dex holds one row per graduation, so an install that has been running for
+ * months can present a hundred names at once — and warming them unbounded would
+ * be the burst `INDEX_FETCH_CONCURRENCY` exists to avoid, fired from a request
+ * path rather than from a background prefetch. Eight per poll chews through a
+ * large Dex over a few minutes of an open panel, which is the right pace for
+ * something nobody is waiting on.
+ */
+const WARM_PER_POLL = 8;
+
+/**
+ * How long a species that could not be named is left alone, and the ceiling
+ * that backoff climbs to.
+ *
+ * Both extremes here are wrong, and the first version of this shipped one of
+ * them. Retrying on the next poll turns a species PokéAPI answers 404 for into
+ * four requests a minute for as long as any panel is open — `fetchJson` cannot
+ * tell a permanent 404 from an outage, so "it failed, the network must be down"
+ * is an assumption that never expires. Never retrying loses a name to one bad
+ * afternoon, which is the failure this whole warm-up exists to undo.
+ *
+ * Doubling from a minute to an hour costs a handful of attempts to establish
+ * that something is permanently missing, and still recovers on its own from an
+ * outage of any length.
+ */
+const WARM_BACKOFF_MS = 60_000;
+const WARM_BACKOFF_MAX_MS = 60 * 60_000;
 
 function multiplierFrom(config: Readonly<Record<string, unknown>>): number {
   const raw = config.multiplier;
@@ -103,7 +141,14 @@ export default definePlugin({
     const prefetchOnce = (apiKeyId: string, state: CompanionState): Promise<void> => {
       const existing = inFlight.get(apiKeyId);
       if (existing !== undefined) return existing;
-      const started = prefetchHatch(apiKeyId, state).finally(() => inFlight.delete(apiKeyId));
+      // Both prefetches behind one latch, because they are two answers to the
+      // same question — what does this companion become next — and exactly one
+      // of them applies at a time: a hatch needs no active Pokémon, a reveal
+      // needs one. A second latch would only let a poll start a reveal while a
+      // hatch was still running for the same key.
+      const started = prefetchHatch(apiKeyId, state)
+        .then(() => prefetchReveal(apiKeyId, state))
+        .finally(() => inFlight.delete(apiKeyId));
       inFlight.set(apiKeyId, started);
       return started;
     };
@@ -129,6 +174,98 @@ export default definePlugin({
       const found = await cachedSpeciesName({ files }, speciesId);
       if (found !== null) names.set(speciesId, found);
       return found;
+    };
+
+    /**
+     * Species being fetched right now, so a poll that lands while an earlier
+     * one is still in flight does not ask for the same documents again.
+     *
+     * Membership only — what to do about a species once its request *finishes*
+     * is `cold`'s question, and conflating the two is what made the first
+     * version retry a permanent 404 forever. This empties on settle by design.
+     */
+    const warming = new Set<number>();
+
+    /**
+     * Species that could not be named, and the instant it is worth asking again.
+     *
+     * The counterpart to `names` remembering only hits, and the two are not in
+     * conflict: a hit is an immutable fact and is kept forever, a miss is a
+     * guess about the world and is kept only as long as the guess is cheap to
+     * hold. Without this the only dedup was `warming`, which empties the moment
+     * a request settles — so a species that fails *deterministically* was asked
+     * for again on the very next poll, and again, forever.
+     *
+     * `failures` is kept rather than just the deadline because the backoff
+     * doubles, and a counter that reset on every attempt would never leave the
+     * first rung.
+     */
+    const cold = new Map<number, { until: number; failures: number }>();
+
+    /**
+     * Fetches the species documents behind a set of missing names, in the
+     * background, at a bounded rate, and never in a tight loop.
+     *
+     * This is the counterpart to `cachedSpeciesName` having no `net`, not a hole
+     * in it. That function stays cache-only and stays cheap, because it is
+     * called once per rendered sprite on every poll; this runs from the one
+     * route that is showing a single companion. The roster deliberately does not
+     * call it — see `GET /keys`.
+     *
+     * Needed because `prefetchHatch`, which is what fills the species cache,
+     * returns early once a companion is active. A save that hatched before its
+     * cache was lost — `data/` is excluded from database snapshots, so every
+     * restore does exactly that — could never refill it, and showed `#11` for
+     * the rest of the install's life.
+     */
+    const warmNames = (ids: readonly number[]): void => {
+      if (net === undefined || files === undefined) return;
+      const now = ctx.now();
+
+      const batch: number[] = [];
+      for (const id of ids) {
+        if (batch.length >= WARM_PER_POLL) break;
+        // Belt and braces at this call site, which only ever passes ids `nameOf`
+        // has just missed on — and load-bearing for any other, which is the
+        // point of a function that takes a list of ids rather than reading one.
+        if (names.has(id) || warming.has(id)) continue;
+        const chilled = cold.get(id);
+        // Skipped without consuming a slot, so eight species PokéAPI has
+        // forgotten cannot starve the ninth. `readDex` orders by `caught_at`,
+        // so without this the same eight were retried on every poll and every
+        // entry behind them was unreachable for the life of the process.
+        if (chilled !== undefined && now < chilled.until) continue;
+        batch.push(id);
+        // Written before the next iteration, so a Dex holding one species twice
+        // still produces one request.
+        warming.add(id);
+      }
+      if (batch.length === 0) return;
+
+      // One call rather than one per id, so a poll's warms share chain
+      // resolution instead of fetching one evolution line eight times.
+      void speciesDetails({ net, files }, batch)
+        .then((details) => {
+          batch.forEach((id, index) => {
+            // "Did this produce a name", not "did this produce a document". A
+            // cached species with no English entry parses perfectly and still
+            // leaves the panel showing a number, and retrying it every poll
+            // would burn a slot forever for a document already on disk.
+            if (details[index]?.names.en !== undefined) {
+              cold.delete(id);
+              return;
+            }
+            const failures = (cold.get(id)?.failures ?? 0) + 1;
+            const wait = Math.min(WARM_BACKOFF_MS * 2 ** (failures - 1), WARM_BACKOFF_MAX_MS);
+            cold.set(id, { until: now + wait, failures });
+          });
+        })
+        // `speciesDetails` answers `null` per id rather than throwing; this is
+        // for the case it cannot cover, a capability that rejects outright.
+        .catch(() => {})
+        .finally(() => {
+          for (const id of batch) warming.delete(id);
+        });
     };
 
     /**
@@ -162,6 +299,56 @@ export default definePlugin({
     };
 
     /**
+     * Resolves what a disguised companion will turn out to be, before it does.
+     *
+     * The counterpart to `prefetchHatch` and the reason `advance` can stay pure
+     * through a reveal: Ditto's line and rarity live behind PokéAPI, and the
+     * transition itself must not need them. Resolved as soon as a disguise is
+     * seen rather than at its threshold, so the answer is already on disk by the
+     * time it is wanted — a reveal that had to wait for a fetch would stall a
+     * companion at a threshold it had already paid for.
+     *
+     * Rarity is derived from the fetched detail rather than written down here,
+     * for the same reason the hatch derives it: a hardcoded "Ditto is rare"
+     * decides the graduation total the revealed companion carries for life, and
+     * it would be a second copy of a fact PokéAPI already answers.
+     */
+    const prefetchReveal = async (apiKeyId: string, state: CompanionState): Promise<void> => {
+      const mon = state.active;
+      if (mon === null || mon.dittoDisguise === null || mon.dittoRevealed) return;
+      if (state.pendingReveal !== null) return;
+      if (net === undefined || files === undefined) return;
+
+      const detail = await speciesDetail({ net, files }, DITTO_SPECIES_ID);
+      if (detail === null) return;
+
+      const current = readCompanion(storage, apiKeyId);
+      // Re-read rather than trusting the state this started from: an await
+      // happened, and a credit may have landed — or the reveal may already have
+      // been resolved by a poll that overlapped this one.
+      if (current?.state == null) return;
+      const latest = current.state.active;
+      if (latest === null || latest.dittoDisguise === null || latest.dittoRevealed) return;
+      if (current.state.pendingReveal !== null) return;
+
+      storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
+        JSON.stringify({
+          ...current.state,
+          pendingReveal: {
+            path: detail.chain,
+            rarity: rarityFromCaptureRate(
+              detail.captureRate,
+              detail.isLegendary,
+              detail.isMythical,
+            ),
+          },
+        }),
+        ctx.now(),
+        apiKeyId,
+      ]);
+    };
+
+    /**
      * Rolls the next species for an egg that has none.
      *
      * Prefetched while the egg is still incubating, so the hatch itself needs no
@@ -184,6 +371,13 @@ export default definePlugin({
         guarantee: state.eggTier,
         hasShinyCharm: hasShinyCharm(state),
         collectedFinals: collected,
+        // The three bought modifiers. None of them touch the seed — they change
+        // which candidates are on the table, not which way the dice fall — so a
+        // retried prefetch with the same modifiers still produces the same
+        // Pokémon.
+        onlyUncollected: state.lure,
+        preferLongLines: state.incense,
+        excludeFinal: state.repel,
       });
       if (rolled === null) return;
 
@@ -209,6 +403,33 @@ export default definePlugin({
       // Re-read rather than trusting the state this started from: an await
       // happened in between, and a credit may have landed.
       if (current?.state == null || current.state.pendingHatch !== null) return;
+      // Nor may it have hatched. A roll written onto a companion that already
+      // exists would queue itself for whatever egg comes next, with this egg's
+      // modifiers already spent on it.
+      if (current.state.active !== null) return;
+      /*
+        And nothing the player *paid for* may have changed under us.
+
+        This roll was made from the state captured before two awaits — the
+        species index alone is ~649 fetches on a cold cache, which is minutes of
+        window. Everything bought in that window lands in the save while the roll
+        is still in the air, and the guard above only noticed `pendingHatch`,
+        which an egg purchase sets to null on its way past. So a 4B
+        guaranteed-rare egg bought mid-flight was rolled against the *old*
+        `eggTier` and thrown away silently, and the same for a charm, a lure, an
+        incense and a repel.
+
+        Discarding the roll is the cheap correction: the next poll re-rolls
+        against the state as it now is, and by then the index it just built is
+        cached, so the retry costs nothing.
+
+        `consumedTotal` is deliberately *not* compared even though it seeds the
+        roll. It moves on every credited request, so requiring it to hold still
+        would mean a busy key never completes a prefetch at all — and its
+        staleness costs nothing, because it only decides which arbitrary species
+        an already-fair roll produced. What must not be stale is what was bought.
+      */
+      if (paidRollInputs(current.state) !== paidRollInputs(state)) return;
 
       storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
         JSON.stringify({
@@ -221,6 +442,18 @@ export default definePlugin({
             nature: rolled.nature,
             ditto: rolled.ditto,
           },
+          // Spent in the same write that stores the roll they shaped, so one
+          // purchase buys one hatch. Cleared here rather than at hatch time
+          // because the roll is the moment they did their work — leaving them
+          // set until the egg opens would let a second prefetch, after a fresh
+          // egg replaced this one, reuse a modifier that has already been used.
+          //
+          // A lure that had to be dropped is the exception: `roll` reports
+          // whether it actually narrowed anything, and one that did no work is
+          // still there tomorrow.
+          lure: state.lure && !rolled.usedLure,
+          incense: false,
+          repel: null,
         }),
         ctx.now(),
         apiKeyId,
@@ -340,6 +573,25 @@ export default definePlugin({
 
           const active = row.state?.active ?? null;
           const dex = readDex(storage, apiKeyId);
+
+          const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
+          const stageName = await nameOf(stageId);
+          // The name of what each entry graduated into, added alongside the
+          // stored row rather than into it: the Dex table holds facts about a
+          // graduation, and a species' name is a fact about PokéAPI.
+          const named = await Promise.all(
+            dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
+          );
+
+          // Best effort and deliberately not awaited, like the prefetch above.
+          // The companion first, so the heading fills in before the trophy case:
+          // a poll's warming budget is small, and the name an operator is
+          // looking at is worth more of it than one in a grid of sprites.
+          warmNames([
+            ...(stageId !== null && stageName === null ? [stageId] : []),
+            ...named.filter((entry) => entry.name === null).map((entry) => entry.finalId),
+          ]);
+
           return {
             json: {
               // Null rather than a fresh companion, so "cannot be read" and "has
@@ -366,17 +618,11 @@ export default definePlugin({
                * Resolved here rather than in the browser because the name lives
                * in the plugin's own cache directory, which the panel has no
                * route to and no business having one to. Null is an ordinary
-               * answer: an egg has no species, and a cold cache has no name yet.
+               * answer: an egg has no species, a cold cache has no name yet, and
+               * `warmNames` above has just gone to fetch the second case.
                */
-              name: await nameOf(
-                active === null ? null : (active.plannedPath[active.stageIndex] ?? null),
-              ),
-              // The name of what each entry graduated into, added alongside the
-              // stored row rather than into it: the Dex table holds facts about
-              // a graduation, and a species' name is a fact about PokéAPI.
-              dex: await Promise.all(
-                dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
-              ),
+              name: stageName,
+              dex: named,
               shop: shopCatalogue(),
               /**
                * What the current stage costs, so the panel can draw a meter that
@@ -451,6 +697,46 @@ export default definePlugin({
       },
       {
         method: "POST",
+        path: "/keys/:id/unpin",
+        /**
+         * Takes an everstone off, which is the one companion action that spends
+         * nothing.
+         *
+         * A route of its own rather than another `use`, because `use` runs
+         * through `consume` and `consume` refuses an item held zero times — so
+         * releasing through it would require holding a *spare* stone and would
+         * then spend that one to undo the first. Pinning would become a trap
+         * instead of a choice, which is the opposite of what the item is for.
+         *
+         * The stone is not returned. It was spent to pin, and this is simply the
+         * pin ending.
+         */
+        handler: (request) => {
+          const apiKeyId = request.params.id ?? "";
+          const row = readCompanion(storage, apiKeyId);
+          if (row === null) return { status: 404, json: { error: "no companion for that key" } };
+          if (row.state === null) return { status: 409, json: { error: "unreadable" } };
+
+          const active = row.state.active;
+          if (active === null) return { status: 409, json: { error: "no-companion" } };
+          // Refused rather than treated as a no-op, so a panel that has drifted
+          // out of date is told rather than shown a success that changed nothing.
+          if (!active.everstone) return { status: 409, json: { error: "nothing-new" } };
+
+          storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
+            JSON.stringify({ ...row.state, active: { ...active, everstone: false } }),
+            ctx.now(),
+            apiKeyId,
+          ]);
+          // Everything banked while pinned is still in `usedAtStage`, so this is
+          // the moment it spends itself — possibly through several stages at
+          // once, which `advance`'s transition cap already handles.
+          settleAndRecord(apiKeyId);
+          return { json: { ok: true } };
+        },
+      },
+      {
+        method: "POST",
         path: "/keys/:id/purchase",
         handler: (request) => {
           const apiKeyId = request.params.id ?? "";
@@ -474,6 +760,24 @@ export default definePlugin({
   },
 });
 
+/**
+ * Everything a roll depends on that somebody had to buy.
+ *
+ * Compared as one string so adding a modifier to `roll` and forgetting it here
+ * is a visible omission in one place rather than a missing `&&` in a chain.
+ * Deliberately excludes `consumedTotal`: see the call site for why the seed is
+ * allowed to go stale when a guarantee is not.
+ */
+function paidRollInputs(state: CompanionState): string {
+  return JSON.stringify([
+    state.eggTier,
+    hasShinyCharm(state),
+    state.lure,
+    state.incense,
+    state.repel,
+  ]);
+}
+
 /** A deterministic 32-bit seed from a string, so a retried roll is the same roll. */
 function hashSeed(input: string): number {
   let hash = 2166136261;
@@ -484,6 +788,21 @@ function hashSeed(input: string): number {
   return hash >>> 0;
 }
 
+/**
+ * The shop, cheapest first.
+ *
+ * Sorted rather than written in a good order, because the order this was written
+ * in *was* the declaration order — items by `ITEM_PRICES` key, then eggs — which
+ * put the 3B charm above the 1B egg and read as a pile rather than a price list.
+ * PokeTokenBar shipped exactly this bug and fixed it, and its note is worth
+ * carrying: the fix must not be "group the eggs together", because that pushes
+ * the 4B rare egg back above the charm and revives half of it. Price is the only
+ * ordering the reader can verify from the row itself.
+ *
+ * Sorting here rather than in the panel keeps one answer to "what is on sale and
+ * for how much" — a second ordering in the browser is a second thing to keep
+ * true when an entry is added.
+ */
 function shopCatalogue(): Array<{ entry: ShopEntry; price: number }> {
   return [
     ...ITEM_KINDS.map((item) => ({
@@ -496,7 +815,7 @@ function shopCatalogue(): Array<{ entry: ShopEntry; price: number }> {
       price: freshEggPrice("uncommon"),
     },
     { entry: { kind: "egg" as const, tier: "rare" as const }, price: freshEggPrice("rare") },
-  ];
+  ].sort((a, b) => a.price - b.price);
 }
 
 function parseShopEntry(body: unknown): ShopEntry | null {
@@ -524,26 +843,70 @@ function parseShopEntry(body: unknown): ShopEntry | null {
  * discarded one is not a graduation, so it never reaches the Dex. That is what
  * keeps rerolling from being a way to farm the collection.
  */
-function applyPurchase(state: CompanionState, entry: ShopEntry): CompanionState {
+function applyPurchase(state: CompanionState, entry: ShopEntry): ItemOutcome {
   if (entry.kind === "egg") {
-    return { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null };
+    /*
+      A shop egg means exactly one thing: release the current companion and
+      re-roll. With no companion there is nothing to release, so there is
+      nothing to sell.
+
+      Without this it sold anyway, and the reset below is unconditional — so
+      buying an egg part-way through an incubation charged 1B to 4B and
+      destroyed the progress, silently, which is the one thing a purchase must
+      never do. Refusing is better than carrying the incubation across: a plain
+      egg bought during incubation would then be 1B for no change at all, which
+      is the same loss wearing a different face.
+    */
+    if (state.active === null) return { refused: "no-companion" };
+    return {
+      applied: { ...state, active: null, eggUsage: 0, eggTier: entry.tier, pendingHatch: null },
+    };
+  }
+  // A passive item is one that cannot be spent, which means *owning* it is the
+  // whole effect — `hasShinyCharm` reads `> 0`, so the second one is a counter
+  // nobody reads and 3B gone. Derived from `HELD_ITEMS` rather than naming the
+  // charm, so an item added without an effect is guarded by default instead of
+  // by remembering.
+  if (!HELD_ITEMS.includes(entry.item as HeldItem) && (state.inventory[entry.item] ?? 0) > 0) {
+    return { refused: "already-owned" };
   }
   // A bought candy is stocked rather than spent on the spot, so buying and
   // being granted one put the same thing in the same place — and `use` is the
   // single site that applies the effect.
   return {
-    ...state,
-    inventory: { ...state.inventory, [entry.item]: (state.inventory[entry.item] ?? 0) + 1 },
+    applied: {
+      ...state,
+      inventory: { ...state.inventory, [entry.item]: (state.inventory[entry.item] ?? 0) + 1 },
+    },
   };
 }
 
 /** Items a player holds and spends, as opposed to the passive charm. */
-export type HeldItem = "rareCandy" | "mint";
+/**
+ * Items a player holds and spends, as opposed to the passive charm.
+ *
+ * A closed list rather than "every `ItemKind` that is not the charm", because
+ * this is the enforcement boundary: an item added to `ITEM_PRICES` must be given
+ * an effect deliberately, and a derived allowlist would admit it to the `use`
+ * route the moment it was priced — with `useItem` falling through to whatever
+ * its last branch happens to be.
+ */
+export const HELD_ITEMS = [
+  "rareCandy",
+  "mint",
+  "everstone",
+  "lure",
+  "sootheBell",
+  "incense",
+  "repel",
+] as const;
+
+export type HeldItem = (typeof HELD_ITEMS)[number];
 
 function parseHeldItem(body: unknown): HeldItem | null {
   if (typeof body !== "object" || body === null) return null;
   const item = (body as Record<string, unknown>).item;
-  return item === "rareCandy" || item === "mint" ? item : null;
+  return HELD_ITEMS.includes(item as HeldItem) ? (item as HeldItem) : null;
 }
 
 /**
@@ -557,20 +920,83 @@ function parseHeldItem(body: unknown): HeldItem | null {
  * previously a no-op that incremented a counter nobody read, and a test asserted
  * that counter, pinning the no-op as correct.
  */
-function useItem(state: CompanionState, item: HeldItem): CompanionState {
+function useItem(state: CompanionState, item: HeldItem): ItemOutcome {
+  // The four that act on the companion itself. Each refuses without one rather
+  // than returning the state unchanged — see `consume` for why the difference is
+  // the item.
+  if (item === "everstone" || item === "sootheBell" || item === "repel") {
+    const active = state.active;
+    if (active === null) return { refused: "no-companion" };
+
+    if (item === "everstone") {
+      // Pinning only. Releasing is `POST /keys/:id/unpin` and needs no item,
+      // because a toggle here could not work: `consume` refuses when the count
+      // is zero, so releasing would require holding a *spare* stone — and it
+      // would then spend that one to undo the first. Pinning would be a trap
+      // rather than a choice.
+      if (active.everstone) return { refused: "nothing-new" };
+      return { applied: { ...state, active: { ...active, everstone: true } } };
+    }
+    if (item === "sootheBell") {
+      // Refused rather than silently re-applied. A bell already on this
+      // companion cannot be improved by a second, and spending one to learn
+      // that is the burn this whole ordering exists to prevent.
+      if (active.soothe) return { refused: "nothing-new" };
+      return { applied: { ...state, active: { ...active, soothe: true } } };
+    }
+    // The repel names the line it is refusing, resolved here rather than at roll
+    // time: this is the companion the player is looking at when they decide they
+    // do not want another, and by the time the next roll happens it is gone.
+    const finalId = active.plannedPath[active.plannedPath.length - 1];
+    if (finalId === undefined) return { refused: "no-companion" };
+    // `roll` excludes Ditto unconditionally, so repelling it is a guaranteed
+    // no-op — and unlike the checks below it is a genuine state *change*, so
+    // `consume` could not have caught it.
+    if (finalId === DITTO_SPECIES_ID) return { refused: "nothing-new" };
+    // One slot, so a second repel can only overwrite — which means the first was
+    // paid for and thrown away. Refused rather than silently replaced, and
+    // refused even when it names the same line, which changed nothing at all
+    // while still costing the item. This was the last no-op burn left after
+    // `consume` was reordered: the other four modifiers got this guard and the
+    // repel did not.
+    if (state.repel !== null) return { refused: "already-armed" };
+    return { applied: { ...state, repel: finalId } };
+  }
+
+  if (item === "lure" || item === "incense") {
+    // Modifiers for a roll that has not happened. They need no companion — an
+    // egg is exactly when they are worth buying — but re-arming one that is
+    // already armed spends it for nothing.
+    if (item === "lure") {
+      if (state.lure) return { refused: "nothing-new" };
+      return { applied: { ...state, lure: true } };
+    }
+    if (state.incense) return { refused: "nothing-new" };
+    return { applied: { ...state, incense: true } };
+  }
+
   if (item === "mint") {
-    if (state.active === null) return state;
+    // Refused rather than returned unchanged. The two were indistinguishable to
+    // `consume`, which is how a mint used on an egg was spent for nothing.
+    if (state.active === null) return { refused: "no-companion" };
     const index = NATURES.indexOf(state.active.nature);
     // Deterministic rather than random: `advance` and everything around it is
     // pure, and a reroll that needed entropy would be the one call in the plugin
     // that could not be reproduced. Cycling is a reroll a player can repeat.
     const nature = NATURES[(index + 1) % NATURES.length] as (typeof NATURES)[number];
-    return { ...state, active: { ...state.active, nature } };
+    return { applied: { ...state, active: { ...state.active, nature } } };
   }
-  return state.active === null
-    ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
-    : {
-        ...state,
-        active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
-      };
+  // A candy works on an egg as well as on a companion — it is growth, and an
+  // egg grows. That is a deliberate divergence from the source app, which
+  // refuses it; here the overflow past the hatch threshold carries into the
+  // hatchling rather than being lost, so nothing is wasted.
+  return {
+    applied:
+      state.active === null
+        ? { ...state, eggUsage: state.eggUsage + RARE_CANDY_XP }
+        : {
+            ...state,
+            active: { ...state.active, usedAtStage: state.active.usedAtStage + RARE_CANDY_XP },
+          },
+  };
 }

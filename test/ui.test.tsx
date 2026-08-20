@@ -127,6 +127,9 @@ type Active = {
   isShiny: boolean;
   nature: string;
   dittoDisguise: number | null;
+  dittoRevealed: boolean;
+  everstone: boolean;
+  soothe: boolean;
 };
 
 type CompanionState = {
@@ -174,6 +177,9 @@ function active(patch: Partial<Active> = {}): Active {
     isShiny: false,
     nature: "brave",
     dittoDisguise: null,
+    dittoRevealed: false,
+    everstone: false,
+    soothe: false,
     ...patch,
   };
 }
@@ -683,6 +689,182 @@ describe("an active companion", () => {
     expect(screen.getByText("shiny")).toBeTruthy();
     expect(screen.getByText("rare")).toBeTruthy();
   });
+
+  test("hints that a disguised companion is not what it looks like", async () => {
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ dittoDisguise: 172, dittoRevealed: false }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.getByText("?")).toBeTruthy();
+  });
+
+  test("does not offer an egg while one is already incubating", async () => {
+    // An egg is a reroll. With nothing to reroll the server refuses it, so
+    // offering the button would be offering a guaranteed 409 — and buying it
+    // used to destroy the incubation outright.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: null, eggUsage: 4_000_000, eggTier: null, inventory: {} },
+          wallet: 9_000_000_000,
+          shop: [
+            { entry: { kind: "egg", tier: null }, price: 1_000_000_000 },
+            { entry: { kind: "item", item: "rareCandy" }, price: 500_000_000 },
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const egg = await screen.findByRole("button", { name: /fresh egg/ });
+    expect(egg.hasAttribute("disabled")).toBe(true);
+    // Everything else is still for sale, wallet permitting.
+    expect(screen.getByRole("button", { name: /rare candy/ }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("offers an egg once there is a companion to replace", async () => {
+    renderCompanion(
+      serving(
+        view({
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} },
+          wallet: 9_000_000_000,
+          shop: [{ entry: { kind: "egg", tier: null }, price: 1_000_000_000 }],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const egg = await screen.findByRole("button", { name: /fresh egg/ });
+    expect(egg.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("marks a passive already owned instead of offering to buy it twice", async () => {
+    // Owning the charm *is* its effect, so a second one is 3B for nothing. The
+    // server refuses it; this keeps the panel from offering a guaranteed 409.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active(),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: { shinyCharm: 1 },
+          },
+          wallet: 9_000_000_000,
+          shop: [
+            { entry: { kind: "item", item: "shinyCharm" }, price: 3_000_000_000 },
+            { entry: { kind: "item", item: "rareCandy" }, price: 500_000_000 },
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const charm = await screen.findByRole("button", { name: /shiny charm/ });
+    expect(charm.hasAttribute("disabled")).toBe(true);
+    // The price is replaced rather than sat beside: a price on something that
+    // cannot be bought is the one number on the row that means nothing.
+    expect(charm.textContent).toContain("owned");
+    expect(charm.textContent).not.toContain("3.0B");
+
+    // And a spendable item is untouched by the rule, wallet permitting.
+    const candy = screen.getByRole("button", { name: /rare candy/ });
+    expect(candy.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("says a pinned companion is held rather than showing it stuck", async () => {
+    // A pinned companion's progress runs past its threshold and keeps going, so
+    // the usual "X / Y to the next stage" would read as a number stuck above a
+    // line it should already have crossed — which is how a deliberate state gets
+    // diagnosed as a broken one.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ everstone: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+          progress: 9_000_000,
+          nextThreshold: 5_000_000,
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText(/Held at this stage/)).toBeTruthy();
+    expect(screen.queryByText(/to the next stage/)).toBeNull();
+    expect(screen.getByText("everstone")).toBeTruthy();
+  });
+
+  test("offers to release a pinned companion and asks the route that spends nothing", async () => {
+    const stub = renderCompanion({
+      ...serving(
+        view({
+          state: {
+            active: active({ everstone: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+      [`POST /api/plugins/pokemon/keys/${KEY}/unpin`]: () => ({ body: { ok: true } }),
+    });
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Release" }));
+
+    // The unpin route, not `use`: releasing through the item path would need a
+    // spare stone in hand and would spend it.
+    expect(
+      stub.calls.some((call) => call.method === "POST" && call.url.endsWith(`/keys/${KEY}/unpin`)),
+    ).toBe(true);
+  });
+
+  test("offers no release control when nothing is pinned", async () => {
+    renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.queryByRole("button", { name: "Release" })).toBeNull();
+  });
+
+  test("stops hinting once the disguise has dropped", async () => {
+    // `dittoDisguise` stays set after a reveal — it records what this one was
+    // pretending to be — so a hint keyed on it alone would mark a revealed Ditto
+    // as still hiding something for the rest of its life.
+    renderCompanion(
+      serving(
+        view({
+          state: {
+            active: active({ dittoDisguise: 172, dittoRevealed: true }),
+            eggUsage: 0,
+            eggTier: null,
+            inventory: {},
+          },
+        }),
+      ),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "Species 25" });
+
+    expect(screen.queryByText("?")).toBeNull();
+  });
 });
 
 describe("the shop", () => {
@@ -1060,7 +1242,7 @@ describe("the bag", () => {
   test("does not offer an item held zero times", async () => {
     // `freshState` writes every item at zero, so an unfiltered bag lists the
     // whole catalogue as if it were owned.
-    renderCompanion(serving(withInventory({ rareCandy: 0, mint: 5, shinyCharm: 0 })));
+    renderCompanion(serving(withInventory({ mint: 5 })));
     await openCompanion();
 
     expect(await screen.findByText("mint · 5")).toBeTruthy();
@@ -1069,7 +1251,7 @@ describe("the bag", () => {
   });
 
   test("says the bag is empty when nothing is held", async () => {
-    renderCompanion(serving(withInventory({ rareCandy: 0, mint: 0, shinyCharm: 0 })));
+    renderCompanion(serving(withInventory({})));
     await openCompanion();
 
     expect(await screen.findByText("Nothing in the bag.")).toBeTruthy();

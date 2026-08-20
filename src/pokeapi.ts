@@ -453,6 +453,28 @@ export function speciesDetail(deps: PokeApiDeps, id: number): Promise<SpeciesDet
 }
 
 /**
+ * Several species at once, sharing one chain resolution.
+ *
+ * `speciesDetail` builds a `ChainCache` per call, which is right for a lone
+ * lookup and wrong for a batch. Evolution lines are shared: a Dex stores one row
+ * per graduation, so a player who has taken the same line twice has two rows
+ * whose species sit on one chain — and eight separate `speciesDetail` calls
+ * would fetch and rewrite that one chain document eight times. `speciesIndex`
+ * threads a single map through all 649 for exactly this reason; anything that
+ * resolves more than one species should do the same.
+ *
+ * Settles when every id has, and a failure is that id's `null` rather than the
+ * batch's. One species PokéAPI has forgotten must not cost the other seven.
+ */
+export function speciesDetails(
+  deps: PokeApiDeps,
+  ids: readonly number[],
+): Promise<Array<SpeciesDetail | null>> {
+  const chains: ChainCache = new Map();
+  return Promise.all(ids.map((id) => loadDetail(deps, id, chains)));
+}
+
+/**
  * What a species is called, from the cache and from nowhere else.
  *
  * `files` alone, and enforced by the type rather than asserted here: `readJson`

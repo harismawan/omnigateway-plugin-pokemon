@@ -14,10 +14,11 @@ import {
   EGG_HATCH_THRESHOLD,
   freshEggPrice,
   graduationTotal,
+  ITEM_KINDS,
   ITEM_PRICES,
 } from "../src/balance.ts";
 import companion from "../src/server.ts";
-import { freshState, serialiseState } from "../src/state.ts";
+import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import { readCompanion, readDex, recordGraduation } from "../src/store.ts";
 import { createTestStorage, type TestStorage } from "./helpers/storage.ts";
 
@@ -44,6 +45,9 @@ import { createTestStorage, type TestStorage } from "./helpers/storage.ts";
  * What remains is what a third-party author can actually verify: that this
  * plugin's own migrations, routes and handlers do what they claim.
  */
+
+/** Plain, guaranteed-uncommon and guaranteed-rare: the three the shop lists. */
+const EGG_TIERS_ON_SALE = 3;
 
 const KEY = "key_1";
 let storage: TestStorage;
@@ -138,6 +142,91 @@ function cachedSpecies(species: readonly CachedSpecies[] = [COMMON_SPECIES]): Ca
 }
 
 /**
+ * A cold cache with the network reachable, which is exactly what a restore
+ * leaves behind: `data/` is excluded from database snapshots, so every species
+ * document a hatched companion's name came from is gone while PokéAPI is still
+ * there. `calls` is asserted rather than ignored — the whole risk in warming a
+ * name is that it becomes a crawl.
+ */
+function coldCacheOnline(
+  options: {
+    /** Species PokéAPI answers 404 for, which is a permanent failure and not an outage. */
+    missing?: readonly number[];
+    /** Which evolution chain a species belongs to. Its own, unless a test shares one. */
+    chainOf?: (id: number) => number;
+  } = {},
+): Capabilities & { calls: string[] } {
+  const store = new Map<string, Uint8Array>();
+  const calls: string[] = [];
+  const missing = new Set(options.missing ?? []);
+  const chainOf = options.chainOf ?? ((id: number) => id);
+
+  return {
+    calls,
+    files: {
+      read: async (path) => store.get(path) ?? null,
+      write: async (path, data) => {
+        store.set(path, data);
+      },
+      exists: async (path) => store.has(path),
+    },
+    net: async (url) => {
+      calls.push(url);
+      const species = /\/pokemon-species\/(\d+)$/.exec(url);
+      if (species !== null) {
+        const id = Number(species[1]);
+        if (missing.has(id)) return new Response("not found", { status: 404 });
+        return new Response(
+          JSON.stringify({
+            capture_rate: 255,
+            is_legendary: false,
+            is_mythical: false,
+            names: [{ language: { name: "en" }, name: `species-${id}` }],
+            evolution_chain: {
+              url: `https://pokeapi.co/api/v2/evolution-chain/${chainOf(id)}/`,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      const chain = /\/evolution-chain\/(\d+)$/.exec(url);
+      if (chain !== null) {
+        const root = Number(chain[1]);
+        // Every species this chain claims, so a shared chain resolves a line for
+        // each of its members rather than only for the one that asked.
+        const members = [root, root + 1].map((id) => ({
+          species: { url: `https://pokeapi.co/api/v2/pokemon-species/${id}/` },
+          evolves_to: [],
+        }));
+        return new Response(
+          JSON.stringify({
+            chain: { ...members[0], evolves_to: [members[1]] },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    },
+  };
+}
+
+/**
+ * Polls the key route until it carries a name, the way the panel does.
+ *
+ * Bounded and throwing, for the same reason as `prefetched`: a warm that never
+ * lands has to fail as a warm that never landed.
+ */
+async function namedBy(route: PluginRoute, apiKeyId: string): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: apiKeyId }, query: {}, body: null });
+    const { name } = found.json as { name: string | null };
+    if (name !== null) return name;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error(`no name ever landed for ${apiKeyId}`);
+}
+
+/**
  * Waits for the panel's prefetch to land a roll.
  *
  * The route fires it unawaited on purpose — a prefetch is an optimisation for
@@ -176,7 +265,10 @@ type Capabilities = { net: PluginFetch; files: PluginFiles };
 
 async function boot(
   config: Record<string, unknown> = {},
-  capabilities: Capabilities | null = null,
+  // Partial, because a capability the manifest declares can still be absent and
+  // the plugin has to degrade rather than throw — and the two halves degrade
+  // differently, so a test needs to be able to withhold exactly one.
+  capabilities: Partial<Capabilities> | null = null,
 ): Promise<void> {
   storage.migrate(companion.migrations ?? []);
 
@@ -232,6 +324,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
     "GET /keys/:id",
     "GET /sprite/:species",
     "POST /keys/:id/purchase",
+    "POST /keys/:id/unpin",
     "POST /keys/:id/use",
   ]);
 });
@@ -310,7 +403,7 @@ test("a companion hatches, grows and graduates into the Dex", async () => {
         nature: "jolly",
         ditto: false,
       },
-      inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+      inventory: emptyInventory(),
       grantSeeded: false,
     }),
     KEY,
@@ -461,6 +554,660 @@ test("an unaffordable purchase is refused and changes nothing", async () => {
   expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
 });
 
+test("a disguised companion has its reveal resolved before it needs it", async () => {
+  // The half of the reveal that `advance` cannot do. Ditto's line and rarity
+  // live behind PokéAPI and the transition must not need them, so the answer is
+  // written into the save while the disguise is still growing.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      dittoDisguise: 10,
+      dittoRevealed: false,
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const pending = readCompanion(storage, KEY)?.state?.pendingReveal;
+    if (pending != null) {
+      expect(pending.path[0]).toBe(132);
+      // Derived from the fetched capture rate rather than written down here, so
+      // a hardcoded "Ditto is rare" cannot drift from what PokéAPI says.
+      expect(pending.rarity).toBe("common");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the reveal was never resolved");
+});
+
+test("an ordinary companion never resolves a reveal it will not use", async () => {
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(readCompanion(storage, KEY)?.state?.pendingReveal).toBeNull();
+  expect(online.calls.filter((url) => url.endsWith("/pokemon-species/132"))).toEqual([]);
+});
+
+test("an item that cannot do anything is refused rather than burned", async () => {
+  // `consume` checked only that the item was held, then decremented and wrote
+  // whatever the effect returned — and `useItem` returns the state untouched
+  // when a mint has no companion to work on. So the mint vanished, nothing
+  // happened, and the route answered `{ ok: true }`.
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    // An egg: there is no nature to reroll.
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 2, shinyCharm: 0 },
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
+
+  expect(refused?.status).toBe(409);
+  expect(refused?.json).toMatchObject({ error: "no-companion" });
+  // The whole point: still two.
+  expect(readCompanion(storage, KEY)?.state?.inventory.mint).toBe(2);
+});
+
+/** A companion with an everstone already on it. */
+function pinnedCompanion(): void {
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ everstone: true }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+}
+
+test("a pinned companion is released without spending a second stone", async () => {
+  // Release cannot go through `use`: `consume` refuses when the count is zero,
+  // so releasing would mean holding a *spare* stone and then spending it to undo
+  // the first. Pinning would be a trap rather than a choice.
+  await boot();
+  spend(1_000);
+  pinnedCompanion();
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  const released = await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(released?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.active?.everstone).toBe(false);
+  expect(state?.inventory.everstone).toBe(0);
+});
+
+test("releasing a companion that is not pinned is refused", async () => {
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon(),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  const refused = await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(refused?.status).toBe(409);
+});
+
+test("a second everstone is refused rather than spent on an already-pinned companion", async () => {
+  await boot();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ everstone: true }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: { ...emptyInventory(), everstone: 1 },
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { item: "everstone" },
+  });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.everstone).toBe(1);
+});
+
+test("releasing a pinned companion lets its banked growth spend itself", async () => {
+  // End to end: the growth accrued while pinned is still there and settles the
+  // moment the stone comes off.
+  await boot();
+  spend(graduationTotal("common") * 2);
+  plant({
+    consumedTotal: graduationTotal("common") * 2,
+    // Banked *in* `usedAtStage`, which is where a pinned companion's growth
+    // accumulates. Setting only `consumedTotal` would leave nothing to release:
+    // `advance` works from the difference, and that difference is already spent.
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      everstone: true,
+      usedAtStage: graduationTotal("common"),
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  // Pinned, so nothing moved.
+  expect(readCompanion(storage, KEY)?.state?.active?.stageIndex).toBe(0);
+
+  const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
+  await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
+  expect(readDex(storage, KEY)).toHaveLength(1);
+});
+
+test("a lure steers the next roll and is spent by it", async () => {
+  await boot(
+    {},
+    cachedSpecies([
+      { id: 10, captureRate: 255, forms: 3, finalId: 12 },
+      { id: 20, captureRate: 255, forms: 3, finalId: 22 },
+    ]),
+  );
+  spend(100);
+  // Species 12 already collected, so a lure must produce the other line.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.pendingHatch?.speciesId).toBe(20);
+  // Spent by the roll it shaped, so one purchase buys one hatch.
+  expect(state?.lure).toBe(false);
+});
+
+test("a lure with nothing left to find waits rather than being spent", async () => {
+  // The whole Dex collected. Filtering to uncollected would empty the candidate
+  // pool, and an empty pool is indistinguishable from "the index has not
+  // arrived" — so the egg would quietly never hatch and the lure would be gone.
+  await boot({}, cachedSpecies([{ id: 10, captureRate: 255, forms: 3, finalId: 12 }]));
+  spend(100);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  // It hatched anyway — a duplicate is better than a companion that never comes.
+  expect(state?.pendingHatch?.speciesId).toBe(10);
+  // And the lure is still there, to be used the day something new exists.
+  expect(state?.lure).toBe(true);
+});
+
+/** Plants a companion holding `repel` copies, with an optional armed exclusion. */
+function withRepels(count: number, over: Record<string, unknown> = {}): void {
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11] }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: { ...emptyInventory(), repel: count },
+    ...over,
+  });
+}
+
+test("an egg cannot be bought while one is already incubating", async () => {
+  // It used to sell, and `applyPurchase` set `eggUsage: 0` unconditionally — so
+  // 1B to 4B destroyed the incubation with nothing said. A shop egg means
+  // exactly one thing: release the current companion and re-roll. With no
+  // companion there is nothing to release, so there is nothing to sell.
+  await boot();
+  spend(freshEggPrice(null) * 2);
+  plant({
+    consumedTotal: freshEggPrice(null) * 2,
+    active: null,
+    eggUsage: 4_000_000,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const refused = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: null },
+  });
+
+  expect(refused?.status).toBe(409);
+  const row = readCompanion(storage, KEY);
+  // The incubation is untouched and so is the wallet.
+  expect(row?.state?.eggUsage).toBe(4_000_000);
+  expect(row?.tokensSpent).toBe(0);
+});
+
+test("an egg is still sold to replace a companion", async () => {
+  // The other half, and what the item is actually for: a reroll. The discarded
+  // companion is not a graduation, so it never reaches the Dex.
+  await boot();
+  spend(freshEggPrice(null) * 2);
+  plant({
+    consumedTotal: freshEggPrice(null) * 2,
+    active: activeMon({ usedAtStage: 9_000 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: null },
+  });
+
+  expect(bought?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  expect(state?.active).toBeNull();
+  expect(state?.eggUsage).toBe(0);
+  expect(readDex(storage, KEY)).toHaveLength(0);
+});
+
+test("a second shiny charm is refused rather than sold", async () => {
+  // Owning the charm *is* its effect — `hasShinyCharm` reads `> 0` — so a second
+  // one is 3B for a counter nobody reads. PokeTokenBar refuses at both the
+  // listing and the purchase; this refuses at the purchase, which is the
+  // enforcement half.
+  await boot();
+  spend(ITEM_PRICES.shinyCharm * 3);
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const first = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+  expect(first?.status).toBeUndefined();
+
+  const second = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+
+  expect(second?.status).toBe(409);
+  const row = readCompanion(storage, KEY);
+  expect(row?.state?.inventory.shinyCharm).toBe(1);
+  // And the wallet was not touched by the refusal.
+  expect(row?.tokensSpent).toBe(ITEM_PRICES.shinyCharm);
+});
+
+test("a spendable item can still be stocked up", async () => {
+  // The guard is about passives only. A second candy is a second candy.
+  await boot();
+  spend(ITEM_PRICES.rareCandy * 3);
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  for (let n = 0; n < 2; n++) {
+    const bought = await buy?.handler({
+      params: { id: KEY },
+      query: {},
+      body: { kind: "item", item: "rareCandy" },
+    });
+    expect(bought?.status).toBeUndefined();
+  }
+
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(2);
+});
+
+test("a repel names the line it is refusing", async () => {
+  await boot();
+  spend(1_000);
+  withRepels(2);
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(used?.status).toBeUndefined();
+  const state = readCompanion(storage, KEY)?.state;
+  // The final form, so the whole line is refused rather than the one base the
+  // player happened to be looking at.
+  expect(state?.repel).toBe(11);
+  expect(state?.inventory.repel).toBe(1);
+});
+
+test("a second repel is refused rather than spent on the slot it already fills", async () => {
+  // The one item that shipped without a guard the other four had. `repel` is a
+  // single slot, so a second use could only overwrite — which means the first
+  // was wasted — and using it on the *same* companion changed nothing at all
+  // while `consume` still decremented. 500M for a state that was already true.
+  await boot();
+  spend(1_000);
+  withRepels(2, { repel: 11 });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(2);
+});
+
+test("a repel is refused on a revealed Ditto, which nothing can roll anyway", async () => {
+  // `roll` excludes Ditto unconditionally, so excluding it again is a guaranteed
+  // no-op — and it is a *state change*, so `consume` cannot catch it. 500M for
+  // an exclusion that was already in force.
+  await boot();
+  spend(1_000);
+  withRepels(1, {
+    active: activeMon({
+      baseId: 132,
+      plannedPath: [132],
+      dittoDisguise: 10,
+      dittoRevealed: true,
+    }),
+  });
+
+  const use = routes.find((r) => r.path === "/keys/:id/use");
+  const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
+
+  expect(refused?.status).toBe(409);
+  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(1);
+});
+
+test("a guarantee bought while a prefetch is in flight is not thrown away", async () => {
+  // `prefetchHatch` awaits twice — the species index is ~649 fetches on a cold
+  // cache, which is minutes — and it took every roll input from the state it
+  // captured *before* those awaits, while writing against a re-read one. The
+  // re-read guard only checked `pendingHatch`, which an egg purchase sets to
+  // null, so it passed. A 4B guaranteed-rare egg bought during that window was
+  // rolled against the old `eggTier` and silently discarded.
+  let openGate = (): void => {};
+  const gate = new Promise<void>((resolve) => {
+    openGate = resolve;
+  });
+  let gateReached = (): void => {};
+  const reached = new Promise<void>((resolve) => {
+    gateReached = resolve;
+  });
+
+  const encoder = new TextEncoder();
+  const store = new Map<string, Uint8Array>([
+    [
+      "species/index.json",
+      encoder.encode(JSON.stringify([{ id: 10, captureRate: 255, forms: 1, finalId: 10 }])),
+    ],
+    [
+      "species/10.json",
+      encoder.encode(
+        JSON.stringify({
+          captureRate: 255,
+          isLegendary: false,
+          isMythical: false,
+          chain: [10],
+          names: [{ language: { name: "en" }, name: "species-10" }],
+        }),
+      ),
+    ],
+  ]);
+
+  await boot(
+    {},
+    {
+      files: {
+        // The detail read is the second await. Holding it open is what lets a
+        // purchase land in the middle of the prefetch, which is the whole race.
+        read: async (path) => {
+          if (path === "species/10.json") {
+            gateReached();
+            await gate;
+          }
+          return store.get(path) ?? null;
+        },
+        write: async (path, data) => {
+          store.set(path, data);
+        },
+        exists: async (path) => store.has(path),
+      },
+      net: async (url) => {
+        throw new Error(`the cache should have answered ${url}`);
+      },
+    },
+  );
+  spend(ITEM_PRICES.shinyCharm * 2);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  // Fires the prefetch unawaited, as the panel does.
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await reached;
+
+  // Mid-flight: 3B on a shiny charm. A charm rather than a guaranteed egg,
+  // because an egg can no longer be bought while one is incubating — and this
+  // is an incubating egg, since that is the only state a prefetch runs in. The
+  // charm is a paid roll input all the same: it takes the shiny odds from 1/64
+  // to 1/48, and the roll in flight was made without it.
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  const bought = await buy?.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "shinyCharm" },
+  });
+  expect(bought?.status).toBeUndefined();
+
+  openGate();
+  // Let the in-flight prefetch finish whatever it is going to do.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const state = readCompanion(storage, KEY)?.state;
+  // The charm survives, and no roll made without it was stored.
+  expect(state?.inventory.shinyCharm).toBe(1);
+  expect(state?.pendingHatch).toBeNull();
+});
+
+test("a guaranteed egg still hatches when a lure rules out everything it allows", async () => {
+  // The 5B failure, end to end. Every rare-or-better final collected, a
+  // guaranteed-rare egg bought, a lure armed. "Is anything uncollected" says yes
+  // — the commons are — but the intersection with the rarity floor is empty, and
+  // an empty pool reads as "no candidate index yet", so the egg used to sit at
+  // its threshold retrying identically on every poll with the lure still armed
+  // to do the same to the next one.
+  await boot(
+    {},
+    cachedSpecies([
+      { id: 1, captureRate: 45, forms: 3, finalId: 3 }, // rare, and collected
+      { id: 10, captureRate: 255, forms: 3, finalId: 12 }, // common, uncollected
+    ]),
+  );
+  spend(100);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      rarity: "rare",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+  plant({
+    consumedTotal: 100,
+    active: null,
+    eggUsage: 0,
+    eggTier: "rare",
+    pendingHatch: null,
+    pendingReveal: null,
+    lure: true,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  const state = readCompanion(storage, KEY)?.state;
+  // It hatched, and it honoured the guarantee rather than the lure — the
+  // guarantee costs up to 4B against the lure's 1B, and a rare egg producing a
+  // common is what the tier pricing exists to prevent.
+  expect(state?.pendingHatch?.speciesId).toBe(1);
+  // And the lure was not spent doing nothing.
+  expect(state?.lure).toBe(true);
+});
+
+test("the shop is listed cheapest first", async () => {
+  // The catalogue was `ITEM_PRICES` key order followed by the eggs, which put
+  // 3B above 1B and read as an arbitrary pile. PokeTokenBar shipped and fixed
+  // the same display bug; this is the assertion that keeps a later entry from
+  // being appended somewhere arbitrary again.
+  await boot();
+  spend(1_000);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { shop } = found.json as { shop: Array<{ price: number }> };
+  const prices = shop.map((offer) => offer.price);
+  expect(prices).toEqual([...prices].sort((a, b) => a - b));
+  // Every entry still present: a sort that dropped one would satisfy the above.
+  // Derived rather than a literal, so adding an item does not require editing a
+  // number here — a count that has to be maintained by hand is a count that gets
+  // maintained by deleting the assertion.
+  expect(prices).toHaveLength(ITEM_KINDS.length + EGG_TIERS_ON_SALE);
+});
+
 test("an unknown shop entry is refused before it can be priced", async () => {
   await boot();
   spend(10_000_000_000);
@@ -526,6 +1273,19 @@ test("shopping is not working: a purchase leaves the credit instant alone", asyn
   await boot();
   clock = 1_700_000_500_000;
   spend(ITEM_PRICES.mint * 2);
+  // An active companion, because a mint needs a nature to reroll and is now
+  // refused without one. This fixture used to be an egg and the assertion below
+  // was that using the mint succeeded — pinning the burn as correct, which is
+  // the same trap the mint's own comment already records it falling into once.
+  plant({
+    consumedTotal: ITEM_PRICES.mint * 2,
+    active: activeMon(),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: emptyInventory(),
+  });
 
   clock = 1_700_009_000_000;
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
@@ -646,7 +1406,7 @@ test("the charm in the bag reaches the roll the panel prefetches", async () => {
     eggUsage: 902,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 },
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 0, shinyCharm: 1 },
   });
 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -674,7 +1434,7 @@ test("a mint actually rerolls the nature it was spent on", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 1, shinyCharm: 0 },
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 1, shinyCharm: 0 },
   });
   expect(readCompanion(storage, KEY)?.state?.active?.nature).toBe("sassy");
 
@@ -696,18 +1456,23 @@ test("a mint actually rerolls the nature it was spent on", async () => {
 });
 
 test("a guaranteed egg discards the roll the old egg was already holding", async () => {
-  // The most expensive failure in the plugin. The panel prefetches a roll on
-  // every poll, so an incubating egg normally *has* a `pendingHatch` — and if
-  // buying a fresh egg stopped clearing it, the 4,000,000,000-token rare
-  // guarantee would hatch the stale common that was already sitting there. The
-  // operator pays for a rarity floor and gets whatever the old egg had rolled,
-  // with nothing anywhere to say so.
+  // The most expensive failure in the plugin: a 4,000,000,000-token rare
+  // guarantee hatching the stale common a previous roll had already left in
+  // `pendingHatch`. The operator pays for a rarity floor and gets whatever was
+  // sitting there, with nothing anywhere to say so.
+  //
+  // The route that produced it is now closed from the other end — an egg can
+  // only be bought to replace a live companion, and a live companion has no
+  // pending roll, because hatching clears it. So this fixture is a state the
+  // game no longer reaches on its own, and the test is defence in depth: a
+  // legacy or hand-edited save can still carry both, and the clearing is one
+  // line that nothing else would fail on if it were dropped.
   await boot();
   const price = freshEggPrice("rare");
   spend(price);
   plant({
     consumedTotal: price,
-    active: null,
+    active: activeMon(),
     eggUsage: 4_000_000,
     eggTier: null,
     pendingHatch: {
@@ -718,7 +1483,7 @@ test("a guaranteed egg discards the roll the old egg was already holding", async
       nature: "jolly",
       ditto: false,
     },
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
@@ -759,7 +1524,7 @@ test("the panel route prices the stage a companion is actually on", async () => 
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -864,7 +1629,7 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
     eggUsage: 902,
     eggTier: "rare",
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -891,7 +1656,7 @@ test("the roster route lists each key that has a companion, with what it is show
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   clock = 1_700_000_200_000;
@@ -974,7 +1739,7 @@ test("the panel names the stage the companion is standing at, not its base", asy
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -993,12 +1758,356 @@ test("a species the cache has never seen shows no name rather than a wrong one",
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
   const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
   expect(found?.json).toMatchObject({ name: null });
+});
+
+test("a hatched companion whose species cache was wiped gets its name back", async () => {
+  // The bug this closes: `prefetchHatch` is the only thing that ever filled the
+  // species cache, and it returns early once a companion is active. So a save
+  // that hatched before a restore showed `#11` on every poll for the life of the
+  // install — the cache could not refill, because the one thing that filled it
+  // only ran for eggs.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  // The first poll still answers with the number: warming is best effort and
+  // unawaited, so the panel renders now and the name arrives later.
+  const first = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(first.json).toMatchObject({ name: null });
+
+  expect(await namedBy(route, KEY)).toBe("species-11");
+});
+
+test("a name that has already been warmed is never fetched twice", async () => {
+  // The reason `cachedSpeciesName` has no `net` in the first place. A panel
+  // polling every fifteen seconds must not turn into a request per poll, so a
+  // species is asked for once per process and answered from disk after that.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  expect(await namedBy(route, KEY)).toBe("species-11");
+  const settled = online.calls.length;
+
+  for (let poll = 0; poll < 5; poll++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    expect(found.json).toMatchObject({ name: "species-11" });
+  }
+  expect(online.calls.length).toBe(settled);
+});
+
+test("a dex entry the cache has never seen is warmed too", async () => {
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  // An *active* companion, and that is the fixture decision the test turns on:
+  // an egg would set `prefetchHatch` building the whole species index, which
+  // caches every document there is and would name the Dex entry without any of
+  // the warming this test is about.
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 20,
+      finalId: 22,
+      chainOrder: [20, 21, 22],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const { dex } = found.json as { dex: Array<{ name: string | null }> };
+    if (dex[0]?.name === "species-22") return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the dex entry never got its name");
+});
+
+test("a species PokéAPI has forgotten is asked for once, not once per poll", async () => {
+  // The bug the first version of the warm-up shipped. `fetchJson` collapses a
+  // 404 and an outage into the same null, so "it failed, the network must be
+  // down" is an assumption that never expires — and a species PokéAPI has no
+  // document for was re-fetched on every poll, forever, for as long as any
+  // operator left the panel open.
+  const online = coldCacheOnline({ missing: [11] });
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let poll = 0; poll < 10; poll++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    // Still honest about what it does not know, on every one of them.
+    expect(found.json).toMatchObject({ name: null });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  // `clock` never moves in this test, so the backoff never expires and one
+  // attempt is the whole budget. A clock that advanced past an hour would
+  // legitimately see a second.
+  expect(online.calls.filter((url) => url.endsWith("/pokemon-species/11"))).toHaveLength(1);
+});
+
+test("a forgotten species does not starve the entries behind it", async () => {
+  // The other half of the same bug, and the worse half: the warm budget is
+  // eight per poll and `readDex` orders by `caught_at`, so eight permanently
+  // unnameable rows sat at the front of the queue and every entry behind them
+  // was unreachable for the life of the process.
+  const dead = [30, 31, 32, 33, 34, 35, 36, 37];
+  const online = coldCacheOnline({ missing: dead });
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  // The eight dead rows are the newest, so they are what a poll reaches first.
+  dead.forEach((finalId, index) => {
+    recordGraduation(
+      storage,
+      KEY,
+      {
+        baseId: finalId,
+        finalId,
+        chainOrder: [finalId],
+        rarity: "common",
+        isShiny: false,
+        nature: "sassy",
+        caughtAt: 1_700_000_500_000 + index,
+      },
+      `dex_dead_${finalId}`,
+    );
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 22,
+      finalId: 22,
+      chainOrder: [22],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_live",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const { dex } = found.json as { dex: Array<{ finalId: number; name: string | null }> };
+    if (dex.find((entry) => entry.finalId === 22)?.name === "species-22") return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the reachable entry was starved by the unreachable ones");
+});
+
+test("one poll's warms share a chain rather than fetching it once each", async () => {
+  // A Dex holds one row per graduation, so two rows commonly sit on one
+  // evolution line. `speciesDetail` builds a fresh chain cache per call, which
+  // is right for a lone lookup and would have fetched — and rewritten — the same
+  // chain document once per species in a batch.
+  const online = coldCacheOnline({ chainOf: () => 40 });
+  await boot({}, online);
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 40, plannedPath: [40, 41], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 40,
+      finalId: 41,
+      chainOrder: [40, 41],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  expect(await namedBy(route, KEY)).toBe("species-40");
+  expect(online.calls.filter((url) => url.endsWith("/evolution-chain/40"))).toHaveLength(1);
+});
+
+test("the roster never warms a name, however many keys it lists", async () => {
+  // A regression guard rather than a check on anything this route does: the
+  // roster has never warmed and the point is that it stays that way. It is a
+  // list of front doors and an operator may have fifty of them; the key's own
+  // route warms what it is showing, because that is the one companion being
+  // looked at.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+  // A second key, so "however many" is a claim the fixture actually makes.
+  onRequest?.(
+    completed({
+      requestId: "req_other",
+      apiKeyId: "key_2",
+      tokens: { input: 3_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+    }),
+  );
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+    JSON.stringify({
+      consumedTotal: 0,
+      active: activeMon({ baseId: 20, plannedPath: [20, 21], stageIndex: 0 }),
+      eggUsage: 0,
+      eggTier: null,
+      pendingHatch: null,
+      inventory: emptyInventory(),
+    }),
+    "key_2",
+  ]);
+
+  const route = routes.find((r) => r.path === "/keys");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: {}, query: {}, body: null });
+  const { keys } = found.json as { keys: Array<{ apiKeyId: string; name: string | null }> };
+  expect(keys).toHaveLength(2);
+  expect(keys.every((key) => key.name === null)).toBe(true);
+  expect(online.calls).toEqual([]);
+});
+
+test("an install with no outbound access warms nothing and shows the number", async () => {
+  // `net` absent is a supported configuration, not a broken one. There is no
+  // stub to observe in this direction — that is the point of the capability
+  // being missing — so what this pins is that the route still answers, and
+  // answers honestly, rather than throwing on a `net` that is not there.
+  const online = coldCacheOnline();
+  await boot({}, { files: online.files });
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+});
+
+test("an install with no files capability never reaches the network to warm", async () => {
+  // The observable half of the same guard, and the one that could actually go
+  // wrong: `warmNames` checks both capabilities, and dropping the `files` half
+  // would fetch a species document there is nowhere to cache — a request made
+  // once per poll, forever, whose result is discarded every time.
+  const reached: string[] = [];
+  await boot(
+    {},
+    {
+      net: async (url) => {
+        reached.push(url);
+        throw new Error(`warmed ${url} with nowhere to cache it`);
+      },
+    },
+  );
+  spend(5_000);
+  plant({
+    consumedTotal: 5_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
+  expect(found?.json).toMatchObject({ name: null });
+  // A tick, so a warm fired unawaited would have reached the stub by now.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(reached).toEqual([]);
 });
 
 test("an egg has no species to name", async () => {

@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { advance } from "../src/advance.ts";
-import { EGG_HATCH_THRESHOLD, graduationTotal, phaseThreshold } from "../src/balance.ts";
+import {
+  EGG_HATCH_THRESHOLD,
+  graduationTotal,
+  phaseThreshold,
+  SOOTHE_BONUS,
+} from "../src/balance.ts";
 import { type CompanionState, freshState, parseState, serialiseState } from "../src/state.ts";
 
 /** An egg with a species already rolled, which is the normal steady state. */
@@ -228,6 +233,29 @@ test("an unreadable rarity refuses the whole save rather than guessing", () => {
   expect(parseState(JSON.stringify(corrupted))).toBeNull();
 });
 
+test("a damaged consumed total refuses the save rather than defaulting to zero", () => {
+  // The same rule as `rarity`, and it was on the wrong side of it. A defaulted
+  // zero does not read as "nothing has been spent yet" — `advance` computes
+  // `gained` as `tokensTotal - consumedTotal`, so on a key with billions of
+  // lifetime tokens it re-injects the entire history as growth, graduating the
+  // companion over and over and writing free Dex rows for work already paid
+  // for. That is a wrong guess nothing reports, which is what fail-closed is
+  // for.
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+
+  for (const damaged of [undefined, "lots", Number.NaN, null]) {
+    const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
+    corrupted.consumedTotal = damaged;
+    expect(parseState(JSON.stringify(corrupted))).toBeNull();
+  }
+});
+
+test("a consumed total of zero is still an ordinary save", () => {
+  // The boundary the refusal must not swallow: every companion starts here, and
+  // reading a fresh one as unreadable would be worse than the bug being fixed.
+  expect(parseState(serialiseState(freshState()))).toEqual(freshState());
+});
+
 test("an empty evolution path refuses the save", () => {
   const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
@@ -295,6 +323,9 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
       nature: "hardy",
       dittoDisguise: null,
       dittoRevealed: false,
+      everstone: false,
+      soothe: false,
+      soothedRaw: 0,
     },
   };
 
@@ -320,4 +351,244 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
   const again = advance(result.state, graduationTotal("common") * stages);
   expect(again.state.active?.stageIndex).toBeGreaterThan(result.state.active?.stageIndex ?? 0);
   expect(again.events.length).toBeLessThanOrEqual(64);
+});
+
+// --- the Ditto reveal ----------------------------------------------------------
+
+/**
+ * A Ditto wearing a common two-form line, one token short of the first
+ * threshold it will never actually cross as its disguise.
+ *
+ * `common` and two forms because that is the only shape a disguise is rolled
+ * onto — `roll` refuses the rest, so a fixture outside it would be testing a
+ * state the game cannot produce.
+ */
+function disguisedMon(over: Partial<NonNullable<CompanionState["active"]>> = {}) {
+  return {
+    baseId: 10,
+    plannedPath: [10, 11],
+    stageIndex: 0,
+    usedAtStage: 0,
+    rarity: "common" as const,
+    isShiny: false,
+    nature: "jolly" as const,
+    dittoDisguise: 10,
+    dittoRevealed: false,
+    everstone: false,
+    soothe: false,
+    soothedRaw: 0,
+    ...over,
+  };
+}
+
+function disguised(over: Partial<CompanionState> = {}): CompanionState {
+  return {
+    ...freshState(),
+    consumedTotal: 0,
+    active: disguisedMon(),
+    pendingReveal: { path: [132], rarity: "rare" },
+    ...over,
+  };
+}
+
+/** What the disguise would have cost to leave, had it been going to evolve. */
+const DISGUISE_THRESHOLD = phaseThreshold("common", 2, 0);
+
+test("a disguised companion reveals instead of taking its first evolution", () => {
+  const result = advance(disguised(), DISGUISE_THRESHOLD);
+
+  expect(result.events).toEqual([{ kind: "revealed", disguisedAs: 10, speciesId: 132 }]);
+  expect(result.state.active?.plannedPath).toEqual([132]);
+  expect(result.state.active?.rarity).toBe("rare");
+  expect(result.state.active?.dittoRevealed).toBe(true);
+  // Nothing evolved: the reveal replaces that transition rather than following
+  // it, so a Ditto never wears its disguise's second form.
+  expect(result.events.some((event) => event.kind === "evolved")).toBe(false);
+});
+
+test("the reveal carries the overflow and keeps what was rolled at hatch", () => {
+  const result = advance(
+    disguised({ active: disguisedMon({ isShiny: true }) }),
+    DISGUISE_THRESHOLD + 7_000,
+  );
+
+  expect(result.state.active?.usedAtStage).toBe(7_000);
+  // Pinned alongside the overflow, because the overflow alone does not
+  // distinguish a reveal from an ordinary evolution: leaving stage 0 of the
+  // disguise would leave exactly the same 7,000 behind. Without these three the
+  // test passes against a version that has no reveal at all.
+  expect(result.state.active?.plannedPath).toEqual([132]);
+  expect(result.state.active?.rarity).toBe("rare");
+  expect(result.state.active?.dittoRevealed).toBe(true);
+  // Shininess and nature are facts about this individual, not about the species
+  // it was pretending to be.
+  expect(result.state.active?.isShiny).toBe(true);
+  expect(result.state.active?.nature).toBe("jolly");
+});
+
+test("a reveal that has not been resolved holds at the threshold", () => {
+  // The offline case, and the same rule the egg follows: progress waits rather
+  // than draining, so the moment the line arrives the reveal happens with its
+  // growth intact. Inventing Ditto's rarity here would decide what the revealed
+  // companion costs to graduate.
+  const result = advance(disguised({ pendingReveal: null }), DISGUISE_THRESHOLD + 7_000);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.dittoRevealed).toBe(false);
+  expect(result.state.active?.plannedPath).toEqual([10, 11]);
+  // Held, not lost.
+  expect(result.state.active?.usedAtStage).toBe(DISGUISE_THRESHOLD + 7_000);
+  // And the ledger still moved, or the gap would grow on every blocked call.
+  expect(result.state.consumedTotal).toBe(DISGUISE_THRESHOLD + 7_000);
+});
+
+test("an already-revealed Ditto evolves and graduates as an ordinary companion", () => {
+  // `dittoRevealed` is what stops the reveal firing twice. Without it a Ditto
+  // would re-reveal at every threshold and never graduate.
+  const revealed = disguised({
+    active: disguisedMon({
+      baseId: 132,
+      plannedPath: [132],
+      rarity: "rare",
+      dittoRevealed: true,
+    }),
+    pendingReveal: null,
+  });
+
+  const result = advance(revealed, graduationTotal("rare"));
+
+  expect(result.events.map((event) => event.kind)).toEqual(["graduated"]);
+  expect(result.events[0]).toMatchObject({ baseId: 132, finalId: 132 });
+});
+
+// --- the everstone and the soothe bell -----------------------------------------
+
+/** A companion one token short of leaving its first stage, with nothing on it. */
+function pinnable(over: Partial<NonNullable<CompanionState["active"]>> = {}): CompanionState {
+  return {
+    ...freshState(),
+    active: {
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      usedAtStage: 0,
+      rarity: "common",
+      isShiny: false,
+      nature: "jolly",
+      dittoDisguise: null,
+      dittoRevealed: false,
+      everstone: false,
+      soothe: false,
+      soothedRaw: 0,
+      ...over,
+    },
+  };
+}
+
+const FIRST_STAGE = phaseThreshold("common", 2, 0);
+
+test("an everstone holds a companion at its stage however much arrives", () => {
+  const result = advance(pinnable({ everstone: true }), FIRST_STAGE * 4);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.stageIndex).toBe(0);
+  // Held rather than discarded, which is what makes the stone reversible: the
+  // growth is all still there to be released.
+  expect(result.state.active?.usedAtStage).toBe(FIRST_STAGE * 4);
+});
+
+test("a pinned companion does not graduate either", () => {
+  // Blocking evolution alone would leave a one-form line, or a companion at its
+  // last stage, graduating away — which is exactly the individual somebody pins
+  // a stone to keep.
+  const single = pinnable({ plannedPath: [10], everstone: true });
+  const result = advance(single, graduationTotal("common") * 2);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active).not.toBeNull();
+});
+
+test("a disguised companion with an everstone does not reveal", () => {
+  // A reveal is a transition like any other, and "keep this one as it is" has to
+  // mean this one — a stone that let the disguise drop would hand back a
+  // different Pokémon than the one it was pinning.
+  const disguisedAndPinned = disguised({
+    active: disguisedMon({ everstone: true }),
+  });
+  const result = advance(disguisedAndPinned, DISGUISE_THRESHOLD * 3);
+
+  expect(result.events).toEqual([]);
+  expect(result.state.active?.dittoRevealed).toBe(false);
+});
+
+test("releasing an everstone lets the held growth spend itself", () => {
+  // The reversibility, end to end: a companion that banked four stages' worth
+  // while pinned catches up in one settle once the stone comes off.
+  const banked = advance(pinnable({ everstone: true }), FIRST_STAGE * 4).state;
+  const active = banked.active;
+  expect(active).not.toBeNull();
+  if (active === null) return;
+
+  const released = advance({ ...banked, active: { ...active, everstone: false } }, FIRST_STAGE * 4);
+
+  expect(released.events.map((event) => event.kind)).toContain("evolved");
+});
+
+test("a soothe bell grows the companion faster without earning it more", () => {
+  const plain = advance(pinnable(), 1_000_000);
+  const belled = advance(pinnable({ soothe: true }), 1_000_000);
+
+  expect(plain.state.active?.usedAtStage).toBe(1_000_000);
+  expect(belled.state.active?.usedAtStage).toBe(1_000_000 * (1 + SOOTHE_BONUS));
+  // The ledger is untouched, which is what keeps the bell from printing the
+  // tokens to buy the next one: growth is not earnings.
+  expect(belled.state.consumedTotal).toBe(1_000_000);
+  expect(belled.state.consumedTotal).toBe(plain.state.consumedTotal);
+});
+
+test("a soothe bell is still idempotent when the same total is settled twice", () => {
+  const once = advance(pinnable({ soothe: true }), 1_000_000);
+  const twice = advance(once.state, 1_000_000);
+
+  expect(twice.state.active?.usedAtStage).toBe(once.state.active?.usedAtStage as number);
+});
+
+test("a soothe bell does nothing for an egg", () => {
+  // The bell is applied to a companion, and an egg is not one. Nothing here
+  // should scale incubation.
+  const egg = { ...freshState(), eggUsage: 0 };
+  expect(advance(egg, 1_000).state.eggUsage).toBe(1_000);
+});
+
+test("a soothe bell grants the same growth however the credits were chunked", () => {
+  // The rounding defect. `Math.round(gained * 1.25)` landed on an exact .5
+  // whenever `gained ≡ 2 (mod 4)` and rounded it up, so ten credits of 2 gave
+  // 10 × 3 = 30 where one credit of 20 gave 25 — a 20% over-grant decided by
+  // nothing but how the traffic happened to arrive. Growth has to be a function
+  // of tokens earned, not of how they were delivered.
+  const belled = pinnable({ soothe: true });
+
+  let chunked = belled;
+  for (let credit = 1; credit <= 10; credit++) {
+    chunked = advance(chunked, credit * 2).state;
+  }
+  const oneShot = advance(belled, 20).state;
+
+  expect(chunked.active?.usedAtStage).toBe(oneShot.active?.usedAtStage as number);
+  // And the total is the honest one: 20 earned plus a quarter of it.
+  expect(oneShot.active?.usedAtStage).toBe(25);
+});
+
+test("a soothe bell never grants more than its share of what was earned", () => {
+  // The bound the item is priced against. Any drift upward makes the "cannot
+  // repay itself" argument in ITEM_PRICES.sootheBell false.
+  for (const size of [1, 2, 3, 5, 7, 999]) {
+    let state = pinnable({ soothe: true });
+    let earned = 0;
+    for (let credit = 0; credit < 20; credit++) {
+      earned += size;
+      state = advance(state, earned).state;
+    }
+    expect(state.active?.usedAtStage).toBe(earned + Math.floor(earned * SOOTHE_BONUS));
+  }
 });

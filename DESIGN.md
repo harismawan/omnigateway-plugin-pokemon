@@ -211,10 +211,52 @@ several of the numbers encode a fixed bug:
 - Shiny 1/64, 1/48 holding the charm. Ditto disguise 1/128 on common multi-form
   hatches.
 
+**The Ditto reveal.** A disguise is not a costume the companion wears forever: a
+Ditto cannot evolve, so the threshold that would have evolved it is the moment it
+stops pretending. It becomes Ditto proper — new line, new rarity, `stageIndex`
+back to 0 — keeping the shininess and nature that were rolled for this
+individual, and carrying the overflow across exactly as an evolution does.
+`dittoRevealed` is what keeps it from firing again at every later threshold.
+
+The reveal *replaces* the evolution rather than following it, and the ordering is
+the point: run after, a disguise would reach its second form first, and a Ditto
+that got to evolve once is a different creature from the one the roll promised.
+
+It needs Ditto's own line and rarity, which live behind PokéAPI — and `advance`
+has no capabilities. So it takes the shape `pendingHatch` already established:
+the server resolves the answer into `pendingReveal` while the disguise is still
+growing, and the transition itself stays local. **A reveal that cannot be
+resolved holds at the threshold** rather than evolving or guessing, the same rule
+an egg follows when it has met its threshold and has nothing to become. Progress
+waits instead of draining, so the reveal happens with its growth intact. The
+alternative — hardcoding "Ditto is rare" — would pick the graduation total the
+revealed companion carries for life out of a constant, and put a second copy of a
+PokéAPI fact in `balance.ts`.
+
+The panel's `?` chip is keyed on `dittoRevealed`, not on the disguise being
+present: `dittoDisguise` stays set afterwards because it records what this one
+was pretending to be, so a hint keyed on it alone would mark a revealed Ditto as
+still hiding something forever.
+
 The fresh-egg pricing comment is the one to preserve most carefully: priced by
 probability ratio instead, two uncommon eggs beat one rare egg on *every* axis,
 making the higher tier a strictly inferior product. `sortRank` ordering has a
 test for the same class of bug, and it ports too.
+
+**An egg is only sold when there is a companion to replace.** It means exactly
+one thing — release the current one and re-roll — so with nothing to release
+there is nothing to sell. Without that rule it sold anyway and reset `eggUsage`
+unconditionally, so buying one part-way through an incubation charged 1B to 4B
+and destroyed the progress in silence. Carrying the incubation across instead
+was considered and rejected: a plain egg bought while incubating would then be
+1B for no change at all, which is the same loss wearing a different face.
+
+One consequence worth recording, because it closes a hazard from the other end:
+an egg can now only be bought while a companion is active, and an active
+companion has no `pendingHatch` — hatching clears it. So the case where a paid
+guarantee inherited a stale roll is no longer reachable by play. `applyPurchase`
+still clears `pendingHatch`, and its test still covers it, as defence for a
+legacy or hand-edited save.
 
 ## Species data and sprites
 
@@ -233,6 +275,42 @@ origin allowlist, this is not an open proxy.
 Assets are fetched once and cached indefinitely — the sprite for #25 does not
 change. The species index is prefetched in the background after install so a
 roll needs no network at the moment it happens.
+
+**Amendment: the key route warms the names it is about to show.** The prefetch
+above is the only thing that ever filled the species cache, and it returns early
+once a companion is active — it exists to pre-roll the *next* hatch. So a save
+that hatched before its cache was lost could never refill it, and since `data/`
+is excluded from database snapshots, every restore produces exactly that: a
+hatched companion whose panel read `#11` on every poll for the rest of the
+install's life, with nothing able to fix it short of buying a fresh egg.
+
+`GET /keys/:id` now fetches the species documents behind the names it could not
+resolve — the active stage first, then unnamed Dex entries — in the background,
+capped at eight per poll, deduplicated against what is already in flight, and
+skipped entirely without both `net` and `files`. The bound matters: a
+long-running install's Dex has a row per graduation, and warming those unbounded
+would be a burst fired from a request path. One batch resolves through a single
+shared chain cache, because a Dex commonly holds several rows from one evolution
+line and `speciesDetail` builds its cache per call.
+
+**A failed warm is remembered, with backoff, and that is a deliberate departure
+from how `nameOf` treats a miss.** The first version of this reasoned that a
+failure means the network is down and so is a state that ends — the same
+argument that makes `names` remember only hits. That argument is false here:
+`fetchJson` collapses a 404 and an outage into one `null`, so a species PokéAPI
+genuinely has no document for was re-fetched on every poll, at four a minute,
+for as long as any operator left the panel open. Worse, since the budget is
+eight and `readDex` orders by `caught_at`, eight such rows at the front of the
+queue starved every entry behind them for the life of the process — the same
+permanent-`#11` failure this feature exists to fix, arriving by a different
+route. Failures now back off from a minute to an hour, which costs a handful of
+attempts to establish that something is missing and still recovers on its own
+from an outage of any length. What counts as failure is "did not yield a name",
+not "did not yield a document": a cached species with no English entry parses
+perfectly and would otherwise hold a slot forever.
+
+`cachedSpeciesName` is unchanged and stays `files`-only — see the UI section for
+why that signature is the guarantee. The roster does not warm at all.
 
 **Hatching must work offline.** PokeTokenBar pre-rolls the next species into
 `pendingHatchId` while the egg is still incubating, so the hatch itself is a
@@ -358,7 +436,9 @@ contacts `pokeapi.co` or `raw.githubusercontent.com`. **Species names are
 resolved server-side and cache-only** — `cachedSpeciesName` takes `files` and
 not `net`, so a roster of twenty keys repainting on a poll cannot become twenty
 requests against an unpaid public API for decoration. A cold cache shows `#25`
-and fills in on a later poll.
+and fills in on a later poll — filled by the key route's bounded warm-up, which
+is a separate call and not a fetch smuggled into the name lookup. See the
+amendment under *Species data and sprites*.
 
 The panel's one non-obvious element is the **growth track**: the companion's
 `plannedPath` drawn as one segment per stage, filled behind the current stage,
@@ -367,6 +447,42 @@ to the next evolution"; the track answers "how far through the line", which is
 the question somebody watching a companion grow actually has. An egg gets one
 segment, because its line is not rolled until it hatches and drawing three empty
 ones would be inventing a shape the save does not have.
+
+**Amendment: the sprite has no plate.** It was drawn on `--panel-sunk` inside a
+`--rule` border, which is a box *behind* a transparent GIF rather than around
+it — in the dark theme that reads as the Pokémon sitting on a black tile, and it
+was the one surface on the panel that no data had asked for. The sprite is now
+transparent and unframed and takes the card's own background. The egg and the
+unreadable mark keep their fill and border, because there the box *is* the
+graphic; all three share one size constant, and the marks are `border-box`, so a
+card does not reflow the moment an egg hatches.
+
+That constant is **192px and not a rounder number**. The animated Gen-V set is a
+96px canvas drawn with `image-rendering: pixelated`, so the scale has to be a
+whole number — at 128px, nearest-neighbour renders alternating one- and
+two-pixel source pixels and the sprite reads as a broken image rather than a
+larger one. `RosterGrid`'s track minimum is derived from it rather than chosen:
+192 plus the card's padding and border is 218, so the floor is 220px.
+
+The chip band under the name carries its own vertical margin rather than
+borrowing `Row`'s zero, because it is the only row on the panel with a meter
+directly beneath it: flush against the growth track the qualifiers read as part
+of it, and a chip that wrapped to a second line touched it outright.
+
+**The two facts under the meter each take a line, and this was a real
+misreading rather than a cosmetic one.** `Dim` is a span, and JSX strips
+whitespace containing a newline, so two adjacent ones rendered with no separator
+at all: "Stage 1 of 2" and "76.9M / 250.0M to the next stage" came out as `Stage
+1 of 276.9M / 250.0M`, which reads as a companion sitting 26.9M past a threshold
+it should already have evolved through. An operator's first conclusion is that
+the growth meter is broken. `Fact` is `Dim` set `display: block` for exactly
+this pairing.
+
+Worth recording that **no test covers it**: happy-dom performs no layout, so
+`textContent` is identical whether the element is inline or block, and the only
+assertion that could tell them apart is one about `display` — a component
+internal, which the testing rules rule out for good reasons that still apply
+here. This is a class of bug this suite cannot catch.
 
 Rarity and shininess are set in letterspaced small caps and a glyph, never a
 hue. The console's rule is that colour means provider identity or state, and a
@@ -407,8 +523,112 @@ Offline test: with the outbound fetch stubbed to fail, an egg with a
 UI tests under happy-dom against a stub plugin module, covering the error
 boundary and the unreadable-save state.
 
+## Proposed items
+
+Designed and approved, not built. Recorded here because the reasoning is the
+expensive part and two of these were redesigned away from their obvious form —
+an approval nobody wrote down becomes a decision somebody re-litigates.
+
+Three constraints from `balance.ts` govern all of them, and the first is the one
+that kills naïve designs:
+
+1. **Anything granting growth costs more than the growth it grants**, because
+   tokens are simultaneously the meter and the wallet. Candy is 5× its XP.
+2. Cosmetic items have no balance argument and are priced by feel.
+3. Permanent upgrades cost a graduation total — the charm is 3B, one rare.
+
+**Everstone — 1B, consumable, applied to the companion.** Sets
+`active.everstone`; `advance` refuses both the evolve and the graduate branch
+while it is set. Growth still accrues past the threshold and cascades on release
+through the existing transition cap. Priced at a fresh egg deliberately: an egg
+is "discard this one", a stone is "keep this one", and two opposite operations at
+one price are legible from the shop row alone. It blocks graduation as well as
+evolution because the case for it is a shiny, and a shiny is most at risk exactly
+when it is about to graduate away — which also makes it self-limiting, since
+pinning costs Dex progress.
+
+**Removal is `POST /keys/:id/unpin`, and it had to be its own route.** The
+obvious shape — `use` toggling the stone — cannot work: `use` runs through
+`consume`, `consume` refuses an item held zero times, so releasing would require
+holding a *spare* stone and would then spend it to undo the first. Pinning would
+be a trap rather than a choice, which is the opposite of the item. The stone is
+not returned on release; it was spent to pin, and this is the pin ending.
+
+The panel draws a pinned companion as **held**, not as one stuck mid-meter. Its
+progress runs past the threshold and keeps going, so "X / Y to the next stage"
+would show a number sitting above a line it should already have crossed — which
+is precisely how a deliberate state gets diagnosed as a broken one. It reads
+"held at this stage · N banked" instead, and the release control sits under it.
+
+**Lure — 1B, consumable, spent at the next roll.** Filters candidates to
+uncollected finals rather than merely halving their weight. A modifier rather
+than a replacement — the egg is still bought — so it must price below the grade
+guarantee beside it: lure plus a plain egg is 2B for a guaranteed-new common
+against 2.5B for a guaranteed-uncommon, which puts novelty below grade. The seed
+is unchanged, so a retried prefetch still reproduces the same Pokémon. A full Dex
+empties the filtered pool; that must refuse the use rather than consume a lure
+that cannot act.
+
+**Soothe Bell — 3B, held, consumed at graduation, +25% to that companion only.**
+The bounding is not a detail. As a permanent bonus on all future growth it is
+**unbuildable under rule 1** — at any price there is a break-even past which it
+is free growth forever. Bounded to one companion its ceiling is 25% of a
+graduation total, so it never repays its own cost in raw tokens: 187M saved on a
+common, 1.5B on a legendary, against 3B paid. It therefore reads as "get this
+rare one over the line sooner" rather than as an investment, and that asymmetry
+is the design. It scales the growth applied to `usedAtStage` while
+`consumedTotal` absorbs the raw amount, so idempotency holds — and it must never
+touch `tokens_total`, which would make it a money printer.
+
+**Incense — 500M, consumable, favours longer evolution lines.** The obvious
+version — stacking shiny odds — **should not be built**: the source app
+considered 1/32, rejected it as excessive, and settled on 1/48 for the charm, so
+a second shiny item re-opens a closed decision and puts two items on one axis.
+Redefined onto an axis nothing else touches. Because `phaseThreshold` sums to `T`
+regardless of form count, a longer line costs exactly the same to graduate and
+simply yields more evolution events, so this is engagement with no economy
+effect — hence cosmetic pricing. It also interacts with the Ditto disguise, which
+only rolls on common multi-form hatches.
+
+**Repel — 500M, consumable, excludes the current line from the next roll.**
+Favouring a species instead would fight the collection incentive the Dex exists
+for, and the parameterised form is worse: a caller-supplied species id means a
+new shop-entry shape and an id reaching the candidate set that would have to be
+range-validated. Excluding *the current companion's final form* needs no
+parameter, adds no wire shape, and complements the lure's positive filter.
+
+**Dependency — `consume` must check preconditions before it decrements.** All
+five are consumables with a precondition: the stone and the bell need an active
+companion, the lure needs an uncollected final to exist, the repel needs a
+current line. `consume` (`src/store.ts:375`) rejects only an empty inventory,
+then decrements and writes unconditionally — so an effect that declines to act
+returns `{ ok: true }` with the item gone. Today that is one path, a mint used on
+an egg. These would make it five. The fix is ordering plus a 409, and it comes
+before any of them.
+
+Distinct from the missing **repurchase** guard, which is worth fixing but blocks
+nothing here: `applyPurchase` never refuses a second copy of a passive, which
+wastes 3B on a duplicate shiny charm. That only bites items where owning *is* the
+effect, and none of these five are that shape — each is spent on a companion, so
+holding two is as ordinary as holding two candies. An earlier draft of this
+section called the stone and the bell "held" and drew the dependency from that;
+it was wrong, and the correction is recorded rather than quietly edited because
+the two guards defend different things and the difference is easy to re-confuse.
+
 ## Out of scope
 
+- **Showing a key's console label instead of its id.** Wanted, and not reachable
+  from this repository. The host calls it `api_keys.label`, and three separate
+  host decisions stand between it and a plugin: `CAPABILITIES` is a closed enum
+  with nothing for reading keys, `CORE_TABLES` refuses plugin SQL that names
+  `api_keys`, and `RequestCompleted` deliberately carries `apiKeyId` and no
+  label — widening that payload is documented there as a security change on the
+  same terms as widening `LogFields`. The panel calling the console's own
+  `/api/keys` is refused by the SDK and by this plugin's own boundary rule. So
+  this needs a host amendment, adding `label` to the event payload and this
+  plugin storing it beside `tokens_total` on credit. Until then the card shows
+  the id, which is at least the string an operator can match against the
+  console's key list.
 - Save transfer between PokeTokenBar and this plugin. The state shapes are
   deliberately close enough to make it possible later; it is not a goal now.
 - A shared install-wide Dex. Per-key was chosen; a union view can be added

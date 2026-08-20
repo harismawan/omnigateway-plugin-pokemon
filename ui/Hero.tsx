@@ -1,9 +1,11 @@
 import { type Activity, formatTokens, speciesLabel, spriteAlt, spriteUrl } from "./format.ts";
 import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
+  Button,
   Chip,
-  Dim,
+  ChipRow,
   EggMark,
+  Fact,
   Row,
   ShinyChip,
   Sprite,
@@ -26,10 +28,14 @@ export function Hero({
   view,
   activity,
   pluginId,
+  onRelease,
+  releasing,
 }: {
   view: CompanionView;
   activity: Activity;
   pluginId: string;
+  onRelease: () => void;
+  releasing: boolean;
 }) {
   // Narrowed by the caller, which has already handled the unreadable save. A
   // hero with no state is not a state this component can draw.
@@ -58,7 +64,7 @@ export function Hero({
         <div>
           <h3>{speciesId === null ? "Egg" : speciesLabel(view.name, speciesId)}</h3>
 
-          <Row>
+          <ChipRow>
             {active === null ? (
               state.eggTier === null ? null : (
                 <Chip>{state.eggTier}+ guaranteed</Chip>
@@ -80,8 +86,25 @@ export function Hero({
                   A Ditto in disguise is a secret the panel is allowed to hint
                   at and not to spoil, which is the whole joke: the question
                   mark says something is off about this one.
+
+                  It stops once the disguise drops. `dittoDisguise` stays set
+                  after a reveal — it records what this one was pretending to
+                  be, which the Dex still wants — so the hint is keyed on
+                  `dittoRevealed` rather than on the disguise being present. Left
+                  on the first field it would mark a revealed Ditto as still
+                  hiding something, forever.
                 */}
-                {active.dittoDisguise === null ? null : <Chip>?</Chip>}
+                {active.dittoDisguise === null || active.dittoRevealed ? null : <Chip>?</Chip>}
+                {/*
+                  What the companion is holding, named rather than described.
+                  "everstone" says the same thing to somebody who knows the item
+                  and sends everybody else to the shop row, where the price sits
+                  next to the explanation — whereas "pinned" or "+25%" would be
+                  this panel inventing vocabulary for a thing that already has a
+                  name.
+                */}
+                {active.everstone ? <Chip>everstone</Chip> : null}
+                {active.soothe ? <Chip>soothe bell</Chip> : null}
               </>
             )}
             {/*
@@ -92,7 +115,7 @@ export function Hero({
             <Chip aria-label={`Activity: ${activity}`} role="status">
               {activity}
             </Chip>
-          </Row>
+          </ChipRow>
 
           {active === null ? (
             <>
@@ -104,9 +127,9 @@ export function Hero({
                 threshold={view.nextThreshold}
                 valueText={`${formatTokens(view.progress)} of ${formatTokens(view.nextThreshold)} tokens incubated`}
               />
-              <Dim>
+              <Fact>
                 {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} tokens incubated
-              </Dim>
+              </Fact>
             </>
           ) : (
             <>
@@ -123,12 +146,30 @@ export function Hero({
                   view.nextThreshold,
                 )}
               />
-              <Dim>
+              <Fact>
                 Stage {active.stageIndex + 1} of {active.plannedPath.length}
-              </Dim>
-              <Dim>
-                {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} to the next stage
-              </Dim>
+              </Fact>
+              {active.everstone ? (
+                <>
+                  {/*
+                    A pinned companion's progress runs past its threshold and
+                    keeps going, so the usual "X / Y to the next stage" would
+                    read as a number stuck above the line it should already have
+                    crossed — which is exactly how a stuck state gets mistaken
+                    for a broken one. Banked is what it is, so banked is what it
+                    says.
+                  */}
+                  <Fact>Held at this stage · {formatTokens(view.progress)} banked</Fact>
+                  <Button disabled={releasing} onClick={onRelease} type="button">
+                    Release
+                  </Button>
+                </>
+              ) : (
+                <Fact>
+                  {formatTokens(view.progress)} / {formatTokens(view.nextThreshold)} to the next
+                  stage
+                </Fact>
+              )}
             </>
           )}
         </div>
