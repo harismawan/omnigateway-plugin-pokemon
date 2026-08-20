@@ -14,10 +14,11 @@ import {
   EGG_HATCH_THRESHOLD,
   freshEggPrice,
   graduationTotal,
+  ITEM_KINDS,
   ITEM_PRICES,
 } from "../src/balance.ts";
 import companion from "../src/server.ts";
-import { freshState, serialiseState } from "../src/state.ts";
+import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import { readCompanion, readDex, recordGraduation } from "../src/store.ts";
 import { createTestStorage, type TestStorage } from "./helpers/storage.ts";
 
@@ -44,6 +45,9 @@ import { createTestStorage, type TestStorage } from "./helpers/storage.ts";
  * What remains is what a third-party author can actually verify: that this
  * plugin's own migrations, routes and handlers do what they claim.
  */
+
+/** Plain, guaranteed-uncommon and guaranteed-rare: the three the shop lists. */
+const EGG_TIERS_ON_SALE = 3;
 
 const KEY = "key_1";
 let storage: TestStorage;
@@ -398,7 +402,7 @@ test("a companion hatches, grows and graduates into the Dex", async () => {
         nature: "jolly",
         ditto: false,
       },
-      inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+      inventory: emptyInventory(),
       grantSeeded: false,
     }),
     KEY,
@@ -569,7 +573,7 @@ test("a disguised companion has its reveal resolved before it needs it", async (
     eggTier: null,
     pendingHatch: null,
     pendingReveal: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -602,7 +606,7 @@ test("an ordinary companion never resolves a reveal it will not use", async () =
     eggTier: null,
     pendingHatch: null,
     pendingReveal: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -628,7 +632,7 @@ test("an item that cannot do anything is refused rather than burned", async () =
     eggTier: null,
     pendingHatch: null,
     pendingReveal: null,
-    inventory: { rareCandy: 0, mint: 2, shinyCharm: 0 },
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 2, shinyCharm: 0 },
   });
 
   const use = routes.find((r) => r.path === "/keys/:id/use");
@@ -657,7 +661,10 @@ test("the shop is listed cheapest first", async () => {
   const prices = shop.map((offer) => offer.price);
   expect(prices).toEqual([...prices].sort((a, b) => a - b));
   // Every entry still present: a sort that dropped one would satisfy the above.
-  expect(prices).toHaveLength(6);
+  // Derived rather than a literal, so adding an item does not require editing a
+  // number here — a count that has to be maintained by hand is a count that gets
+  // maintained by deleting the assertion.
+  expect(prices).toHaveLength(ITEM_KINDS.length + EGG_TIERS_ON_SALE);
 });
 
 test("an unknown shop entry is refused before it can be priced", async () => {
@@ -736,7 +743,7 @@ test("shopping is not working: a purchase leaves the credit instant alone", asyn
     eggTier: null,
     pendingHatch: null,
     pendingReveal: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   clock = 1_700_009_000_000;
@@ -858,7 +865,7 @@ test("the charm in the bag reaches the roll the panel prefetches", async () => {
     eggUsage: 902,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 },
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 0, shinyCharm: 1 },
   });
 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -886,7 +893,7 @@ test("a mint actually rerolls the nature it was spent on", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 1, shinyCharm: 0 },
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 1, shinyCharm: 0 },
   });
   expect(readCompanion(storage, KEY)?.state?.active?.nature).toBe("sassy");
 
@@ -930,7 +937,7 @@ test("a guaranteed egg discards the roll the old egg was already holding", async
       nature: "jolly",
       ditto: false,
     },
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
@@ -971,7 +978,7 @@ test("the panel route prices the stage a companion is actually on", async () => 
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1076,7 +1083,7 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
     eggUsage: 902,
     eggTier: "rare",
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -1103,7 +1110,7 @@ test("the roster route lists each key that has a companion, with what it is show
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   clock = 1_700_000_200_000;
@@ -1186,7 +1193,7 @@ test("the panel names the stage the companion is standing at, not its base", asy
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1205,7 +1212,7 @@ test("a species the cache has never seen shows no name rather than a wrong one",
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1228,7 +1235,7 @@ test("a hatched companion whose species cache was wiped gets its name back", asy
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1256,7 +1263,7 @@ test("a name that has already been warmed is never fetched twice", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1287,7 +1294,7 @@ test("a dex entry the cache has never seen is warmed too", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
   recordGraduation(
     storage,
@@ -1332,7 +1339,7 @@ test("a species PokéAPI has forgotten is asked for once, not once per poll", as
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1367,7 +1374,7 @@ test("a forgotten species does not starve the entries behind it", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   // The eight dead rows are the newest, so they are what a poll reaches first.
@@ -1429,7 +1436,7 @@ test("one poll's warms share a chain rather than fetching it once each", async (
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
   recordGraduation(
     storage,
@@ -1469,7 +1476,7 @@ test("the roster never warms a name, however many keys it lists", async () => {
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
   // A second key, so "however many" is a claim the fixture actually makes.
   onRequest?.(
@@ -1486,7 +1493,7 @@ test("the roster never warms a name, however many keys it lists", async () => {
       eggUsage: 0,
       eggTier: null,
       pendingHatch: null,
-      inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+      inventory: emptyInventory(),
     }),
     "key_2",
   ]);
@@ -1516,7 +1523,7 @@ test("an install with no outbound access warms nothing and shows the number", as
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");
@@ -1546,7 +1553,7 @@ test("an install with no files capability never reaches the network to warm", as
     eggUsage: 0,
     eggTier: null,
     pendingHatch: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    inventory: emptyInventory(),
   });
 
   const route = routes.find((r) => r.path === "/keys/:id");

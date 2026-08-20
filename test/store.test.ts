@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
-import { freshState, serialiseState } from "../src/state.ts";
+import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import {
   consume,
   creditTokens,
@@ -323,7 +323,10 @@ test("a held item is spent from inventory, not from the wallet", () => {
   // A granted candy was never bought. Charging for it would charge twice.
   creditTokens(storage, KEY, 1_000, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
-    JSON.stringify({ ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } }),
+    JSON.stringify({
+      ...freshState(),
+      inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+    }),
     KEY,
   ]);
 
@@ -340,7 +343,10 @@ test("an effect that refuses spends nothing and writes nothing", () => {
   // decrement first and write whatever came back, so an effect that declined to
   // act still cost the item — indistinguishable, from here, from one that ran.
   creditTokens(storage, KEY, 1_000, 1);
-  const before = { ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } };
+  const before = {
+    ...freshState(),
+    inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+  };
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
     JSON.stringify(before),
     KEY,
@@ -358,7 +364,10 @@ test("the effect sees the inventory it will be spent from, not one already docke
   // count off by one for anything that looked.
   creditTokens(storage, KEY, 1_000, 1);
   storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
-    JSON.stringify({ ...freshState(), inventory: { rareCandy: 2, mint: 0, shinyCharm: 0 } }),
+    JSON.stringify({
+      ...freshState(),
+      inventory: { ...emptyInventory(), rareCandy: 2, mint: 0, shinyCharm: 0 },
+    }),
     KEY,
   ]);
 

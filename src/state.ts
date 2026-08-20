@@ -28,6 +28,22 @@ export type MonState = {
   /** Set when this is a Ditto wearing another species; null for an ordinary hatch. */
   dittoDisguise: number | null;
   dittoRevealed: boolean;
+  /**
+   * An everstone is on this companion: it will not evolve, reveal, or graduate.
+   *
+   * A property of the individual rather than of the save, so it goes with the
+   * companion — a fresh egg does not inherit the stone that was pinning the one
+   * it replaced.
+   */
+  everstone: boolean;
+  /**
+   * A soothe bell is on this companion, adding `SOOTHE_BONUS` to its growth.
+   *
+   * Ends when the companion does. That is what bounds the item: it can never
+   * return more than its fraction of one graduation total, which is what makes
+   * it priceable at all — see `ITEM_PRICES.sootheBell`.
+   */
+  soothe: boolean;
 };
 
 export type CompanionState = {
@@ -96,6 +112,22 @@ export type CompanionState = {
     path: readonly number[];
     rarity: Rarity;
   } | null;
+  /**
+   * Modifiers waiting to be spent on the next roll.
+   *
+   * They live on the save rather than on the egg because they are bought before
+   * there is anything to apply them to — the same reason `eggTier` is persisted.
+   * All three are cleared in the write that stores the roll they shaped, so one
+   * purchase buys one hatch.
+   *
+   * None of them touch the seed, so a retried prefetch still produces the same
+   * Pokémon; they change which candidates are on the table, not which way the
+   * dice fall.
+   */
+  lure: boolean;
+  incense: boolean;
+  /** A final form the next roll must not produce, or null. */
+  repel: number | null;
   inventory: Record<ItemKind, number>;
   /**
    * Whether the first-run seeding of limit-window grants has happened.
@@ -105,6 +137,22 @@ export type CompanionState = {
    */
 };
 
+/**
+ * A bag with one entry per item kind, all empty.
+ *
+ * Built from `ITEM_KINDS` rather than written out, because a literal is a list
+ * of every item that existed on the day it was typed. There were three such
+ * literals in `src/` and two dozen more across the tests, and each one is a
+ * place an added item is silently missing — `Record<ItemKind, number>` would
+ * catch it in `src/`, but a test fixture that builds its own object and never
+ * mentions the new key just carries a hole into whatever it is asserting.
+ */
+export function emptyInventory(): Record<ItemKind, number> {
+  const inventory = {} as Record<ItemKind, number>;
+  for (const kind of ITEM_KINDS) inventory[kind] = 0;
+  return inventory;
+}
+
 export function freshState(): CompanionState {
   return {
     consumedTotal: 0,
@@ -113,7 +161,10 @@ export function freshState(): CompanionState {
     eggTier: null,
     pendingHatch: null,
     pendingReveal: null,
-    inventory: { rareCandy: 0, mint: 0, shinyCharm: 0 },
+    lure: false,
+    incense: false,
+    repel: null,
+    inventory: emptyInventory(),
   };
 }
 
@@ -155,7 +206,7 @@ export function parseState(raw: string): CompanionState | null {
   }
   if (!isRecord(parsed)) return null;
 
-  const inventory: Record<ItemKind, number> = { rareCandy: 0, mint: 0, shinyCharm: 0 };
+  const inventory = emptyInventory();
   const storedInventory = parsed.inventory;
   if (isRecord(storedInventory)) {
     for (const kind of ITEM_KINDS) {
@@ -199,6 +250,19 @@ export function parseState(raw: string): CompanionState | null {
       dittoDisguise:
         typeof storedActive.dittoDisguise === "number" ? storedActive.dittoDisguise : null,
       dittoRevealed: storedActive.dittoRevealed === true,
+      everstone: storedActive.everstone === true,
+      /**
+       * Degrades to "no bell", and this is the one degradation here that costs
+       * the player something they paid 3B for.
+       *
+       * It is still the right direction. The alternative is refusing the save,
+       * which renders as "this companion could not be read" and is a far worse
+       * outcome than a bonus quietly ending — and `=== true` only fails to be
+       * true for a field that is absent or corrupt, at which point the honest
+       * reading is that we do not know whether a bell was ever applied. It
+       * cannot silently *grant* one, which is the direction that would matter.
+       */
+      soothe: storedActive.soothe === true,
     };
   }
 
@@ -249,6 +313,15 @@ export function parseState(raw: string): CompanionState | null {
     eggTier: eggTier === null || eggTier === "legendary" ? null : eggTier,
     pendingHatch,
     pendingReveal,
+    lure: parsed.lure === true,
+    incense: parsed.incense === true,
+    // Validated as a species id rather than trusted, because it reaches `roll`
+    // as an exclusion and a non-integer would silently match nothing — a repel
+    // that reads as spent and does not repel.
+    repel:
+      typeof parsed.repel === "number" && Number.isInteger(parsed.repel) && parsed.repel > 0
+        ? parsed.repel
+        : null,
     inventory,
   };
 }

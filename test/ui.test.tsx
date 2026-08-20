@@ -1103,7 +1103,7 @@ describe("the bag", () => {
   test("does not offer an item held zero times", async () => {
     // `freshState` writes every item at zero, so an unfiltered bag lists the
     // whole catalogue as if it were owned.
-    renderCompanion(serving(withInventory({ rareCandy: 0, mint: 5, shinyCharm: 0 })));
+    renderCompanion(serving(withInventory({ mint: 5 })));
     await openCompanion();
 
     expect(await screen.findByText("mint · 5")).toBeTruthy();
@@ -1112,7 +1112,7 @@ describe("the bag", () => {
   });
 
   test("says the bag is empty when nothing is held", async () => {
-    renderCompanion(serving(withInventory({ rareCandy: 0, mint: 0, shinyCharm: 0 })));
+    renderCompanion(serving(withInventory({})));
     await openCompanion();
 
     expect(await screen.findByText("Nothing in the bag.")).toBeTruthy();

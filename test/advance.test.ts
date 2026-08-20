@@ -295,6 +295,8 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
       nature: "hardy",
       dittoDisguise: null,
       dittoRevealed: false,
+      everstone: false,
+      soothe: false,
     },
   };
 
@@ -343,6 +345,8 @@ function disguisedMon(over: Partial<NonNullable<CompanionState["active"]>> = {})
     nature: "jolly" as const,
     dittoDisguise: 10,
     dittoRevealed: false,
+    everstone: false,
+    soothe: false,
     ...over,
   };
 }

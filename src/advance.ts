@@ -101,6 +101,10 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
         nature: hatch.nature,
         dittoDisguise: hatch.ditto ? hatch.speciesId : null,
         dittoRevealed: false,
+        // A hatchling carries nothing. Items are applied to a companion, and
+        // the one this replaced took its own with it.
+        everstone: false,
+        soothe: false,
       };
       events.push({
         kind: "hatched",

@@ -6,7 +6,7 @@ import {
   rarityFromCaptureRate,
 } from "../src/balance.ts";
 import { NATURES, type Roll, roll, type SpeciesCandidate } from "../src/roll.ts";
-import { freshState, hasShinyCharm } from "../src/state.ts";
+import { emptyInventory, freshState, hasShinyCharm } from "../src/state.ts";
 
 /** A spread of candidates across every rarity band, all with animations. */
 /**
@@ -115,7 +115,10 @@ test("a charm in the bag reaches the roll, and an empty bag does not", () => {
   // same egg is shiny holding the charm and not shiny without it. The species is
   // drawn before the shiny check, so it is identical either way — which is what
   // makes the difference attributable to the charm and to nothing else.
-  const holding = { ...freshState(), inventory: { rareCandy: 0, mint: 0, shinyCharm: 1 } };
+  const holding = {
+    ...freshState(),
+    inventory: { ...emptyInventory(), rareCandy: 0, mint: 0, shinyCharm: 1 },
+  };
   const empty = freshState();
 
   // The seam is asserted before the flag itself, deliberately: a failure here
