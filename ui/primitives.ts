@@ -91,6 +91,103 @@ export const SectionHead = styled.h3`
   }
 `;
 
+/**
+ * A section heading that folds, which needs its rule as an element.
+ *
+ * `SectionHead` draws its rule with `::after`, which is always the last thing in
+ * the box — fine for a heading that is only words, wrong here, because the count
+ * has to sit on the far right *past* the rule. So the pseudo-element is switched
+ * off and `SectionRule` takes its place in the middle of the row. `KeyPicker`
+ * still uses the plain heading and still wants the `::after` version, which is
+ * why this is a variant rather than a change to the original.
+ */
+export const FoldingHead = styled(SectionHead)`
+  &::after {
+    content: none;
+  }
+`;
+
+/** The rule, as an element, so something can be placed after it. */
+export const SectionRule = styled.span`
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+`;
+
+/**
+ * The control that folds a section away, filling the heading it sits in.
+ *
+ * A `button` with `aria-expanded` rather than a `details`/`summary` pair. Both
+ * are accessible; this one is the panel's existing idiom — the rarity filters
+ * already carry their state in an `aria-*` attribute on a button — and it is
+ * what this panel's tests can assert against, since they are written about
+ * roles and accessible names rather than about markup.
+ *
+ * Unstyled as a button on purpose: it *is* the heading, so a border or a raised
+ * background would make four section titles look like four controls sitting
+ * above the content rather than like the titles of it. What says it is
+ * clickable is the marker and the cursor.
+ */
+export const SectionToggle = styled.button`
+  display: flex;
+  align-items: center;
+  gap: ${SPACE.sm};
+  flex: 1;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ink);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: 2px;
+  }
+`;
+
+/**
+ * The disclosure marker, rotated rather than swapped.
+ *
+ * One glyph at two angles, so the open and closed states cannot drift apart in
+ * size or baseline the way `▸` and `▾` do — they are different widths in several
+ * of the fonts a console might be set in, and the heading shifts sideways as a
+ * section is folded. It is `aria-hidden` because `aria-expanded` on the button
+ * already says this, and a screen reader announcing a triangle after the word
+ * "expanded" is noise.
+ */
+export const SectionMarker = styled.span<{ $open: boolean }>`
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  transform: rotate(${(p) => (p.$open ? "90deg" : "0deg")});
+  transition: transform 120ms ease-out;
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
+`;
+
+/**
+ * What a folded section still says about itself.
+ *
+ * The whole reason a collapsed heading is not just a word: "BAG" tells an
+ * operator nothing they did not already know, and "BAG · 3 held" tells them
+ * whether opening it is worth the click.
+ */
+export const SectionCount = styled.span`
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+`;
+
 export const Row = styled.div`
   display: flex;
   gap: ${SPACE.md};
@@ -393,13 +490,98 @@ export const DexGrid = styled.div`
   gap: ${SPACE.md};
 `;
 
-/** One Dex cell: the sprite plus what the sprite alone cannot say. */
-export const Cell = styled.figure`
+/**
+ * One Dex cell: the sprite plus what the sprite alone cannot say.
+ *
+ * A button rather than a figure, on the same reasoning as `KeyCard`: the whole
+ * cell opens that entry's record, and a div with a click handler would need
+ * `tabIndex` and a key listener to be reachable by a keyboard that a button is
+ * reachable by for free.
+ */
+export const Cell = styled.button<{ $open: boolean }>`
   margin: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  padding: ${SPACE.xs};
+  background: ${(p) => (p.$open ? "var(--accent-wash)" : "none")};
+  border: 1px solid ${(p) => (p.$open ? "var(--accent)" : "transparent")};
+  border-radius: 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover {
+    border-color: ${(p) => (p.$open ? "var(--accent)" : "var(--rule)")};
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+`;
+
+/**
+ * One graduate's whole record, opened in place.
+ *
+ * `1 / -1` is what makes this work without measuring anything. Auto-placement
+ * cannot start a full-width item part-way along a row, so a cell spanning every
+ * column drops to the next row line by itself — which means the detail always
+ * appears directly beneath the cell that opened it, under `auto-fill`, at any
+ * container width, with no column count to compute and no `ResizeObserver` to
+ * keep in step with one.
+ *
+ * The cost is that non-dense flow does not backfill: the slots to the right of
+ * the selected cell stay empty while this is open. That gap is the selection
+ * pointing at its own panel, and it is cheaper than the alternative, which is
+ * knowing how many columns there are.
+ */
+export const DexDetail = styled.div`
+  grid-column: 1 / -1;
+  display: flex;
+  gap: ${SPACE.lg};
+  padding: ${SPACE.md};
+  background: var(--panel-sunk);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+`;
+
+/** The right-hand column of a detail: everything the sprite cannot say. */
+export const DexFacts = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: ${SPACE.sm};
+  min-width: 0;
+`;
+
+/**
+ * The line this graduate grew through, drawn small.
+ *
+ * Wraps rather than scrolls. A three-stage line at 48px is narrower than the
+ * narrowest track this grid produces, and the one thing worse than a wrapped
+ * evolution line is a horizontally scrolling region inside a vertically
+ * scrolling panel.
+ */
+export const DexLine = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${SPACE.sm};
+  flex-wrap: wrap;
+`;
+
+export const DexLineStage = styled.figure`
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+
+  img {
+    width: 48px;
+    height: 48px;
+    image-rendering: pixelated;
+  }
 `;
 
 export const Caption = styled.figcaption`
@@ -461,12 +643,107 @@ export const KeyId = styled.span`
   overflow-wrap: anywhere;
 `;
 
-/** One bag entry: what is held, how many, and what can be done with it. */
-export const BagItem = styled.div`
+/* -------------------------------------------------------------------------- */
+/* the item grid, shared by the shop and the bag                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One track for both sections, and the 260px is derived rather than chosen.
+ *
+ * `RosterGrid`'s floor comes from the sprite it has to hold; this one comes from
+ * the sentence. A forty-character measure is the comfortable floor for a blurb
+ * that wraps to three lines — below it the descriptions become a column of
+ * two-word lines that is slower to read than no description at all. At the
+ * console's body size that is roughly 234px of text, plus `ItemCard`'s 12px of
+ * padding and 1px of border on each side.
+ *
+ * Shared so the shop and the bag land on the same column boundaries. They are
+ * the same kind of thing seen twice, and two grids that nearly line up read as a
+ * mistake in a way that one grid never does.
+ */
+export const ItemGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: ${SPACE.md};
+`;
+
+/**
+ * One offer or one held item.
+ *
+ * A column, and the `margin-top: auto` on its action row is the part that
+ * matters. Grid stretches every cell to the tallest in its row, so cards whose
+ * blurbs wrap to different depths already share a height — without pinning the
+ * action to the bottom, each Buy button floats at whatever height its own text
+ * ended at, and a row of them reads as scattered rather than as a set. The
+ * equal heights buy nothing until something is aligned to them.
+ */
+export const ItemCard = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: ${SPACE.sm};
+  padding: ${SPACE.md};
+  background: var(--panel-sunk);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+`;
+
+/** The icon, the name, and the one number: everything readable at a glance. */
+export const ItemHead = styled.div`
   display: flex;
   align-items: center;
   gap: ${SPACE.sm};
-  padding: ${SPACE.sm} ${SPACE.md};
-  background: var(--panel-sunk);
-  border-radius: 6px;
+`;
+
+/** The name, taking whatever the icon and the number leave. */
+export const ItemName = styled.span`
+  flex: 1;
+  overflow-wrap: anywhere;
+`;
+
+export const ItemBlurb = styled.p`
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 12px;
+  line-height: 1.45;
+`;
+
+/**
+ * The row the card's control sits on, pushed to the bottom.
+ *
+ * `flex-end` rather than `space-between`: the price already sits up in the head
+ * beside the name, so what is left here is one control, and a lone button
+ * stretched to the far left of a card is a button that looks misplaced.
+ */
+export const ItemAction = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: ${SPACE.sm};
+  margin-top: auto;
+`;
+
+/**
+ * The 32px slot an item is drawn in, whether or not there is anything to draw.
+ *
+ * Fixed at both sizes so the name beside it starts at the same x on every card
+ * — an icon that collapsed to nothing on a cold cache would leave the shop
+ * re-aligning itself as the sprites arrived, one row at a time. `flex: none`
+ * because a flex child with an intrinsic image inside it is otherwise happy to
+ * be squeezed by a long item name.
+ */
+export const ItemIconSlot = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  font-size: 20px;
+  line-height: 1;
+`;
+
+export const ItemIconImage = styled.img`
+  width: 32px;
+  height: 32px;
+  image-rendering: pixelated;
 `;

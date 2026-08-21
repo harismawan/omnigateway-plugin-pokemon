@@ -6,7 +6,8 @@ import { Dex } from "./Dex.tsx";
 import { activityOf } from "./format.ts";
 import { Hero } from "./Hero.tsx";
 import { KeyPicker } from "./KeyPicker.tsx";
-import { Button, Dim, KeyId, Notice, Panel, PanelHead, SectionHead } from "./primitives.ts";
+import { Button, Dim, KeyId, Notice, Panel, PanelHead } from "./primitives.ts";
+import { Section, useSections } from "./Section.tsx";
 import { Shop } from "./Shop.tsx";
 import type { CompanionView, Roster, ShopEntry } from "./types.ts";
 
@@ -229,6 +230,12 @@ function CompanionBody({
   releasing: boolean;
   refusal: string | null;
 }) {
+  // Before the early returns, because a hook has to be. Which is also the right
+  // place for it on its own terms: the choice of which sections are folded
+  // belongs to the panel, not to whichever companion happens to be loaded, and
+  // reading it here means it survives switching keys.
+  const { open, toggle } = useSections(pluginId);
+
   if (query.isPending) return <Dim>Loading…</Dim>;
   if (query.isError || query.data === undefined) {
     return <Dim>No companion for that key yet.</Dim>;
@@ -253,6 +260,11 @@ function CompanionBody({
   // make the word "idle" appear a few seconds earlier.
   const activity = activityOf(view.state.active !== null, view.lastCreditAt, Date.now());
 
+  // What the bag would show, counted the way the bag counts it. `freshState`
+  // writes every item at zero, so the number of *keys* in the inventory is the
+  // size of the catalogue rather than the size of the bag.
+  const held = Object.values(view.state.inventory).filter((count) => count > 0).length;
+
   return (
     <>
       <Hero
@@ -263,25 +275,55 @@ function CompanionBody({
         view={view}
       />
 
-      <SectionHead>Shop</SectionHead>
-      <Shop
-        hasCompanion={view.state.active !== null}
-        inventory={view.state.inventory}
-        offers={view.shop}
-        onBuy={buy}
-        pending={buying}
-        wallet={view.wallet}
-      />
+      <Section
+        count={countOf(view.shop.length, "offer")}
+        onToggle={() => toggle("shop")}
+        open={open.shop}
+        title="Shop"
+      >
+        <Shop
+          hasCompanion={view.state.active !== null}
+          inventory={view.state.inventory}
+          offers={view.shop}
+          onBuy={buy}
+          pending={buying}
+          pluginId={pluginId}
+          wallet={view.wallet}
+        />
+      </Section>
 
-      <SectionHead>Bag</SectionHead>
-      <Bag inventory={view.state.inventory} onUse={onUse} pending={using} />
+      <Section count={`${held} held`} onToggle={() => toggle("bag")} open={open.bag} title="Bag">
+        <Bag inventory={view.state.inventory} onUse={onUse} pending={using} pluginId={pluginId} />
+      </Section>
 
+      {/*
+        Outside both sections, deliberately. A refusal is the answer to
+        something the operator just clicked, and folding the shop away must not
+        take the reason a purchase failed with it.
+      */}
       {refusal === null ? null : <Notice role="alert">{refusal}</Notice>}
 
-      <SectionHead>Pokédex</SectionHead>
-      <Dex entries={view.dex} pluginId={pluginId} />
+      <Section
+        count={countOf(view.dex.length, "graduate")}
+        onToggle={() => toggle("dex")}
+        open={open.dex}
+        title="Pokédex"
+      >
+        <Dex entries={view.dex} pluginId={pluginId} />
+      </Section>
     </>
   );
+}
+
+/**
+ * What a folded heading says it contains.
+ *
+ * Plural by hand rather than through a formatter: three words need pluralising
+ * on this panel and every one of them is regular, so a dependency or a helper
+ * table would be more machinery than the problem has.
+ */
+function countOf(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 export default definePluginUI({ mount: Companion });

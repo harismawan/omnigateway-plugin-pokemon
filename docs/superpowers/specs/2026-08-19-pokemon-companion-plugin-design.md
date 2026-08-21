@@ -1,9 +1,19 @@
 # Pokémon Companion Plugin — Design
 
-Date: 2026-08-19
-Status: approved
+**Date:** 2026-08-19
+**Status:** approved, built, and amended in place — see the amendments throughout
 
-Depends on: [Plugin Host](2026-08-19-plugin-host-design.md)
+Depends on the plugin host design, which lives in the **parent repository** and
+not this one: `../omnigateway/docs/superpowers/specs/2026-08-19-plugin-host-design.md`.
+This spec was written there, beside it, and the relative link it used to carry
+went dangling the moment the plugin was split into its own repository. The path
+is spelled out rather than linked because a relative link across a repository
+boundary is a link that only resolves on the machine that happens to have both
+checked out.
+
+This is the plugin's founding design and the home for any amendment to behaviour
+recorded here. A new feature gets its own spec in this directory and amends this
+one where it changes something already written down.
 
 ## Problem
 
@@ -267,6 +277,9 @@ The plugin owns two proxy routes under its own mount, both inheriting the host's
   fetched from PokéAPI on miss.
 - `GET /api/plugins/pokemon/sprite/:id` — bytes from `data/sprites/`, fetched
   from the sprite repo on miss.
+- `GET /api/plugins/pokemon/item-sprite/:item` — bytes from
+  `data/sprites/items/`, fetched from the same repo on miss. See the amendment
+  below.
 
 `:id` is validated as an integer in range and the sprite variant is an enum, so
 no caller can construct an arbitrary outbound URL. Combined with the manifest
@@ -321,6 +334,46 @@ An air-gapped install degrades **visibly**: the egg stays an egg, the UI says
 species data could not be fetched, and no sprite silently renders as a blank
 box. A cosmetic feature failing quietly is worse than failing loudly, because
 quiet failure gets diagnosed as a bug in the gateway.
+
+**Amendment: items have icons, and their route is gated by a map rather than by
+a range.** A species id can be validated arithmetically; an item id cannot, so
+`ITEM_SPRITE_NAMES` in `balance.ts` is a closed map from item id to sprite
+filename, and the value that reaches a URL and a cache path is a lookup
+*result*.
+
+**It is a `Map`, and the first version's object literal was a hole straight
+through the gate.** An object literal inherits from `Object.prototype`, so
+`"constructor" in names` is `true` and `names.constructor` is a *function*
+rather than `undefined` — a guard written as `=== undefined` passed it through,
+and `GET /item-sprite/constructor` produced an outbound request for
+`.../items/function Object() { [native code] }.png` and a cache write under the
+same name. `toString`, `valueOf`, `hasOwnProperty` and `__proto__` all did the
+same. The host's origin allowlist still bounded where the request could go, so
+this was never an open proxy; what it defeated was the claim the map exists to
+make, which is that the only strings reaching a URL or a path are the eight
+this plugin chose. A `Map` has no inherited string keys, so the safety is
+structural rather than a rule each call site has to remember — the literal is
+kept only for its compile-time key checking and converted with `Object.entries`,
+which yields own enumerable keys alone. `/item-sprite/:item` answers 404 for anything not in the map, before
+it consults the capabilities — an id this plugin does not sell is a 404 on every
+install forever, and answering 503 would invite a retry for something that is
+never coming.
+
+Most of the map would derive from kebab-casing the id, which is exactly why it
+is written out: three entries do not.
+
+- `incense` → `luck-incense`. PokéAPI ships nine incenses and no generic one.
+- `lure` → `honey`. There is no `lure` sprite at all; honey is the in-game
+  encounter-attractor and the nearest thing in the set to what this lure does.
+  It is knowingly art that names a different item than the label does, accepted
+  because the alternative for an item with no sprite is no art.
+- `mint` → **nothing**. It is a Gen-8 item and the sprites repository has none,
+  generic or otherwise. A Heart Scale is a Move Reminder token, not a nature
+  item, so there is no near miss worth the lie.
+
+Every shop egg shares `lucky-egg` whatever its tier, because the guarantee is a
+fact about the offer rather than about the artwork, and the panel carries it in a
+chip.
 
 ## Candy grants
 
@@ -490,6 +543,63 @@ rarity drawn as a colour would be the one decorative colour in the product — a
 it would still need the word underneath to be readable. The only `--warn` on the
 panel is the unreadable-save mark, which is a claim about health and so is
 exactly what the rule permits.
+
+**Amendment: the shop, the bag and the Dex fold, the item rows became cards, and
+an emoji breaks the colour rule on purpose.**
+
+The shop was a wrapped row of buttons reading `rare candy · 500.0M` and the bag a
+wrapped row of chips reading `rare candy · 3`. Both named an item and priced it
+and said nothing about what it did, so the panel was legible only to somebody who
+already knew the economy. Both are now `ItemGrid` — one track shared by the two
+sections, since they are the same kind of thing seen twice and two grids that
+nearly line up read as a mistake. Its 260px floor is derived the way
+`RosterGrid`'s 220 was: a forty-character measure is the floor for a blurb that
+wraps to three lines, which is ~234px of text plus the card's padding and border.
+The card's action row takes `margin-top: auto`, because grid already stretches
+cards to a common height and nothing is aligned to that height until something is
+pinned to the bottom of it.
+
+Each card carries an icon, and where there is no icon it carries an emoji — for
+`mint`, which has none; for a cold cache, where *every* icon 404s on first paint;
+and for an offline install, where the route answers 503 forever. One `onError`
+covers all three, and asking the server which it was would be a second request to
+answer a question with one visual answer.
+
+**Emoji are full-colour glyphs meaning neither provider nor state, so this is the
+rule above broken, and it is scoped to this one slot.** The argument is that the
+panel already draws full-colour fetched pixel art in the companion slot and in
+every Dex cell, and an emoji standing in for a fetched item icon is the same kind
+of thing — a picture of an object, not a claim about health. It is not licence to
+colour a rarity, a price, or a state.
+
+The three sections fold, with a count in each heading (`3 held`, `12
+graduates`) so a folded one still says whether opening it is worth the click. The
+control is a `button` carrying `aria-expanded` rather than a `details`/`summary`
+pair, matching the rarity filters, which already put their state in an `aria-*`
+attribute on a button. Bodies are unmounted rather than hidden: nothing in these
+sections holds a query of its own, and a hidden subtree is still reachable by a
+keyboard. All three open by default and the choice persists to `localStorage`
+under `plugin:{pluginId}:sections`, read in the state initialiser rather than an
+effect so the panel never paints the default layout for a frame first, and
+wrapped in `try`/`catch` on both sides — a browser that refuses storage gets
+sections that still fold, they just do not survive a reload.
+
+**A Dex cell expands in place, and the placement needs no column count.** The
+detail is a grid item spanning `1 / -1` placed immediately after the selected
+cell; auto-placement cannot start a full-width item mid-row, so it drops to the
+next row line by itself, at any container width, under `auto-fill`, with no
+`ResizeObserver` to keep in step. The cost is that non-dense flow does not
+backfill, so the slots right of the selected cell stay empty — which reads as the
+selection pointing at its own panel, and is cheaper than knowing how many columns
+there are.
+
+The grid does reflow vertically, and here that is correct. PokeTokenBar writes
+its Dex detail into a fixed-height footer specifically so the grid never moves,
+but that is a 520pt popover defending a height budget; this panel scrolls inside
+the console and has none, so inserting a row is the honest behaviour. Changing
+the rarity filter clears the open entry, because narrowing can take it off the
+grid entirely and a detail describing a sprite that is not on screen is the same
+class of lie as a bag listing something it does not hold.
 
 Per the host design, this mount sits inside a React error boundary. A rendering
 bug here must not black out the console — the dashboard is what an operator

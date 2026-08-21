@@ -23,6 +23,8 @@ import { createPluginApi } from "@omnigateway/dashboard-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Dex } from "../ui/Dex.tsx";
+import { itemSpriteUrl } from "../ui/format.ts";
 import companionUi, { activityOf } from "../ui/index.tsx";
 
 const Companion = companionUi.mount;
@@ -30,6 +32,10 @@ const realFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  // The panel remembers which sections are folded, and `localStorage` is
+  // process-wide. Without this, the first test to fold something decides the
+  // layout for every test that runs after it.
+  globalThis.localStorage?.clear();
 });
 
 /* -------------------------------------------------------------------------- */
@@ -43,6 +49,8 @@ type StubHandler = (input: { url: string; body: string | undefined }) => StubRes
 type FetchStub = {
   calls: Array<{ method: string; url: string; body: string | undefined }>;
 };
+
+type Mounted = FetchStub & { unmount: () => void };
 
 function stubFetch(routes: Record<string, StubHandler>): FetchStub {
   const table = new Map(Object.entries(routes));
@@ -76,17 +84,19 @@ function stubFetch(routes: Record<string, StubHandler>): FetchStub {
  * Mount the panel the way the host does: `mount` called in render position with
  * the two props the SDK promises, and nothing else in scope.
  */
-function renderCompanion(routes: Record<string, StubHandler>): FetchStub {
+function renderCompanion(routes: Record<string, StubHandler>): Mounted {
   const stub = stubFetch(routes);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
-  render(
+  const { unmount } = render(
     <QueryClientProvider client={client}>
       <Companion api={createPluginApi("pokemon")} pluginId="pokemon" />
     </QueryClientProvider>,
   );
-  return stub;
+  // `unmount` is returned for the one thing that needs it: a preference stored
+  // by one mount and read back by the next. Every other test mounts once.
+  return { ...stub, unmount };
 }
 
 /**
@@ -385,7 +395,7 @@ describe("the key roster", () => {
     });
 
     await openCompanion();
-    await userEvent.click(await screen.findByRole("button", { name: "mint · 100" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Buy mint" }));
 
     // Still here. The roster grew underneath, which is not a navigation.
     expect(await screen.findByRole("heading", { name: "Egg" })).toBeTruthy();
@@ -411,7 +421,7 @@ describe("the key roster", () => {
     await userEvent.click(await screen.findByRole("button", { name: new RegExp(KEY) }));
     await openCompanion();
     // Shrinks the roster to one key behind the panel's back.
-    await userEvent.click(await screen.findByRole("button", { name: "mint · 100" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Buy mint" }));
     await userEvent.click(await screen.findByRole("button", { name: "All keys" }));
 
     expect(await screen.findByRole("textbox", { name: "API key id" })).toBeTruthy();
@@ -771,16 +781,19 @@ describe("an active companion", () => {
     );
     await openCompanion();
 
-    const charm = await screen.findByRole("button", { name: /shiny charm/ });
+    const charm = await screen.findByRole("button", { name: "Buy shiny charm" });
     expect(charm.hasAttribute("disabled")).toBe(true);
     // The price is replaced rather than sat beside: a price on something that
-    // cannot be bought is the one number on the row that means nothing.
-    expect(charm.textContent).toContain("owned");
-    expect(charm.textContent).not.toContain("3.0B");
+    // cannot be bought is the one number on the card that means nothing.
+    expect(screen.getByText("owned")).toBeTruthy();
+    expect(screen.queryByText("3.0B")).toBeNull();
 
-    // And a spendable item is untouched by the rule, wallet permitting.
-    const candy = screen.getByRole("button", { name: /rare candy/ });
+    // And a spendable item is untouched by the rule, wallet permitting — its
+    // price is still on show, which is what makes the charm's absence a
+    // decision rather than a shop that prices nothing.
+    const candy = screen.getByRole("button", { name: "Buy rare candy" });
     expect(candy.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("500.0M")).toBeTruthy();
   });
 
   test("says a pinned companion is held rather than showing it stuck", async () => {
@@ -878,9 +891,11 @@ describe("the shop", () => {
     await openCompanion();
 
     // The label is derived, so the accessible name is the assertion: an operator
-    // reads "rare candy", not the field name it was stored under.
-    const affordable = await screen.findByRole("button", { name: "rare candy · 100" });
-    const tooDear = screen.getByRole("button", { name: "fresh egg (rare+) · 101" });
+    // reads "rare candy", not the field name it was stored under. The tier is in
+    // the egg's name for a reason — three egg offers share one heading, and a
+    // chip is not part of a button's accessible name.
+    const affordable = await screen.findByRole("button", { name: "Buy rare candy" });
+    const tooDear = screen.getByRole("button", { name: "Buy fresh egg (rare+)" });
 
     // Exactly affordable is affordable — the boundary, not a round number.
     expect((affordable as HTMLButtonElement).disabled).toBe(false);
@@ -894,7 +909,7 @@ describe("the shop", () => {
     });
     await openCompanion();
 
-    await userEvent.click(await screen.findByRole("button", { name: "rare candy · 100" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Buy rare candy" }));
 
     const posted = stub.calls.filter((call) => call.method === "POST");
     expect(posted).toHaveLength(1);
@@ -909,9 +924,98 @@ describe("the shop", () => {
     });
     await openCompanion();
 
-    await userEvent.click(await screen.findByRole("button", { name: "fresh egg (rare+) · 101" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Buy fresh egg (rare+)" }));
 
     expect(stub.calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
+  test("says what an item does, not only what it costs", async () => {
+    // The complaint the cards answer. `rare candy · 500.0M` named a thing and
+    // priced it and said nothing about what buying it would do, so the shop was
+    // readable only by somebody who already knew the economy.
+    //
+    // Every quantity here is distinct — a wallet that could afford either, and
+    // two prices that are not each other — so a card rendering the wrong number
+    // fails rather than passing by coincidence.
+    renderCompanion(
+      serving(
+        view({
+          wallet: 9_000_000_000,
+          shop: [
+            { entry: { kind: "item", item: "rareCandy" }, price: 500_000_000 },
+            { entry: { kind: "egg", tier: "uncommon" }, price: 2_500_000_000 },
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(
+      await screen.findByText("Injects 100.0M growth. Priced at five times what it grants."),
+    ).toBeTruthy();
+    expect(screen.getByText("500.0M")).toBeTruthy();
+
+    // The egg's guarantee reads in the sentence as well as in the chip, because
+    // a chip is not part of anything a screen reader announces for the button.
+    expect(
+      screen.getByText(
+        "Sends this companion off for an egg guaranteed to hatch uncommon or better.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("2.50B")).toBeTruthy();
+  });
+
+  test("keeps offering an unknown item after one has been bought", async () => {
+    // The two sides of "can this be spent" have to be one fact. The bag reads
+    // `itemCard(...).consumable`, which is `true` for an unknown item on
+    // purpose — a visible refusal from the server beats a button the panel
+    // never draws. `alreadyOwned` read `CONSUMABLE_ITEMS` instead, which is
+    // built only from the ids the catalogue knows, so it called the same item
+    // passive and greyed its offer out for good once one was held.
+    //
+    // A stackable item the server ships before anybody writes its copy would
+    // then be usable from the bag and unbuyable from the shop, with the price
+    // replaced by the word "owned" — the silent omission the fallback exists to
+    // avoid, arriving on the other surface.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: { quickClaw: 1 } },
+          wallet: 9_000_000_000,
+          shop: [{ entry: { kind: "item", item: "quickClaw" }, price: 700_000_000 }],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const buy = (await screen.findByRole("button", {
+      name: "Buy quick claw",
+    })) as HTMLButtonElement;
+    expect(buy.disabled).toBe(false);
+    expect(screen.getByText("700.0M")).toBeTruthy();
+    expect(screen.queryByText("owned")).toBeNull();
+  });
+
+  test("still offers an item nobody has written a description for", async () => {
+    // Copy fails open. An item the server sells that the catalogue has never
+    // heard of keeps its row, its derived name and a working Buy button — a
+    // missing sentence is not a missing item, and a shop that dropped an offer
+    // over unwritten copy would hide something an operator can actually buy.
+    renderCompanion(
+      serving(
+        view({
+          wallet: 9_000_000_000,
+          shop: [{ entry: { kind: "item", item: "quickClaw" }, price: 700_000_000 }],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText("quick claw")).toBeTruthy();
+    expect(screen.getByText("700.0M")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Buy quick claw" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 });
 
@@ -1157,8 +1261,13 @@ describe("the bag", () => {
     renderCompanion(serving(withInventory({ rareCandy: 3, mint: 7 })));
     await openCompanion();
 
-    expect(await screen.findByText("rare candy · 3")).toBeTruthy();
-    expect(screen.getByText("mint · 7")).toBeTruthy();
+    // Name and count are separate elements now — the count sits where the shop
+    // puts a price — so they are asserted separately. Distinct values are what
+    // makes that safe: a card printing the wrong item's count still fails.
+    expect(await screen.findByText("rare candy")).toBeTruthy();
+    expect(screen.getByText("×3")).toBeTruthy();
+    expect(screen.getByText("mint")).toBeTruthy();
+    expect(screen.getByText("×7")).toBeTruthy();
   });
 
   test("spends a held item through the route that was written for it", async () => {
@@ -1191,10 +1300,10 @@ describe("the bag", () => {
     });
     await openCompanion();
 
-    expect(await screen.findByText("rare candy · 2")).toBeTruthy();
+    expect(await screen.findByText("×2")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Use rare candy" }));
 
-    expect(await screen.findByText("rare candy · 1")).toBeTruthy();
+    expect(await screen.findByText("×1")).toBeTruthy();
     // Twice for this key: once on open, once because the use invalidated it.
     // Counted per route, since the roster is fetched on mount as well.
     expect(
@@ -1231,7 +1340,8 @@ describe("the bag", () => {
     renderCompanion(serving(withInventory({ shinyCharm: 1, mint: 4 })));
     await openCompanion();
 
-    expect(await screen.findByText("shiny charm · 1")).toBeTruthy();
+    expect(await screen.findByText("shiny charm")).toBeTruthy();
+    expect(screen.getByText("×1")).toBeTruthy();
     expect(screen.getByText("held")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Use shiny charm" })).toBeNull();
     // And the consumable beside it still has one, so this is not a bag with no
@@ -1245,7 +1355,8 @@ describe("the bag", () => {
     renderCompanion(serving(withInventory({ mint: 5 })));
     await openCompanion();
 
-    expect(await screen.findByText("mint · 5")).toBeTruthy();
+    expect(await screen.findByText("mint")).toBeTruthy();
+    expect(screen.getByText("×5")).toBeTruthy();
     expect(screen.queryByText(/rare candy/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Use rare candy" })).toBeNull();
   });
@@ -1255,6 +1366,266 @@ describe("the bag", () => {
     await openCompanion();
 
     expect(await screen.findByText("Nothing in the bag.")).toBeTruthy();
+  });
+});
+
+describe("the folding sections", () => {
+  function withEverything(): CompanionView {
+    // Distinct counts, so a heading that reports the wrong section's total is
+    // visible rather than coincidentally right.
+    return view({
+      state: {
+        active: active(),
+        eggUsage: 0,
+        eggTier: null,
+        inventory: { rareCandy: 3, mint: 7 },
+      },
+      shop: [{ entry: { kind: "item", item: "mint" }, price: 100 }],
+      dex: [dexEntry({ id: "d1" }), dexEntry({ id: "d2" }), dexEntry({ id: "d3" })],
+    });
+  }
+
+  test("says what each section holds without being opened", async () => {
+    // The whole reason a folded heading is more than a word. "BAG" tells an
+    // operator nothing they did not already know.
+    renderCompanion(serving(withEverything()));
+    await openCompanion();
+
+    expect(await screen.findByText("1 offer")).toBeTruthy();
+    expect(screen.getByText("2 held")).toBeTruthy();
+    expect(screen.getByText("3 graduates")).toBeTruthy();
+  });
+
+  test("folds a section away and says so", async () => {
+    renderCompanion(serving(withEverything()));
+    await openCompanion();
+
+    const bag = await screen.findByRole("button", { name: /Bag/ });
+    expect(bag.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: "Use mint" })).toBeTruthy();
+
+    await userEvent.click(bag);
+
+    expect(bag.getAttribute("aria-expanded")).toBe("false");
+    // Unmounted rather than hidden: a hidden subtree is still reachable by a
+    // keyboard, which is a section that folds for the eye and not for the hand.
+    expect(screen.queryByRole("button", { name: "Use mint" })).toBeNull();
+    // And the count survives the fold, which is what makes folding cheap.
+    expect(screen.getByText("2 held")).toBeTruthy();
+  });
+
+  test("remembers what was folded, and folds only that", async () => {
+    const { unmount } = renderCompanion(serving(withEverything()));
+    await openCompanion();
+    await userEvent.click(await screen.findByRole("button", { name: /Bag/ }));
+    unmount();
+
+    renderCompanion(serving(withEverything()));
+    await openCompanion();
+
+    expect((await screen.findByRole("button", { name: /Bag/ })).getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    // The other two are untouched, so this is a remembered choice rather than a
+    // panel that reopens folded.
+    expect(screen.getByRole("button", { name: /Shop/ }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: /Pokédex/ }).getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+  });
+
+  test("still folds when the browser refuses to remember anything", async () => {
+    // Storage disabled by policy, a quota error, a sandboxed frame. Persistence
+    // is a convenience and must not be able to take the panel down.
+    const realSetItem = globalThis.localStorage.setItem;
+    globalThis.localStorage.setItem = () => {
+      throw new Error("storage is disabled");
+    };
+    try {
+      renderCompanion(serving(withEverything()));
+      await openCompanion();
+
+      const bag = await screen.findByRole("button", { name: /Bag/ });
+      await userEvent.click(bag);
+      expect(bag.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByRole("button", { name: "Use mint" })).toBeNull();
+    } finally {
+      globalThis.localStorage.setItem = realSetItem;
+    }
+  });
+
+  test("ignores a remembered value that is not a state this panel has", async () => {
+    // Hand-edited storage, or a value from an older version of the panel. Each
+    // key is narrowed on its own, so a junk `shop` does not take `bag` with it.
+    globalThis.localStorage.setItem(
+      "plugin:pokemon:sections",
+      JSON.stringify({ shop: "yes", bag: false }),
+    );
+    renderCompanion(serving(withEverything()));
+    await openCompanion();
+
+    expect(
+      (await screen.findByRole("button", { name: /Shop/ })).getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(screen.getByRole("button", { name: /Bag/ }).getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("an item icon", () => {
+  test("falls back to a glyph when there is no sprite to draw", async () => {
+    // One path for three absences: `mint`, which has no sprite in the PokéAPI
+    // repository at all; a cold cache, where every icon 404s on first paint;
+    // and an offline install, where the route answers 503 forever. The panel
+    // cannot tell them apart and does not need to.
+    //
+    // happy-dom has no image loader, so it fires `error` on every `img` as soon
+    // as one is attached — which means the fallback is what this environment can
+    // observe, and the loaded state is not testable here at all. That is a
+    // limitation of the renderer rather than a claim about browsers, and it is
+    // why `itemSpriteUrl` is asserted separately below: the two halves of this
+    // component are "ask for the right thing" and "cope when it is not there",
+    // and only the second one survives a DOM without a network.
+    renderCompanion(
+      serving(view({ wallet: 500, shop: [{ entry: { kind: "item", item: "mint" }, price: 100 }] })),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText("🌿")).toBeTruthy();
+    // Replaced, not covered: an image left in the tree is one still asking the
+    // gateway for a sprite that is never coming.
+    expect(document.querySelector('img[src*="item-sprite"]')).toBeNull();
+  });
+
+  test("asks the plugin's own mount for the icon, under the item's stored id", async () => {
+    // No renderer: this is the URL the component builds, and it is the half of
+    // the icon a DOM without a network cannot exercise. The stored id is the
+    // segment because the server's sprite map is keyed by it — a label like
+    // "rare candy" would 404 on every item whose name has a space.
+    expect(itemSpriteUrl("pokemon", "rareCandy")).toBe(
+      "/api/plugins/pokemon/item-sprite/rareCandy",
+    );
+    // Every egg tier shares one icon: the guarantee is a fact about the offer,
+    // carried by the chip, not by the artwork.
+    expect(itemSpriteUrl("pokemon", "egg")).toBe("/api/plugins/pokemon/item-sprite/egg");
+  });
+});
+
+describe("a Dex entry opened", () => {
+  const graduate = dexEntry({
+    id: "d1",
+    finalId: 26,
+    chainOrder: [172, 25, 26],
+    rarity: "rare",
+    nature: "brave",
+    name: "Raichu",
+  });
+
+  test("shows the record the grid has no room for", async () => {
+    renderCompanion(serving(view({ dex: [graduate] })));
+    await openCompanion();
+
+    const cell = await screen.findByRole("button", { name: /Raichu/ });
+    expect(cell.getAttribute("aria-expanded")).toBe("false");
+
+    await userEvent.click(cell);
+
+    expect(cell.getAttribute("aria-expanded")).toBe("true");
+    // The whole line, not only the form it graduated as. A stage the species
+    // cache has no name for shows its number, which is the same fallback the
+    // grid uses.
+    expect(screen.getByText("#172")).toBeTruthy();
+    expect(screen.getByText("#25")).toBeTruthy();
+    // Both of these read twice on the page, and both duplicates are wanted. The
+    // nature is captioned on the cell so the grid says it at a glance and
+    // chipped in the detail as part of the whole record; "rare" is also the
+    // name of a filter button. Counting is the assertion that stays true when
+    // either of those is someone's deliberate choice.
+    expect(screen.getAllByText("brave")).toHaveLength(2);
+    expect(screen.getAllByText("rare")).toHaveLength(2);
+  });
+
+  test("closes when the same entry is clicked again", async () => {
+    renderCompanion(serving(view({ dex: [graduate] })));
+    await openCompanion();
+
+    const cell = await screen.findByRole("button", { name: /Raichu/ });
+    await userEvent.click(cell);
+    expect(screen.getByText("#172")).toBeTruthy();
+
+    await userEvent.click(cell);
+    expect(cell.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("#172")).toBeNull();
+  });
+
+  test("closes when a filter could take the open entry off the grid", async () => {
+    // A detail panel describing a sprite that is no longer on screen is the
+    // same class of lie as a bag listing something it does not hold — and worse
+    // here, because it would sit under a grid of unrelated Pokémon looking like
+    // one of theirs.
+    renderCompanion(
+      serving(view({ dex: [graduate, dexEntry({ id: "d2", rarity: "common", name: "Rattata" })] })),
+    );
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    expect(screen.getByText("#172")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "common" }));
+
+    expect(screen.queryByText("#172")).toBeNull();
+    expect(screen.queryByText("brave")).toBeNull();
+  });
+});
+
+describe("the Dex grid's identity", () => {
+  test("keeps a cell alive when the roster reorders underneath it", async () => {
+    // `readDex` orders by `caught_at DESC`, so one new graduation arriving on a
+    // poll shifts every index. The cells carry `key={entry.id}`, which reads as
+    // though that is handled — but each `.map` returned a bare ARRAY of
+    // [cell, detail], and React reconciles unkeyed nested arrays as implicit
+    // fragments matched by POSITION. The outer index became part of the
+    // identity, so every cell unmounted and remounted on any reorder: every
+    // sprite destroyed and refetched, and the focused cell losing focus
+    // mid-keyboard-navigation.
+    //
+    // Rendered directly rather than through the panel: the panel would need a
+    // poll to reorder anything, and focus identity is the assertion.
+    const a = dexEntry({ id: "a", finalId: 3, name: "Venusaur" });
+    const b = dexEntry({ id: "b", finalId: 6, name: "Charizard" });
+    const c = dexEntry({ id: "c", finalId: 9, name: "Blastoise" });
+
+    const { rerender } = render(<Dex entries={[a, b, c]} pluginId="pokemon" />);
+    const before = screen.getByRole("button", { name: /Charizard/ });
+    before.focus();
+    expect(document.activeElement).toBe(before);
+
+    // A newer graduation lands at the front.
+    rerender(<Dex entries={[c, a, b]} pluginId="pokemon" />);
+
+    const after = screen.getByRole("button", { name: /Charizard/ });
+    expect(after).toBe(before);
+    expect(document.activeElement).toBe(after);
+  });
+
+  test("names a stage in the line only when it really is the final form", async () => {
+    // `name` is the name of `finalId`, which is a separate column from
+    // `chain_order` — and `readDex` drops non-numeric chain members while
+    // leaving `final_id` untouched, so a corrupt row can leave the two
+    // disagreeing. Captioning by position then prints the graduate's name under
+    // whichever sprite happens to be last, which on an Eevee line means
+    // "Vaporeon" written under Eevee.
+    render(
+      <Dex
+        entries={[dexEntry({ id: "v", chainOrder: [133], finalId: 134, name: "Vaporeon" })]}
+        pluginId="pokemon"
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
+
+    // The surviving stage is 133, which is not 134, so it is not the graduate
+    // and must not wear its name.
+    expect(screen.getByText("#133")).toBeTruthy();
   });
 });
 
