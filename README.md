@@ -70,8 +70,7 @@ from one readable file. It constrains honest code and not hostile code.
 The plugin degrades rather than failing when a capability is absent. With no
 `net`, an incubating egg holds its progress instead of losing it, and both
 sprite routes answer `503` — the panel then draws each item as an emoji, which
-is the same thing it draws before the cache has filled and the same thing it
-draws for `mint`, whose icon does not exist upstream at all.
+is the same thing it draws before the cache has filled.
 
 ## Nintendo and Game Freak intellectual property
 

@@ -214,20 +214,23 @@ export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
  * `sootheBell` becomes `soothe-bell` and `rareCandy` becomes `rare-candy`, so a
  * kebab-casing function would cover most of this table and would be wrong about
  * the rest — which is the entire reason it is written out. Three entries do not
- * derive:
+ * derive, and all three are the same trade: art that names a different item
+ * than the label does, taken because the alternative is no art at all.
  *
  * - `incense` has no plain sprite. PokéAPI ships nine incenses and no generic
  *   one, so this picks `luck-incense`; the plugin's incense weights a roll
  *   toward longer lines, which is the closest of the nine.
  * - `lure` has no sprite at all. `honey` is the in-game encounter-attractor and
- *   is the nearest thing in the set to what this lure does. It is knowingly art
- *   that names a different item than the label does, accepted because the
- *   alternative for an item with no sprite is no art.
- * - `mint` is **deliberately absent**. It is a Gen-8 item and the sprites
- *   repository has none, generic or otherwise, so there is nothing to point at
- *   and no near miss worth the lie — a Heart Scale is a Move Reminder token,
- *   not a nature item. It falls through to the panel's emoji, which is the same
- *   path a cold cache and an offline install already take.
+ *   is the nearest thing in the set to what this lure does.
+ * - `mint` has no sprite either, and never will: it is a Gen-8 item and the
+ *   repository holds no mint of any flavour. `mental-herb` is the pick — a
+ *   green sprig, drawn in the same herb art the mints are drawn as in game —
+ *   and it is chosen on the picture rather than the effect, because nothing in
+ *   the set rerolls a nature and a Heart Scale would claim to. This entry was
+ *   absent for one release and the item fell through to the panel's emoji; that
+ *   worked, but every cold paint logged a 404 for a route that would never
+ *   answer, and a permanent error in the console is a thing an operator has to
+ *   learn to ignore.
  *
  * Being a closed map is also the security property. The value that reaches a URL
  * and a cache path is a lookup *result*, never a caller's string, which is the
@@ -246,7 +249,16 @@ export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
  * `Object.entries` is what bridges them, and it only yields own enumerable
  * keys, so nothing from the prototype is carried across.
  */
-const ITEM_SPRITE_FILES: Readonly<Partial<Record<ItemKind, string>> & { egg: string }> = {
+/**
+ * Total over `ItemKind`, and not `Partial` any more.
+ *
+ * `mint` was the one absence and it is filled, so the type can now be the thing
+ * that asks the question: a new purchasable item is a compile error here until
+ * someone picks art for it. Partial made that omission silent, and what silence
+ * bought was a route that answered 404 forever while the panel's fallback hid
+ * it from everywhere except the browser console.
+ */
+const ITEM_SPRITE_FILES: Readonly<Record<ItemKind, string> & { egg: string }> = {
   rareCandy: "rare-candy",
   shinyCharm: "shiny-charm",
   everstone: "everstone",
@@ -254,6 +266,7 @@ const ITEM_SPRITE_FILES: Readonly<Partial<Record<ItemKind, string>> & { egg: str
   repel: "repel",
   incense: "luck-incense",
   lure: "honey",
+  mint: "mental-herb",
   /** Every tier. The guarantee is carried by the rarity chip, not by the art. */
   egg: "lucky-egg",
 };

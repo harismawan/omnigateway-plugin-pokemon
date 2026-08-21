@@ -1248,12 +1248,12 @@ test("a non-numeric species id is refused before any lookup", async () => {
 test("an unmapped item icon is a 404, and it is decided before the capabilities are", async () => {
   // Ordered the way the species route orders its integer check: an id this
   // plugin does not sell is a 404 whether or not the install can fetch, because
-  // the answer is the same forever either way. `mint` is the honest case — it
-  // has no sprite in the repository at all — and `../secret` is the hostile one
-  // that must land in the identical branch.
+  // the answer is the same forever either way. Every item the shop *does* sell
+  // is mapped, so these are all names nobody sells — `../secret` being the
+  // hostile one that must land in the identical branch as a typo.
   await boot();
   const route = routes.find((r) => r.path === "/item-sprite/:item");
-  for (const item of ["mint", "../secret", "notAnItem"]) {
+  for (const item of ["../secret", "notAnItem", "mental-herb"]) {
     const response = await route?.handler({ params: { item }, query: {}, body: null });
     expect(response?.status).toBe(404);
   }

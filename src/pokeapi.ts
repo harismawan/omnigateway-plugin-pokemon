@@ -663,9 +663,10 @@ export async function spriteBytes(
  * any I/O, so an unmapped or invented id costs neither a fetch nor a disk read
  * and can never reach a URL or a filename.
  *
- * Null is an ordinary answer here, more so than it is for a species: `mint` has
- * no sprite and never will, so the panel's fallback is a permanent state for at
- * least one row rather than a degraded one.
+ * Null is an ordinary answer here: a cold cache and an offline install both take
+ * this path, and the panel's fallback covers them. Every item this plugin sells
+ * is mapped, so null no longer means "this row will never have art" for any of
+ * them — an id that reaches here unmapped is one nobody sells.
  */
 export async function itemSpriteBytes(deps: PokeApiDeps, item: string): Promise<Uint8Array | null> {
   // `Map.get` and not an index, which is the whole reason the map is a `Map` —

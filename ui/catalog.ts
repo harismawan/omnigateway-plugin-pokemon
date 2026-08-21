@@ -28,10 +28,10 @@ export type ItemCard = {
    * What stands in the icon's place when there is no icon.
    *
    * Not a decoration on top of the sprite — a replacement for it, and one that
-   * covers three different absences with one path: `mint`, which has no sprite
-   * in the PokéAPI repository and never will; a cold cache, where *every* icon
-   * is missing on first paint and fills in on a later poll; and an offline
-   * install, where the route answers 503 forever.
+   * covers two different absences with one path: a cold cache, where *every*
+   * icon is missing on first paint and fills in on a later poll; and an offline
+   * install, where the route answers 503 forever. Every item this plugin sells
+   * has art mapped, so no row sits on its emoji permanently any more.
    *
    * These are full-colour glyphs, which the panel's own rule reserves for
    * provider identity and state. That exception is recorded in the plugin's

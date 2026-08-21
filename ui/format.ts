@@ -19,8 +19,8 @@ export function spriteUrl(pluginId: string, speciesId: number, shiny: boolean): 
  * The id is passed through unencoded, matching `spriteUrl`, because the server
  * looks it up in a closed map and answers 404 for anything not in it — the ids
  * that reach here come from the shop and the bag, both of which the server
- * populated. A 404 is the ordinary answer for `mint` and for a cold cache
- * alike, and the panel draws the item's emoji for both.
+ * populated. A 404 is the ordinary answer for a cold cache, and the panel draws
+ * the item's emoji until a later poll fills it in.
  */
 export function itemSpriteUrl(pluginId: string, item: string): string {
   return `/api/plugins/${pluginId}/item-sprite/${item}`;
