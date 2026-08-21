@@ -1,7 +1,9 @@
 # Expandable Shop, Bag, and Pokédex
 
 **Date:** 2026-08-20
-**Status:** approved, not yet implemented
+**Status:** implemented in `f0425b3`. Two things changed during implementation and
+are corrected below: the catalog holds no `label` column, and the rare-candy
+blurb quotes `100.0M` rather than `100M`.
 
 ## Problem
 
@@ -92,17 +94,20 @@ New `ui/catalog.ts`, one row per item id:
 
 ```ts
 type ItemCard = {
-  label: string;
   blurb: string;
   emoji: string;
   consumable: boolean;
 };
 ```
 
-`CONSUMABLE_ITEMS` **moves** here from `ui/format.ts` rather than being copied.
-`format.ts` already carries the warning that two derivations of one label is how
-"rare candy" in the shop ends up beside "rareCandy" in the bag; a second table
-naming the same eight items would be that mistake with more steps.
+**No `label` column**, and this was corrected while building it. The draft had
+one, which would have re-derived what `itemLabel` already produces for all eight
+ids — in the same file that quotes `format.ts`'s warning that two derivations of
+one label is how "rare candy" in the shop ends up beside "rareCandy" in the bag.
+
+`CONSUMABLE_ITEMS` **moves** here from `ui/format.ts` for the opposite reason: it
+is a fact about an item, so it belongs on the item's row rather than in a second
+list that has to be kept in step with this one.
 
 **Copy fails open.** An id the server sells that this table does not know renders
 `itemLabel(id)`, no blurb, and the unknown-item emoji. A missing sentence is not
@@ -114,12 +119,20 @@ rule, not the `parseState` half: no money moves here.
 
 Each is the reasoning already recorded in `src/balance.ts`, compressed to a
 sentence. They are copy, so they live in the panel; the numbers inside them
-(100M, 25%, 1 in 48) are duplicated from the server's constants and are expected
-to be checked against them when those constants move.
+(100.0M, 25%, 1 in 48) are duplicated from the server's constants, because the
+panel cannot import from `src/`.
+
+`test/catalog.test.ts` is the seam that keeps them honest. A test runs in one
+process and can import both halves, so the drift is not prevented but it is
+*detected* — at the point somebody changes the balance, rather than months later
+when an operator reads a sentence that is no longer true. It caught one on its
+first run: the blurb said `100M` while every price on the same card renders
+through `formatTokens` as `500.0M`, and a token figure quoted in a different
+style from the number beside it reads as a different quantity.
 
 | id | blurb |
 | --- | --- |
-| `rareCandy` | Injects 100M growth. Priced at five times what it grants. |
+| `rareCandy` | Injects 100.0M growth. Priced at five times what it grants. |
 | `mint` | Rerolls this companion's nature. Cosmetic, and cheap enough to reroll again. |
 | `shinyCharm` | Kept, never spent. Raises every future hatch from 1 in 64 to 1 in 48. |
 | `everstone` | Pins this companion: it will not evolve, reveal, or graduate. |

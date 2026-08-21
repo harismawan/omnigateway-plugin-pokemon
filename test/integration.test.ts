@@ -1259,6 +1259,21 @@ test("an unmapped item icon is a 404, and it is decided before the capabilities 
   }
 });
 
+test("a name inherited from Object.prototype is not an item either", async () => {
+  // The guard was `item in ITEM_SPRITE_NAMES`, and `in` walks the prototype
+  // chain — so every one of these answered 503 here rather than 404, which is
+  // the route saying "ask again once this gateway has `net`" about a name that
+  // is not an item on any install. With `net` it went further: the lookup
+  // yielded a function, and `function Object() { [native code] }.png` reached
+  // both the outbound URL and the cache filename.
+  await boot();
+  const route = routes.find((r) => r.path === "/item-sprite/:item");
+  for (const item of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const response = await route?.handler({ params: { item }, query: {}, body: null });
+    expect(response?.status).toBe(404);
+  }
+});
+
 test("a mapped item icon without the net capability degrades rather than throwing", async () => {
   await boot();
   const route = routes.find((r) => r.path === "/item-sprite/:item");

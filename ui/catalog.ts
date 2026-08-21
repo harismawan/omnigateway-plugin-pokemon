@@ -59,7 +59,10 @@ export type ItemCard = {
 
 const CATALOG: Readonly<Record<string, ItemCard>> = {
   rareCandy: {
-    blurb: "Injects 100M growth. Priced at five times what it grants.",
+    // "100.0M" and not "100M": `formatTokens` is what renders the price on the
+    // same card, and a sentence quoting a token figure in a different style
+    // from the number beside it reads as a different quantity.
+    blurb: "Injects 100.0M growth. Priced at five times what it grants.",
     emoji: "🍬",
     consumable: true,
   },

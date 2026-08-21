@@ -668,7 +668,10 @@ export async function spriteBytes(
  * least one row rather than a degraded one.
  */
 export async function itemSpriteBytes(deps: PokeApiDeps, item: string): Promise<Uint8Array | null> {
-  const name = ITEM_SPRITE_NAMES[item as keyof typeof ITEM_SPRITE_NAMES];
+  // `Map.get` and not an index, which is the whole reason the map is a `Map` —
+  // see `ITEM_SPRITE_NAMES`. An object index answers `constructor` with a
+  // function, and a function is not `undefined`.
+  const name = ITEM_SPRITE_NAMES.get(item);
   if (name === undefined) return null;
 
   const path = itemSpritePath(name);

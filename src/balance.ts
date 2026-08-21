@@ -232,8 +232,21 @@ export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
  * Being a closed map is also the security property. The value that reaches a URL
  * and a cache path is a lookup *result*, never a caller's string, which is the
  * same guarantee `spriteBytes` gets from validating an integer against a range.
+ *
+ * Written as a literal for the key checking and then published as a `Map`, and
+ * the second half is not ceremony — it closes a real hole that shipped in the
+ * first version of this. An object literal inherits from `Object.prototype`, so
+ * `"constructor" in names` is `true` and `names.constructor` is a *function*
+ * rather than `undefined`: a guard written as `=== undefined` passes it
+ * straight through, and what reached the URL and the cache filename was
+ * `function Object() { [native code] }.png`. A `Map` has no inherited string
+ * keys, so `get` answers `undefined` for every name that is not one of these —
+ * the safety is structural rather than a rule each call site has to remember.
+ *
+ * `Object.entries` is what bridges them, and it only yields own enumerable
+ * keys, so nothing from the prototype is carried across.
  */
-export const ITEM_SPRITE_NAMES: Readonly<Partial<Record<ItemKind, string>> & { egg: string }> = {
+const ITEM_SPRITE_FILES: Readonly<Partial<Record<ItemKind, string>> & { egg: string }> = {
   rareCandy: "rare-candy",
   shinyCharm: "shiny-charm",
   everstone: "everstone",
@@ -244,6 +257,10 @@ export const ITEM_SPRITE_NAMES: Readonly<Partial<Record<ItemKind, string>> & { e
   /** Every tier. The guarantee is carried by the rarity chip, not by the art. */
   egg: "lucky-egg",
 };
+
+export const ITEM_SPRITE_NAMES: ReadonlyMap<string, string> = new Map(
+  Object.entries(ITEM_SPRITE_FILES),
+);
 
 export const FRESH_EGG_BASE_PRICE = 1_000_000_000;
 

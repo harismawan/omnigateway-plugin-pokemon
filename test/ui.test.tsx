@@ -950,7 +950,7 @@ describe("the shop", () => {
     await openCompanion();
 
     expect(
-      await screen.findByText("Injects 100M growth. Priced at five times what it grants."),
+      await screen.findByText("Injects 100.0M growth. Priced at five times what it grants."),
     ).toBeTruthy();
     expect(screen.getByText("500.0M")).toBeTruthy();
 

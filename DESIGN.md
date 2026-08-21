@@ -327,9 +327,24 @@ quiet failure gets diagnosed as a bug in the gateway.
 
 **Amendment: items have icons, and their route is gated by a map rather than by
 a range.** A species id can be validated arithmetically; an item id cannot, so
-`ITEM_SPRITE_NAMES` in `balance.ts` is a closed literal map from item id to
-sprite filename, and the value that reaches a URL and a cache path is a lookup
-*result*. `/item-sprite/:item` answers 404 for anything not in the map, before
+`ITEM_SPRITE_NAMES` in `balance.ts` is a closed map from item id to sprite
+filename, and the value that reaches a URL and a cache path is a lookup
+*result*.
+
+**It is a `Map`, and the first version's object literal was a hole straight
+through the gate.** An object literal inherits from `Object.prototype`, so
+`"constructor" in names` is `true` and `names.constructor` is a *function*
+rather than `undefined` — a guard written as `=== undefined` passed it through,
+and `GET /item-sprite/constructor` produced an outbound request for
+`.../items/function Object() { [native code] }.png` and a cache write under the
+same name. `toString`, `valueOf`, `hasOwnProperty` and `__proto__` all did the
+same. The host's origin allowlist still bounded where the request could go, so
+this was never an open proxy; what it defeated was the claim the map exists to
+make, which is that the only strings reaching a URL or a path are the eight
+this plugin chose. A `Map` has no inherited string keys, so the safety is
+structural rather than a rule each call site has to remember — the literal is
+kept only for its compile-time key checking and converted with `Object.entries`,
+which yields own enumerable keys alone. `/item-sprite/:item` answers 404 for anything not in the map, before
 it consults the capabilities — an id this plugin does not sell is a 404 on every
 install forever, and answering 503 would invite a retry for something that is
 never coming.

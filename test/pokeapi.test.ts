@@ -279,6 +279,30 @@ test("an id the map does not name reaches neither the network nor the disk", asy
   expect(reads).toEqual([]);
 });
 
+test("an inherited property name is not an item", async () => {
+  // `ITEM_SPRITE_NAMES` is an object literal, so it inherits from
+  // `Object.prototype` — and every lookup that forgets this is a hole straight
+  // through the map that is supposed to be the gate. `map["constructor"]` is
+  // not `undefined`, it is a *function*, so a plain `=== undefined` guard
+  // passes it through and what lands in the URL and the cache filename is
+  // `function Object() { [native code] }`.
+  //
+  // The host's origin allowlist still bounds where that request can go, so this
+  // is not an open proxy either way. What it defeats is the actual claim the
+  // map exists to make: that the only strings reaching a URL or a path are the
+  // eight this plugin chose.
+  const { files, store } = memoryFiles();
+  const { net, calls } = stubNet(() => {
+    throw new Error("no inherited name should be fetched");
+  });
+
+  for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    expect(await itemSpriteBytes(deps(net, files), name)).toBeNull();
+  }
+  expect(calls).toEqual([]);
+  expect(store.size).toBe(0);
+});
+
 test("an offline or 404 item sprite returns null rather than throwing", async () => {
   const { files, store } = memoryFiles();
   const { net: offline } = stubNet(() => null);
@@ -295,7 +319,7 @@ test("every shop item either maps to a sprite or is deliberately absent", () => 
   // The map is allowed to be partial — that is what the emoji fallback is for —
   // but it must not name an item the shop does not sell, because a name in here
   // is a URL this plugin will fetch.
-  for (const item of Object.keys(ITEM_SPRITE_NAMES)) {
+  for (const item of ITEM_SPRITE_NAMES.keys()) {
     expect(ITEM_KINDS.includes(item as ItemKind) || item === "egg").toBe(true);
   }
 });

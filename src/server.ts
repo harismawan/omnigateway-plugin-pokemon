@@ -687,7 +687,10 @@ export default definePlugin({
           // has no sprite for — is a 404 on every install forever, so answering
           // 503 on a gateway without `net` would invite a client to retry for
           // something that is never coming.
-          if (!(item in ITEM_SPRITE_NAMES)) {
+          // `Map.has` and not `in`: `in` walks the prototype chain, so
+          // `"constructor" in names` is true for an object literal and this
+          // guard would wave through every name on `Object.prototype`.
+          if (!ITEM_SPRITE_NAMES.has(item)) {
             return { status: 404, json: { error: "no item icon" } };
           }
           if (net === undefined || files === undefined) {
