@@ -683,10 +683,9 @@ export default definePlugin({
           const item = request.params.item ?? "";
 
           // Decided before the capability check, and the order is deliberate.
-          // An id this plugin does not sell — or `mint`, which it does sell and
-          // has no sprite for — is a 404 on every install forever, so answering
-          // 503 on a gateway without `net` would invite a client to retry for
-          // something that is never coming.
+          // An id this plugin does not sell is a 404 on every install forever,
+          // so answering 503 on a gateway without `net` would invite a client
+          // to retry for something that is never coming.
           // `Map.has` and not `in`: `in` walks the prototype chain, so
           // `"constructor" in names` is true for an object literal and this
           // guard would wave through every name on `Object.prototype`.

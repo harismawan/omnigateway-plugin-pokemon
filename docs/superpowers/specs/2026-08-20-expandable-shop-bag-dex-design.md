@@ -60,14 +60,26 @@ that reaches the network is a lookup *result*, which is the same guarantee
 | `repel` | `repel` | exact |
 | `incense` | `luck-incense` | no plain `incense` sprite exists; the plugin's incense weights toward longer lines |
 | `lure` | `honey` | no `lure` sprite exists; honey is the in-game encounter-attractor |
-| `mint` | *(absent)* | Gen-8 item, not in the PokéAPI sprites repository |
+| `mint` | `mental-herb` | Gen-8 item, no mint of any flavour in the repository; a green sprig in the same herb art |
 | egg, every tier | `lucky-egg` | tier is carried by the rarity chip, not by the art |
 
 `lure` → `honey` is art that names a different item than the label does. It is
 accepted knowingly: the alternative for an item with no sprite is no art at all,
-and honey is the closest thing in the set to what the plugin's lure does. `mint`
-has no near-miss worth the same trade — a Heart Scale is a Move Reminder token,
-not a nature item — so it takes the fallback instead.
+and honey is the closest thing in the set to what the plugin's lure does.
+
+**Amended 2026-08-21.** `mint` was originally left absent, on the argument that
+no near-miss was worth the same trade — a Heart Scale is a Move Reminder token,
+not a nature item. That reasoning holds for the *effect* and is why `mental-herb`
+is picked on the picture instead: mints are drawn as green sprigs in game, and
+`mental-herb` is that same art. The absence was reversed because of what it cost
+in practice. The panel's emoji fallback hid it perfectly, so the only place the
+missing icon showed up was a `404` logged to the browser console on every paint,
+for a route that was never going to answer — a permanent error an operator has
+to learn to ignore, which is how real errors get ignored too.
+
+The map is now **total over `ItemKind`**, and the type says so: a new
+purchasable item is a compile error until someone picks art for it. `Partial`
+made that omission silent, and silence is exactly what shipped.
 
 Sprites are fetched from `raw.githubusercontent.com`, the origin the manifest
 already declares for species sprites. Nothing is vendored, in keeping with the
@@ -148,15 +160,20 @@ style from the number beside it reads as a different quantity.
 `ItemIcon` renders a 32px `image-rendering: pixelated` `<img>` against the
 `/item-sprite/` route. On `error` it swaps to the item's emoji.
 
-One path covers all three ways the sprite can be absent, which is the reason to
-build it this way rather than special-casing `mint`:
+One path covers both ways the sprite can be absent, which is the reason to build
+it this way rather than special-casing any single item:
 
-- `mint`, which has no sprite and never will.
 - A cold cache, where **every** icon is missing on first paint and fills in on a
   later poll. This is the panel's existing stance that a cold cache is an
   ordinary state, not an error — the same stance that lets a species render as
   `#25` until its name arrives.
 - An offline or air-gapped install, where the route answers 503 forever.
+
+There was a third — `mint`, mapped to no sprite — until the amendment above.
+Both remaining absences are temporary or install-wide; neither leaves one
+particular row sitting on its emoji forever. That distinction is the point of
+the amendment: a fallback that covers a transient state is a fallback, and one
+that covers a permanent state is a bug with a cosmetic lid on it.
 
 Icons are decorative: `alt=""`, and the accessible name of a card is its own
 text. An emoji fallback is rendered `aria-hidden`.

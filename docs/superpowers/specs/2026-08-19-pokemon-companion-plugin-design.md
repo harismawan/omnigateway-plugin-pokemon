@@ -367,9 +367,14 @@ is written out: three entries do not.
   encounter-attractor and the nearest thing in the set to what this lure does.
   It is knowingly art that names a different item than the label does, accepted
   because the alternative for an item with no sprite is no art.
-- `mint` → **nothing**. It is a Gen-8 item and the sprites repository has none,
-  generic or otherwise. A Heart Scale is a Move Reminder token, not a nature
-  item, so there is no near miss worth the lie.
+- `mint` → `mental-herb`. It is a Gen-8 item and the sprites repository has no
+  mint, generic or otherwise. **Amended 2026-08-21**: this originally mapped to
+  nothing, on the argument that no near miss was worth the lie — a Heart Scale
+  is a Move Reminder token, not a nature item. The pick is made on the picture
+  rather than the effect: mints are green sprigs in game and `mental-herb` is
+  the same herb art. See
+  `2026-08-20-expandable-shop-bag-dex-design.md` for why the absence was
+  reversed — the emoji hid it everywhere except a `404` logged on every paint.
 
 Every shop egg shares `lucky-egg` whatever its tier, because the guarantee is a
 fact about the offer rather than about the artwork, and the panel carries it in a
@@ -559,11 +564,12 @@ The card's action row takes `margin-top: auto`, because grid already stretches
 cards to a common height and nothing is aligned to that height until something is
 pinned to the bottom of it.
 
-Each card carries an icon, and where there is no icon it carries an emoji — for
-`mint`, which has none; for a cold cache, where *every* icon 404s on first paint;
-and for an offline install, where the route answers 503 forever. One `onError`
-covers all three, and asking the server which it was would be a second request to
-answer a question with one visual answer.
+Each card carries an icon, and where there is no icon it carries an emoji — for a
+cold cache, where *every* icon 404s on first paint, and for an offline install,
+where the route answers 503 forever. One `onError` covers both, and asking the
+server which it was would be a second request to answer a question with one
+visual answer. (A third case, `mint` having no sprite at all, was removed on
+2026-08-21 by mapping it; the amendment is in the entry above.)
 
 **Emoji are full-colour glyphs meaning neither provider nor state, so this is the
 rule above broken, and it is scoped to this one slot.** The argument is that the

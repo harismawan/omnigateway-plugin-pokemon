@@ -245,7 +245,8 @@ test("a fetched item sprite is cached under the name the map gives it", async ()
 
   expect(await itemSpriteBytes(api, "sootheBell")).toEqual(PNG);
   // The literal URL, asserted whole. A typo here is a permanent 404 that reads
-  // as "this item has no icon", which is indistinguishable from `mint`.
+  // as "this item has no icon yet", indistinguishable in the panel from a cold
+  // cache — the fallback hides it and only the console ever says otherwise.
   expect(calls).toEqual([`${ITEM_SPRITE_BASE}/soothe-bell.png`]);
   expect(store.get("sprites/items/soothe-bell.png")).toEqual(PNG);
 
@@ -255,11 +256,9 @@ test("a fetched item sprite is cached under the name the map gives it", async ()
 });
 
 test("an id the map does not name reaches neither the network nor the disk", async () => {
-  // `mint` is the real case and the reason the map is partial: it is a Gen-8
-  // item with no sprite in the repository, so a fetch for it is a guaranteed
-  // 404 and a cache path for it is a file that can never be a valid hit. An id
-  // invented by a caller lands in the same branch, which is what keeps a
-  // caller's string out of a URL.
+  // Every item the plugin sells is mapped now, so the ids that land here are
+  // invented ones — which is the case that matters, because this branch is what
+  // keeps a caller's string out of a URL and out of a cache filename.
   const { files } = memoryFiles();
   const reads: string[] = [];
   const watched: PluginFiles = {
@@ -273,7 +272,7 @@ test("an id the map does not name reaches neither the network nor the disk", asy
     throw new Error("nothing unmapped should be fetched");
   });
 
-  expect(await itemSpriteBytes(deps(net, watched), "mint")).toBeNull();
+  expect(await itemSpriteBytes(deps(net, watched), "notAnItem")).toBeNull();
   expect(await itemSpriteBytes(deps(net, watched), "../../etc/passwd")).toBeNull();
   expect(calls).toEqual([]);
   expect(reads).toEqual([]);
@@ -315,12 +314,36 @@ test("an offline or 404 item sprite returns null rather than throwing", async ()
   expect(store.size).toBe(0);
 });
 
-test("every shop item either maps to a sprite or is deliberately absent", () => {
-  // The map is allowed to be partial — that is what the emoji fallback is for —
-  // but it must not name an item the shop does not sell, because a name in here
-  // is a URL this plugin will fetch.
+test("the sprite map names every shop item and nothing else", () => {
+  // Both directions, and they fail differently. A name in here the shop does
+  // not sell is a URL this plugin fetches for nothing. An item the shop sells
+  // that is *not* in here is a route that answers 404 for the life of the
+  // install, which the panel's emoji fallback hides everywhere except the
+  // browser console — `mint` shipped that way for a release.
   for (const item of ITEM_SPRITE_NAMES.keys()) {
     expect(ITEM_KINDS.includes(item as ItemKind) || item === "egg").toBe(true);
+  }
+  for (const item of ITEM_KINDS) {
+    expect(ITEM_SPRITE_NAMES.get(item)).toBeTypeOf("string");
+  }
+});
+
+test("the three substituted icons name the sprites that were chosen for them", async () => {
+  // Asserted as literal URLs, because these are the entries a kebab-casing
+  // function would get wrong: no `mint`, `lure`, or plain `incense` sprite
+  // exists upstream, so each points at a different item's art on purpose. A
+  // rename that "tidies" one of these back to its own id is a permanent 404
+  // that looks exactly like a cold cache.
+  const substitutes: ReadonlyArray<readonly [ItemKind, string]> = [
+    ["mint", "mental-herb"],
+    ["lure", "honey"],
+    ["incense", "luck-incense"],
+  ];
+  for (const [item, file] of substitutes) {
+    const { files } = memoryFiles();
+    const { net, calls } = stubNet(() => new Response(PNG));
+    expect(await itemSpriteBytes(deps(net, files), item)).toEqual(PNG);
+    expect(calls).toEqual([`${ITEM_SPRITE_BASE}/${file}.png`]);
   }
 });
 
