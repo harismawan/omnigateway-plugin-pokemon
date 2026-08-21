@@ -34,8 +34,9 @@ export type ItemCard = {
    * install, where the route answers 503 forever.
    *
    * These are full-colour glyphs, which the panel's own rule reserves for
-   * provider identity and state. That exception is recorded in `DESIGN.md` and
-   * is scoped to this slot: the panel already draws fetched pixel art here, and
+   * provider identity and state. That exception is recorded in the plugin's
+   * founding spec under *UI* and is scoped to this slot: the panel already
+   * draws fetched pixel art here, and
    * an emoji standing in for it is the same kind of thing — a picture of an
    * object, not a claim about health.
    */

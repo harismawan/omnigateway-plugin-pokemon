@@ -1,9 +1,15 @@
 # Pokémon Companion Plugin — Repository Guidance
 
 Agent guidance for repository work: boundaries, conventions, and durable traps. `README.md` serves
-operators and plugin authors; `DESIGN.md` records the design and every amendment to it; this file
-serves contributors. Update all that a change affects — `DESIGN.md` in particular, because an
-amendment nobody wrote down becomes a rule nobody can check.
+operators and plugin authors; `docs/superpowers/specs/` holds the designs and every amendment to
+them; this file serves contributors. Update all that a change affects — the spec in particular,
+because an amendment nobody wrote down becomes a rule nobody can check.
+
+Specs are named `YYYY-MM-DD-<topic>-design.md` and dated by when they were written, not by when the
+work landed. The plugin's founding design is
+`docs/superpowers/specs/2026-08-19-pokemon-companion-plugin-design.md` — formerly `DESIGN.md` at the
+root — and it is where an amendment to the plugin's *existing* behaviour belongs. A new feature gets
+its own spec, and amends the founding one where it changes something already recorded there.
 
 Rules here are carried over from the OmniGateway monorepo's own `CLAUDE.md`
 (`../omnigateway/CLAUDE.md`), which is the parent project this plugin installs into. Its

@@ -173,7 +173,9 @@ companion slot and in every Dex cell, and the emoji stands in that same slot as
 the same kind of thing — an illustration of an object, not a claim about state.
 It is not licence to colour a rarity, a price, or a health indicator.
 
-This must be written into `DESIGN.md` as an amendment. An amendment nobody wrote
+This must be written into the founding spec,
+[`2026-08-19-pokemon-companion-plugin-design.md`](2026-08-19-pokemon-companion-plugin-design.md),
+as an amendment. An amendment nobody wrote
 down becomes a rule nobody can check.
 
 ## Shop and Bag: cards on a grid
@@ -332,7 +334,7 @@ share a count.
 | `ui/Dex.tsx` | selection and in-grid detail |
 | `ui/index.tsx` | disclosure wrappers, persisted section state |
 | `test/pokeapi.test.ts`, `test/integration.test.ts`, `test/ui.test.tsx` | above |
-| `DESIGN.md` | amendment: the item-icon colour exception, the sprite map, the disclosure structure |
+| `2026-08-19-pokemon-companion-plugin-design.md` | amendment: the item-icon colour exception, the sprite map, the disclosure structure |
 | `README.md` | the new route |
 
 ## Out of scope

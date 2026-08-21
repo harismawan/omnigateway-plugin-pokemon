@@ -1,9 +1,19 @@
 # Pokémon Companion Plugin — Design
 
-Date: 2026-08-19
-Status: approved
+**Date:** 2026-08-19
+**Status:** approved, built, and amended in place — see the amendments throughout
 
-Depends on: [Plugin Host](2026-08-19-plugin-host-design.md)
+Depends on the plugin host design, which lives in the **parent repository** and
+not this one: `../omnigateway/docs/superpowers/specs/2026-08-19-plugin-host-design.md`.
+This spec was written there, beside it, and the relative link it used to carry
+went dangling the moment the plugin was split into its own repository. The path
+is spelled out rather than linked because a relative link across a repository
+boundary is a link that only resolves on the machine that happens to have both
+checked out.
+
+This is the plugin's founding design and the home for any amendment to behaviour
+recorded here. A new feature gets its own spec in this directory and amends this
+one where it changes something already written down.
 
 ## Problem
 
