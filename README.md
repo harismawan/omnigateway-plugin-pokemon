@@ -107,13 +107,17 @@ is deliberate: a plugin developed inside the monorepo can reach packages an
 installed plugin cannot, and a build that only succeeds there proves nothing
 about one that has to run anywhere else.
 
-Both SDKs are **externals** of the UI build, alongside React and friends — the
-console serves one copy of each through its import map. `@omnigateway/dashboard-sdk`
-is the easiest to forget, because it is the one package here that is obviously
-ours, and forgetting it fails silently: the SDK holds the console's LIVE switch
-in a React context, so a bundled copy is a second context, and the panel stops
-refreshing without an error anywhere. `test/package.test.ts` checks the built
-bundle still imports it.
+`@omnigateway/dashboard-sdk` is an **external** of the UI build, alongside React
+and friends — the console serves one copy of each through its import map.
+(`@omnigateway/plugin-api` is not: it is a runtime dependency of the *server*
+half and is bundled into it, and the panel never imports it.)
+
+The SDK is the easiest external to forget, because it is the one package here
+that is obviously ours, and forgetting it fails silently: the SDK holds the
+console's LIVE switch in a React context, so a bundled copy is a second context,
+and the panel stops refreshing without an error anywhere.
+`test/package.test.ts` checks the built bundle still imports it and carries no
+`createContext` of its own.
 
 ## The console's LIVE switch
 

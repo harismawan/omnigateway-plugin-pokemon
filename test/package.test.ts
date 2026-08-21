@@ -110,7 +110,6 @@ describe("the published package", () => {
    */
   const HOST_OWNED = [
     "react",
-    "react-dom",
     "react/jsx-runtime",
     "styled-components",
     "@tanstack/react-query",
@@ -120,37 +119,56 @@ describe("the published package", () => {
   test("imports the console's packages rather than bundling them", () => {
     const ui = readFileSync(join(out, "ui", "index.js"), "utf8");
 
-    // Read off the bundle's own import statements rather than searched for as
-    // substrings: the string "react" appears in this file for a dozen innocent
-    // reasons, and a substring check would pass whether or not the specifier is
-    // still external.
+    // The bundle's own import graph, read by the transpiler that produced it.
+    //
+    // A regex was tried and it was worse than useless. Bun's minifier
+    // concatenates modules, so most imports end up preceded by `}` rather than
+    // by a newline — on the real bundle a hand-written pattern matched 8 of 17
+    // occurrences, and the SDK assertion below passed only because that import
+    // happens to sit at byte 0. Reordering the modules would have turned the
+    // test red on a correct build.
     const imported = new Set(
-      [...ui.matchAll(/(?:^|[;\n])\s*import\s*(?:[^'"]*?from\s*)?["']([^"']+)["']/g)].map(
-        (match) => match[1] ?? "",
-      ),
+      new Bun.Transpiler({ loader: "js" }).scanImports(ui).map((found) => found.path),
     );
 
+    // Each named on its own line rather than looped, because the loop this
+    // replaces read as a six-entry guard and was `if (P) assert(P)` — a
+    // tautology that could not fail for any input. Four of the five entries
+    // were unguarded, and dropping `styled-components` from `build:ui` inflated
+    // the bundle from 20.7 KB to 47.8 KB with a duplicate `ThemeContext` while
+    // the whole suite stayed green: the same silent duplicate-context failure
+    // this file exists to catch, one package over.
     for (const name of HOST_OWNED) {
-      // `react-dom` is legitimately absent — this panel renders, it does not
-      // mount a root — so presence is not the assertion. What is asserted is
-      // that nothing host-owned was *inlined*, which is the failure.
-      if (!imported.has(name)) continue;
       expect(imported).toContain(name);
     }
 
-    // The one that must actually be there, because the panel calls `useLive`
-    // and `definePluginUI` from it. Without this the loop above is vacuous for
-    // the entry it exists to protect: a bundled SDK leaves no import to find,
-    // so "not inlined" and "not imported" look identical.
-    expect(imported).toContain("@omnigateway/dashboard-sdk");
-    expect(imported).toContain("react");
+    // Measured: dropping any of `react`, `styled-components`,
+    // `@tanstack/react-query` or `@omnigateway/dashboard-sdk` from `build:ui`
+    // now fails here. Dropping `react/jsx-runtime` does not, and that is not a
+    // gap — Bun emits that specifier as an import either way under the
+    // automatic JSX runtime, so the flag is belt-and-braces and there is no
+    // different bundle to catch.
 
-    // And the proof it was not inlined as well. An import can coexist with a
-    // copy — a bundler that inlined the SDK and still imported React would
-    // satisfy everything above — so this looks for a string only the SDK's own
-    // source contains. A fragment of the template literal in `pluginApiPath`,
-    // because the interpolation means the whole sentence never appears
-    // literally anywhere.
-    expect(ui).not.toContain("must not be empty");
+    // `react-dom` is deliberately not in that list. The panel renders inside
+    // the console's tree and never mounts a root, so it does not import it —
+    // asserting its presence would fail on a correct build, and asserting its
+    // absence would pass whether or not it was external.
+    expect(imported).not.toContain("react-dom");
+  });
+
+  test("carries no second copy of the context the console owns", () => {
+    // An import can coexist with a copy: a bundler that inlined the SDK and
+    // still imported React satisfies every assertion above. This is the one
+    // that says the SDK's own module scope is not in here.
+    //
+    // `createContext` and not a message string. The first version of this
+    // looked for `"must not be empty"` from the SDK's `pluginApiPath`, which
+    // was worthless — the panel never imports `createPluginApi`, so `api.ts` is
+    // tree-shaken out and the string is absent from the bundled build too. It
+    // asserted a thing that was already true, under a comment calling itself
+    // proof. Measured on the two builds: `createContext` is 0 here and 1 when
+    // the SDK is inlined, which is the whole difference.
+    const ui = readFileSync(join(out, "ui", "index.js"), "utf8");
+    expect(ui).not.toContain("createContext");
   });
 });

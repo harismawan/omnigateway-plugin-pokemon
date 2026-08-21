@@ -426,7 +426,7 @@ export const Segment = styled.div`
  *
  * A `transition`, deliberately not a keyframe animation. The panel refetches on
  * an interval, so a keyframe would replay from zero on every poll that moved the
- * number — the bar would collapse and regrow every fifteen seconds, which reads
+ * number — the bar would collapse and regrow on every poll, which reads
  * as a companion losing its progress rather than gaining any. A transition
  * animates from the width that was already there to the new one, which is both
  * the correct picture and the only one that stays still when nothing changed.

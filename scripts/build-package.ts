@@ -19,9 +19,16 @@
  *
  * The generated manifest deliberately declares **no dependencies**. Nothing runs
  * `npm install` on a plugin: the host unpacks the tarball and imports what is
- * inside it. The server bundle is self-contained, and the UI's React and friends
- * come from the console's import map rather than from node_modules — declaring
- * them here would describe an installation step that never happens.
+ * inside it. The server bundle is self-contained, and the UI's React, its
+ * friends, and `@omnigateway/dashboard-sdk` all come from the console's import
+ * map rather than from node_modules — declaring them here would describe an
+ * installation step that never happens.
+ *
+ * The SDK belongs in that list even though it is this project's own package,
+ * and for a sharper reason than the others: it holds the console's `LiveContext`,
+ * so a second copy is a second context rather than a second instance. That
+ * fails silently — the panel finds no provider and stops refreshing — which is
+ * why `test/package.test.ts` reads the built bundle rather than trusting this.
  */
 
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";

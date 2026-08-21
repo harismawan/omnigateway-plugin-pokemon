@@ -490,10 +490,15 @@ export function speciesDetails(
  * `files` alone, and enforced by the type rather than asserted here: `readJson`
  * takes `files` too, so no path out of this function reaches a `fetch`. The
  * missing `net` is the whole contract. This is
- * called once per rendered sprite, so a roster of twenty keys polling every
- * fifteen seconds is eighty name lookups a minute; behind `speciesDetail` that
- * would be eighty requests a minute against an unpaid public API for
- * decoration, which is exactly the impoliteness `prefetchOnce` exists to avoid.
+ * called once per rendered sprite, so a roster of twenty keys polling every ten
+ * seconds is a hundred and twenty name lookups a minute; behind `speciesDetail`
+ * that would be a hundred and twenty requests a minute against an unpaid public
+ * API for decoration, which is exactly the impoliteness `prefetchOnce` exists
+ * to avoid. Both inputs to that figure moved when the panel took the console's
+ * cadence — the interval tightened to ten seconds *and* the roster began
+ * polling at all, having previously refreshed only when a purchase invalidated
+ * it. The arithmetic is worth keeping current precisely because it is the
+ * argument for this function's narrow dependency.
  * Taking the narrower dependency makes that impossible rather than discouraged.
  *
  * A miss is ordinary and not an error: a fresh install has fetched nothing yet.
