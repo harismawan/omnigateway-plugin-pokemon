@@ -23,6 +23,7 @@ import { createPluginApi } from "@omnigateway/dashboard-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Dex } from "../ui/Dex.tsx";
 import { itemSpriteUrl } from "../ui/format.ts";
 import companionUi, { activityOf } from "../ui/index.tsx";
 
@@ -964,6 +965,37 @@ describe("the shop", () => {
     expect(screen.getByText("2.50B")).toBeTruthy();
   });
 
+  test("keeps offering an unknown item after one has been bought", async () => {
+    // The two sides of "can this be spent" have to be one fact. The bag reads
+    // `itemCard(...).consumable`, which is `true` for an unknown item on
+    // purpose — a visible refusal from the server beats a button the panel
+    // never draws. `alreadyOwned` read `CONSUMABLE_ITEMS` instead, which is
+    // built only from the ids the catalogue knows, so it called the same item
+    // passive and greyed its offer out for good once one was held.
+    //
+    // A stackable item the server ships before anybody writes its copy would
+    // then be usable from the bag and unbuyable from the shop, with the price
+    // replaced by the word "owned" — the silent omission the fallback exists to
+    // avoid, arriving on the other surface.
+    renderCompanion(
+      serving(
+        view({
+          state: { active: active(), eggUsage: 0, eggTier: null, inventory: { quickClaw: 1 } },
+          wallet: 9_000_000_000,
+          shop: [{ entry: { kind: "item", item: "quickClaw" }, price: 700_000_000 }],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    const buy = (await screen.findByRole("button", {
+      name: "Buy quick claw",
+    })) as HTMLButtonElement;
+    expect(buy.disabled).toBe(false);
+    expect(screen.getByText("700.0M")).toBeTruthy();
+    expect(screen.queryByText("owned")).toBeNull();
+  });
+
   test("still offers an item nobody has written a description for", async () => {
     // Copy fails open. An item the server sells that the catalogue has never
     // heard of keeps its row, its derived name and a working Buy button — a
@@ -1542,6 +1574,58 @@ describe("a Dex entry opened", () => {
 
     expect(screen.queryByText("#172")).toBeNull();
     expect(screen.queryByText("brave")).toBeNull();
+  });
+});
+
+describe("the Dex grid's identity", () => {
+  test("keeps a cell alive when the roster reorders underneath it", async () => {
+    // `readDex` orders by `caught_at DESC`, so one new graduation arriving on a
+    // poll shifts every index. The cells carry `key={entry.id}`, which reads as
+    // though that is handled — but each `.map` returned a bare ARRAY of
+    // [cell, detail], and React reconciles unkeyed nested arrays as implicit
+    // fragments matched by POSITION. The outer index became part of the
+    // identity, so every cell unmounted and remounted on any reorder: every
+    // sprite destroyed and refetched, and the focused cell losing focus
+    // mid-keyboard-navigation.
+    //
+    // Rendered directly rather than through the panel: the panel would need a
+    // poll to reorder anything, and focus identity is the assertion.
+    const a = dexEntry({ id: "a", finalId: 3, name: "Venusaur" });
+    const b = dexEntry({ id: "b", finalId: 6, name: "Charizard" });
+    const c = dexEntry({ id: "c", finalId: 9, name: "Blastoise" });
+
+    const { rerender } = render(<Dex entries={[a, b, c]} pluginId="pokemon" />);
+    const before = screen.getByRole("button", { name: /Charizard/ });
+    before.focus();
+    expect(document.activeElement).toBe(before);
+
+    // A newer graduation lands at the front.
+    rerender(<Dex entries={[c, a, b]} pluginId="pokemon" />);
+
+    const after = screen.getByRole("button", { name: /Charizard/ });
+    expect(after).toBe(before);
+    expect(document.activeElement).toBe(after);
+  });
+
+  test("names a stage in the line only when it really is the final form", async () => {
+    // `name` is the name of `finalId`, which is a separate column from
+    // `chain_order` — and `readDex` drops non-numeric chain members while
+    // leaving `final_id` untouched, so a corrupt row can leave the two
+    // disagreeing. Captioning by position then prints the graduate's name under
+    // whichever sprite happens to be last, which on an Eevee line means
+    // "Vaporeon" written under Eevee.
+    render(
+      <Dex
+        entries={[dexEntry({ id: "v", chainOrder: [133], finalId: 134, name: "Vaporeon" })]}
+        pluginId="pokemon"
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
+
+    // The surviving stage is 133, which is not 134, so it is not the graduate
+    // and must not wear its name.
+    expect(screen.getByText("#133")).toBeTruthy();
   });
 });
 

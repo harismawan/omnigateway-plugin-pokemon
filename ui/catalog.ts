@@ -57,7 +57,7 @@ export type ItemCard = {
   consumable: boolean;
 };
 
-const CATALOG: Readonly<Record<string, ItemCard>> = {
+const CATALOG_ENTRIES: Readonly<Record<string, ItemCard>> = {
   rareCandy: {
     // "100.0M" and not "100M": `formatTokens` is what renders the price on the
     // same card, and a sentence quoting a token figure in a different style
@@ -120,7 +120,7 @@ const CATALOG: Readonly<Record<string, ItemCard>> = {
  */
 export function itemCard(item: string): ItemCard {
   return (
-    CATALOG[item] ?? {
+    CATALOG.get(item) ?? {
       blurb: "",
       emoji: "❔",
       consumable: true,
@@ -128,8 +128,20 @@ export function itemCard(item: string): ItemCard {
   );
 }
 
+/**
+ * The table as a `Map`, for the same reason `ITEM_SPRITE_NAMES` is one.
+ *
+ * An object literal inherits from `Object.prototype`, and `??` only catches
+ * `null` and `undefined` — so `CATALOG.constructor` is a *function*, returned
+ * as though it were a card, with every field the shop reads off it `undefined`.
+ * A `Map` has no inherited string keys, so the fallback above is reached for
+ * every name that is not one of these. `Object.entries` yields own enumerable
+ * keys alone, so nothing crosses over.
+ */
+const CATALOG: ReadonlyMap<string, ItemCard> = new Map(Object.entries(CATALOG_ENTRIES));
+
 /** Items the `use` route will accept, read off the one table that names them. */
-export const CONSUMABLE_ITEMS: readonly string[] = Object.entries(CATALOG)
+export const CONSUMABLE_ITEMS: readonly string[] = [...CATALOG]
   .filter(([, card]) => card.consumable)
   .map(([item]) => item);
 

@@ -69,3 +69,20 @@ test("an item nobody has described still gets a card", () => {
   // the server refuses with a message the panel already shows.
   expect(unknown.consumable).toBe(true);
 });
+
+test("an inherited property name is not an item here either", () => {
+  // The panel's half of the hole `ad34ea7` closed on the server. `CATALOG` is
+  // an object literal and `??` only catches null and undefined, so
+  // `CATALOG.constructor` — a *function* — was returned as if it were a card,
+  // and every field the shop reads off it would have been `undefined`.
+  //
+  // Nothing can reach this today: these ids come from the server's own shop and
+  // inventory. It is fixed because the map that decides what an item is should
+  // not have an answer for names nobody put in it, on either side of the wire.
+  for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const card = itemCard(name);
+    expect(card.blurb).toBe("");
+    expect(card.emoji).toBe("❔");
+    expect(typeof card.consumable).toBe("boolean");
+  }
+});

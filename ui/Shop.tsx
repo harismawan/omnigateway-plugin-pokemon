@@ -1,4 +1,4 @@
-import { CONSUMABLE_ITEMS, EGG_EMOJI, eggBlurb, itemCard } from "./catalog.ts";
+import { EGG_EMOJI, eggBlurb, itemCard } from "./catalog.ts";
 import { formatTokens, itemLabel, shopLabel } from "./format.ts";
 import { ItemIcon } from "./ItemIcon.tsx";
 import {
@@ -112,15 +112,24 @@ export function Shop({
 /**
  * Whether this entry is a passive the key already holds.
  *
- * Passive means "cannot be spent", which is the same as "not in
- * `CONSUMABLE_ITEMS`" — so this reuses the allowlist the bag already reads
- * rather than naming the shiny charm a second time.
+ * Passive means "cannot be spent", and the flag for that is the one on the
+ * item's own card — the same field the bag reads to decide whether to offer a
+ * "use". Naming the shiny charm a second time here would be a second
+ * derivation; so, it turns out, was asking `CONSUMABLE_ITEMS`.
+ *
+ * **That was the first version and it was wrong**, in the one case the
+ * catalogue's fallback exists for. `CONSUMABLE_ITEMS` is built from the ids the
+ * catalogue knows, so an item it has never heard of is absent from it and was
+ * read here as passive — while `itemCard` deliberately calls the same item
+ * spendable, and the bag agreed. A stackable item the server shipped before
+ * anybody wrote its copy would have been usable from the bag and permanently
+ * unbuyable from the shop after one purchase, its price replaced by the word
+ * "owned". One flag, read the same way on both surfaces.
  *
  * The server refuses the purchase regardless; this only keeps the panel from
- * offering a button that is a guaranteed 409, on the same terms as the bag not
- * offering a "use" for a passive.
+ * offering a button that is a guaranteed 409.
  */
 function alreadyOwned(entry: ShopEntry, inventory: Record<string, number>): boolean {
   if (entry.kind !== "item") return false;
-  return !CONSUMABLE_ITEMS.includes(entry.item) && (inventory[entry.item] ?? 0) > 0;
+  return !itemCard(entry.item).consumable && (inventory[entry.item] ?? 0) > 0;
 }

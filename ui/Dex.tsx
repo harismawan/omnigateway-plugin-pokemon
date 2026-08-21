@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { RARITY_FILTERS, speciesLabel, spriteAlt, spriteUrl } from "./format.ts";
 import {
   Button,
@@ -73,38 +73,55 @@ export function Dex({ entries, pluginId }: { entries: readonly DexEntry[]; plugi
           {shown.map((entry) => {
             const open = openId === entry.id;
             const detailId = `dex-detail-${entry.id}`;
-            return [
-              <Cell
-                $open={open}
-                aria-controls={detailId}
-                aria-expanded={open}
-                key={entry.id}
-                onClick={() => setOpenId(open ? null : entry.id)}
-                type="button"
-              >
-                <img
-                  // The species number stays in the alt text when there is no
-                  // name: an alt is read aloud in a sentence, and `#3` is not a
-                  // word.
-                  alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} ${
-                    entry.name ?? `species ${entry.finalId}`
-                  }`}
-                  src={spriteUrl(pluginId, entry.finalId, entry.isShiny)}
-                  style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
-                />
-                <Caption>{speciesLabel(entry.name, entry.finalId)}</Caption>
-                {/*
-                  Nature is captioned rather than folded into the sprite's alt
-                  text: the alt text names the thing, and a nullable field inside
-                  an accessible name makes the name of an old entry differ from
-                  the name of a new one for no reason a reader could guess.
-                */}
-                {entry.nature === null ? null : <Caption>{entry.nature}</Caption>}
-              </Cell>,
-              open ? (
-                <Detail entry={entry} id={detailId} key={detailId} pluginId={pluginId} />
-              ) : null,
-            ];
+            return (
+              /*
+                A keyed `Fragment`, and the bare array it replaces was a real
+                bug rather than a style preference.
+
+                Returning `[cell, detail]` looks keyed — both children carry
+                one — but React reconciles an *unkeyed nested array* as an
+                implicit fragment matched by position, so the outer index
+                became part of each cell's identity. `readDex` orders by
+                `caught_at DESC`, so one new graduation arriving on a poll
+                shifted every index and remounted the whole grid: every sprite
+                destroyed and refetched, and a focused cell losing focus
+                underneath the keyboard.
+
+                The fragment is transparent to the grid — it creates no DOM
+                node, so the cell and the detail stay direct children and the
+                `1 / -1` placement below is unaffected.
+              */
+              <Fragment key={entry.id}>
+                <Cell
+                  $open={open}
+                  aria-controls={detailId}
+                  aria-expanded={open}
+                  onClick={() => setOpenId(open ? null : entry.id)}
+                  type="button"
+                >
+                  <img
+                    // The species number stays in the alt text when there is no
+                    // name: an alt is read aloud in a sentence, and `#3` is not
+                    // a word.
+                    alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} ${
+                      entry.name ?? `species ${entry.finalId}`
+                    }`}
+                    src={spriteUrl(pluginId, entry.finalId, entry.isShiny)}
+                    style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
+                  />
+                  <Caption>{speciesLabel(entry.name, entry.finalId)}</Caption>
+                  {/*
+                    Nature is captioned rather than folded into the sprite's alt
+                    text: the alt text names the thing, and a nullable field
+                    inside an accessible name makes the name of an old entry
+                    differ from the name of a new one for no reason a reader
+                    could guess.
+                  */}
+                  {entry.nature === null ? null : <Caption>{entry.nature}</Caption>}
+                </Cell>
+                {open ? <Detail entry={entry} id={detailId} pluginId={pluginId} /> : null}
+              </Fragment>
+            );
           })}
         </DexGrid>
       )}
@@ -144,13 +161,31 @@ function Detail({ entry, id, pluginId }: { entry: DexEntry; id: string; pluginId
         */}
         <DexLine>
           {entry.chainOrder.map((speciesId, index) => (
-            <DexLineStage key={speciesId}>
+            /* A well-formed line cannot repeat a species — `lineThrough` walks
+               a tree — but `readDex` fails open and only drops chain members
+               that are not numbers, so a corrupt row reaches here intact and
+               `key={speciesId}` alone would be two identical keys: a React bug
+               stacked on a data one. The index belongs in the key regardless,
+               for the same reason it does in `GrowthTrack`: a line is ordered,
+               and a stage *is* its position in it. */
+            // biome-ignore lint/suspicious/noArrayIndexKey: a stage is its position in the line
+            <DexLineStage key={`${speciesId}-${index}`}>
               <img
                 alt={spriteAlt(null, speciesId, false)}
                 src={spriteUrl(pluginId, speciesId, false)}
               />
+              {/*
+                Named by comparison with `finalId`, not by being last in the
+                array. `name` is the name the server resolved *for `finalId`*,
+                and `final_id` is a separate column from `chain_order` — they
+                agree when written and can disagree when read, because
+                `readDex` drops a non-numeric chain member while leaving
+                `final_id` untouched. Captioning by position then writes the
+                graduate's name under whichever sprite happens to be last,
+                which on an Eevee line is "Vaporeon" printed under Eevee.
+              */}
               <Caption>
-                {index === entry.chainOrder.length - 1
+                {speciesId === entry.finalId
                   ? speciesLabel(entry.name, speciesId)
                   : `#${speciesId}`}
               </Caption>
