@@ -1623,12 +1623,28 @@ test("the shipped manifest is compatible with the SDK and API the host ships", (
   //
   // `Bun.semver.satisfies` with the arguments in the host's order, so this asks
   // the same question `loader.ts` asks rather than a similar one.
+  //
+  // Read from `@omnigateway/plugin-api`, which is where the host reads it, and
+  // *not* from the SDK's own re-exported `SDK_VERSION` — which looks like the
+  // more obvious source and currently reports `0.1.0`. `dashboard-sdk@0.1.1`
+  // still declares a `^0.1.0` dependency on the API package, so bun installs a
+  // nested `plugin-api@0.1.0` underneath it and the SDK re-exports that copy's
+  // constant. Switching this line to `SDK_VERSION` would fail against a
+  // perfectly good install, for a reason nothing in this file would explain.
   const manifest = JSON.parse(
     readFileSync(join(import.meta.dir, "..", "omni-plugin.json"), "utf8"),
   ) as { api: number; sdk: string };
 
   expect(Bun.semver.satisfies(DASHBOARD_SDK_VERSION, manifest.sdk)).toBe(true);
   expect(manifest.api).toBe(PLUGIN_API_VERSION);
+
+  // And that the range is *tight enough*, which the assertion above cannot ask.
+  // `^0.1.0` is satisfied by 0.1.1, so widening the manifest to it passes every
+  // test in this repository — while letting the host mount this panel on a
+  // console shipping SDK 0.1.0, where `useLive` does not exist and the panel
+  // dies inside the error boundary on its first render. The panel gained that
+  // call in 1.1.0; the floor has to move with it.
+  expect(Bun.semver.satisfies("0.1.0", manifest.sdk)).toBe(false);
 });
 
 test("the tier a guaranteed egg was paid for reaches the roll, not just the save", async () => {
@@ -1835,7 +1851,7 @@ test("a hatched companion whose species cache was wiped gets its name back", asy
 
 test("a name that has already been warmed is never fetched twice", async () => {
   // The reason `cachedSpeciesName` has no `net` in the first place. A panel
-  // polling every fifteen seconds must not turn into a request per poll, so a
+  // polling on the console's cadence must not turn into a request per poll, so a
   // species is asked for once per process and answered from disk after that.
   const online = coldCacheOnline();
   await boot({}, online);

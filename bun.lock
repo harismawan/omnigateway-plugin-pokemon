@@ -5,12 +5,12 @@
     "": {
       "name": "omnigateway-plugin-pokemon",
       "dependencies": {
-        "@omnigateway/plugin-api": "^0.1.0",
+        "@omnigateway/plugin-api": "^0.1.1",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.5.7",
         "@happy-dom/global-registrator": "^20.11.2",
-        "@omnigateway/dashboard-sdk": "^0.1.0",
+        "@omnigateway/dashboard-sdk": "^0.1.1",
         "@tanstack/react-query": "^5.101.4",
         "@testing-library/react": "^16.3.2",
         "@testing-library/user-event": "^14.6.1",
@@ -24,7 +24,7 @@
         "typescript": "^7.0.2",
       },
       "peerDependencies": {
-        "@omnigateway/dashboard-sdk": "^0.1.0",
+        "@omnigateway/dashboard-sdk": "^0.1.1",
         "@tanstack/react-query": "^5.101.4",
         "react": "^19.2.8",
         "react-dom": "^19.2.8",
@@ -63,9 +63,9 @@
 
     "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.11.6", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.11.6" } }, "sha512-ZQ47qUTeNbGhHkCGExJ1oZhruoxKRaxO44RgFETl3T4c1rRxIBlAOnM3SAH4XHu7Ue2owJXP+jOx1vOuKuxcSg=="],
 
-    "@omnigateway/dashboard-sdk": ["@omnigateway/dashboard-sdk@0.1.0", "", { "dependencies": { "@omnigateway/plugin-api": "^0.1.0" }, "peerDependencies": { "@tanstack/react-query": ">=5", "react": ">=19", "react-dom": ">=19", "styled-components": ">=6" } }, "sha512-qRv4nAdi5Cy9P5QtOLUV97p6I3WSwPnRnMTgesSMjTjVstb7R04IgQ74NFILNnZc0dqZYijpfQQ3hGQi6vpW2w=="],
+    "@omnigateway/dashboard-sdk": ["@omnigateway/dashboard-sdk@0.1.1", "", { "dependencies": { "@omnigateway/plugin-api": "^0.1.0" }, "peerDependencies": { "@tanstack/react-query": ">=5", "react": ">=19", "react-dom": ">=19", "styled-components": ">=6" } }, "sha512-B0sgpzozLzNToXu02QaMeLco9jUY3QHOIBJdjywdUIuh1uGgwx/pllxVi1MRLs6UKEtTL2m2IIdnNHhXwJ5a4w=="],
 
-    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.1.0", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-xyBi0HW12R6KGTqQQ/FppzaoiSqYM/H/lajwNV+uy4v0oI8XZ1bnhJKZAgvcZ3ZhDH47kcQfSRCIeKc5h/tWbQ=="],
+    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.1.1", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-LI6YhQ7NCrO57yjsiMQaCvKBxjehPUnMoOTpOqWaOdS4lRC6yGdpvPaulYrLnp+PShVGw55w7Pr35n22V3MabQ=="],
 
     "@tanstack/query-core": ["@tanstack/query-core@5.101.4", "", {}, "sha512-gNwcvOJcRbLWPOLG/2OBm+zM+Yv+MKsXKEOWC57USuZDEsI71hEErQsiEGx5wX9rzWWkfwM0fVSPoiIFSsxfiw=="],
 
@@ -188,5 +188,7 @@
     "ws": ["ws@8.21.3", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw=="],
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+
+    "@omnigateway/dashboard-sdk/@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.1.0", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-xyBi0HW12R6KGTqQQ/FppzaoiSqYM/H/lajwNV+uy4v0oI8XZ1bnhJKZAgvcZ3ZhDH47kcQfSRCIeKc5h/tWbQ=="],
   }
 }

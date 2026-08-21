@@ -1,6 +1,6 @@
 {
   "name": "@omnigateway/pokemon",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "A Pok\u00e9mon companion for OmniGateway. Each gateway key raises one that hatches, evolves, and graduates into a Pok\u00e9dex on the tokens that key spends.",
   "type": "module",
   "license": "MIT",
@@ -19,10 +19,10 @@
     "pokemon"
   ],
   "dependencies": {
-    "@omnigateway/plugin-api": "^0.1.0"
+    "@omnigateway/plugin-api": "^0.1.1"
   },
   "peerDependencies": {
-    "@omnigateway/dashboard-sdk": "^0.1.0",
+    "@omnigateway/dashboard-sdk": "^0.1.1",
     "@tanstack/react-query": "^5.101.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -31,7 +31,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",
     "@happy-dom/global-registrator": "^20.11.2",
-    "@omnigateway/dashboard-sdk": "^0.1.0",
+    "@omnigateway/dashboard-sdk": "^0.1.1",
     "@tanstack/react-query": "^5.101.4",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -48,7 +48,7 @@
     "test": "bun test ./test/*.test.ts",
     "test:ui": "bun test --preload ./test/setup/happydom.ts --preload ./test/setup/cleanup.ts ./test/ui.test.tsx",
     "build:server": "bun build src/server.ts --outfile dist/pokemon/server/index.js --target bun --format esm",
-    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/pokemon/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query'",
+    "build:ui": "NODE_ENV=production bun build ui/index.tsx --outfile dist/pokemon/ui/index.js --target browser --format esm --production --external react --external react-dom --external 'react/jsx-runtime' --external styled-components --external '@tanstack/react-query' --external '@omnigateway/dashboard-sdk'",
     "build": "bun run clean && bun run build:server && bun run build:ui && bun scripts/build-package.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check .",

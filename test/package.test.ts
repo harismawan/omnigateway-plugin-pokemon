@@ -90,4 +90,85 @@ describe("the published package", () => {
     const server = readFileSync(join(out, "server", "index.js"), "utf8");
     expect(server).not.toContain("zod");
   });
+
+  /**
+   * The packages the console owns, which this bundle must import rather than
+   * carry.
+   *
+   * Nothing asserted this until the panel started reading the console's LIVE
+   * switch, and the omission was survivable while every entry was React: two
+   * React copies throw "invalid hook call" the moment a panel renders, so the
+   * mistake announced itself.
+   *
+   * `@omnigateway/dashboard-sdk` does not announce it. The SDK holds
+   * `LiveContext`, so a bundled copy is a second context object — this panel
+   * would find no provider above it, take the "polling is off" default, and
+   * never refresh again. Nothing throws, nothing is logged, and the panel looks
+   * exactly like one the operator paused on purpose. It is also the entry
+   * likeliest to be dropped from `build:ui`, because it is the one package here
+   * that is obviously ours.
+   */
+  const HOST_OWNED = [
+    "react",
+    "react/jsx-runtime",
+    "styled-components",
+    "@tanstack/react-query",
+    "@omnigateway/dashboard-sdk",
+  ];
+
+  test("imports the console's packages rather than bundling them", () => {
+    const ui = readFileSync(join(out, "ui", "index.js"), "utf8");
+
+    // The bundle's own import graph, read by the transpiler that produced it.
+    //
+    // A regex was tried and it was worse than useless. Bun's minifier
+    // concatenates modules, so most imports end up preceded by `}` rather than
+    // by a newline — on the real bundle a hand-written pattern matched 8 of 17
+    // occurrences, and the SDK assertion below passed only because that import
+    // happens to sit at byte 0. Reordering the modules would have turned the
+    // test red on a correct build.
+    const imported = new Set(
+      new Bun.Transpiler({ loader: "js" }).scanImports(ui).map((found) => found.path),
+    );
+
+    // Each named on its own line rather than looped, because the loop this
+    // replaces read as a six-entry guard and was `if (P) assert(P)` — a
+    // tautology that could not fail for any input. Four of the five entries
+    // were unguarded, and dropping `styled-components` from `build:ui` inflated
+    // the bundle from 20.7 KB to 47.8 KB with a duplicate `ThemeContext` while
+    // the whole suite stayed green: the same silent duplicate-context failure
+    // this file exists to catch, one package over.
+    for (const name of HOST_OWNED) {
+      expect(imported).toContain(name);
+    }
+
+    // Measured: dropping any of `react`, `styled-components`,
+    // `@tanstack/react-query` or `@omnigateway/dashboard-sdk` from `build:ui`
+    // now fails here. Dropping `react/jsx-runtime` does not, and that is not a
+    // gap — Bun emits that specifier as an import either way under the
+    // automatic JSX runtime, so the flag is belt-and-braces and there is no
+    // different bundle to catch.
+
+    // `react-dom` is deliberately not in that list. The panel renders inside
+    // the console's tree and never mounts a root, so it does not import it —
+    // asserting its presence would fail on a correct build, and asserting its
+    // absence would pass whether or not it was external.
+    expect(imported).not.toContain("react-dom");
+  });
+
+  test("carries no second copy of the context the console owns", () => {
+    // An import can coexist with a copy: a bundler that inlined the SDK and
+    // still imported React satisfies every assertion above. This is the one
+    // that says the SDK's own module scope is not in here.
+    //
+    // `createContext` and not a message string. The first version of this
+    // looked for `"must not be empty"` from the SDK's `pluginApiPath`, which
+    // was worthless — the panel never imports `createPluginApi`, so `api.ts` is
+    // tree-shaken out and the string is absent from the bundled build too. It
+    // asserted a thing that was already true, under a comment calling itself
+    // proof. Measured on the two builds: `createContext` is 0 here and 1 when
+    // the SDK is inlined, which is the whole difference.
+    const ui = readFileSync(join(out, "ui", "index.js"), "utf8");
+    expect(ui).not.toContain("createContext");
+  });
 });
