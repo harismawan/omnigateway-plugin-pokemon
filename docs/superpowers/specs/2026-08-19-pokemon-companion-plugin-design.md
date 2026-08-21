@@ -611,6 +611,45 @@ Per the host design, this mount sits inside a React error boundary. A rendering
 bug here must not black out the console — the dashboard is what an operator
 needs during an incident, and a Pokémon is not.
 
+### Polling, and the switch that governs it
+
+**Amended 2026-08-21**, and the interval it replaces was never written here —
+it lived only in a comment on `REFETCH_MS`, which is how a number nobody agreed
+to becomes one nobody can question.
+
+Growth arrives from requests the panel has no way to hear about, so it polls;
+nothing here is worth a socket. Both queries take their interval from the
+console's `useLive().cadence(ms)` rather than from a constant:
+
+- **The roster now polls too.** It never did. A purchase invalidated it, so it
+  was fresh for whoever was buying and stale for anyone watching a second key
+  earn its first tokens — which is the one thing the roster screen is for.
+- **The interval is 10s**, matching the console's own credential-health boards.
+  Nothing about a companion demands the tighter number, and sharing one with the
+  rest of the console is worth more than a figure chosen alone.
+- **`cadence` returns `false` while the chassis LIVE switch is paused**, which is
+  what react-query reads as "do not poll". Not `0` — react-query reads that as
+  "as fast as possible", so the wrong falsy value turns a pause into a flood
+  against the gateway the operator was trying to quieten.
+
+The console pauses every screen from one control rather than hiding a toggle per
+screen, because polling is the gateway's only push mechanism. A plugin panel
+that kept polling through a pause would make that control a lie on the one
+screen nobody thought to check — so this panel does not get a refresh setting of
+its own, and should not grow one.
+
+This requires `@omnigateway/dashboard-sdk` in `build:ui`'s externals, and that
+is load-bearing rather than tidy. The SDK holds `LiveContext`; a bundled copy is
+a second context object, so the panel would find no provider, take the "polling
+is off" default, and never refresh again — with nothing thrown and nothing
+logged, looking exactly like a panel the operator paused. `test/package.test.ts`
+asserts the built bundle still imports it, because that is the only place the
+mistake is visible.
+
+Outside the console — this package's own test harness, or a panel rendered bare
+— there is no provider and nothing polls. That is deliberate: a panel that
+cannot find the switch has no business deciding the answer is "poll anyway".
+
 ## Testing
 
 Ported balance tests come first, because each one encodes a fixed bug:

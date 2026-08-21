@@ -1,4 +1,4 @@
-import { definePluginUI, type PluginUiProps } from "@omnigateway/dashboard-sdk";
+import { definePluginUI, type PluginUiProps, useLive } from "@omnigateway/dashboard-sdk";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Bag } from "./Bag.tsx";
@@ -27,14 +27,23 @@ import type { CompanionView, Roster, ShopEntry } from "./types.ts";
 export { activityOf } from "./format.ts";
 
 /**
- * How often the open companion refetches itself.
+ * How often the panel refetches, when the console is polling at all.
  *
  * Growth arrives from requests this panel has no way to hear about, so without
  * a poll an operator watching a companion evolve is watching a screenshot. The
  * interval is loose on purpose: the numbers move in tokens per request and
  * nothing here is worth a socket.
+ *
+ * Ten seconds rather than the fifteen this started at, matching what the
+ * console's own credential-health boards use. Nothing about a companion demands
+ * the tighter number; sharing one with the rest of the console is worth more
+ * than a figure chosen alone.
+ *
+ * It is a *ceiling*, not a schedule. Every interval below goes through
+ * `cadence`, which returns `false` while the chassis LIVE switch is paused —
+ * see the note on `useLive` in the panel body.
  */
-const REFETCH_MS = 15_000;
+const REFETCH_MS = 10_000;
 
 /**
  * Which screen the panel is on.
@@ -69,9 +78,37 @@ function Companion({ pluginId, api }: PluginUiProps) {
   const [screen, setScreen] = useState<Screen>({ at: "start" });
   const client = useQueryClient();
 
+  /**
+   * The console's own LIVE switch, not a setting of this panel's.
+   *
+   * Polling is the gateway's only push mechanism, so the console pauses every
+   * screen from one control in its chassis bar rather than hiding a toggle per
+   * screen — and a plugin panel that kept polling through a pause would make
+   * that control a lie on the one screen nobody thought to check.
+   *
+   * `cadence(ms)` is `ms` while live and `false` while paused, which is exactly
+   * what react-query's `refetchInterval` wants. Outside the console — this
+   * package's own test harness, or a panel rendered bare — there is no provider
+   * and `cadence` returns `false`, so nothing polls. That is the right default:
+   * a panel that cannot find the switch should not decide the answer is "poll
+   * anyway".
+   *
+   * This works only because the console serves one copy of
+   * `@omnigateway/dashboard-sdk` through its import map and `build:ui` marks it
+   * external. Bundling it would give this panel its own `LiveContext`, no
+   * provider above it, and a permanent `false` — a panel that silently never
+   * refreshes, with nothing thrown and nothing logged.
+   */
+  const { cadence } = useLive();
+
   const roster = useQuery({
     queryKey: ["roster"],
     queryFn: () => api.get<Roster>("keys"),
+    // The roster did not poll at all before this. A purchase invalidates it, so
+    // it was fresh for whoever was buying — and stale for anyone watching a
+    // second key earn its first tokens, which is the one thing the roster
+    // screen is for.
+    refetchInterval: cadence(REFETCH_MS),
   });
 
   const keys = roster.data?.keys ?? [];
@@ -101,7 +138,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
     queryKey: ["companion", showing],
     queryFn: () => api.get<CompanionView>(`keys/${showing}`),
     enabled: showing !== null,
-    refetchInterval: REFETCH_MS,
+    refetchInterval: cadence(REFETCH_MS),
   });
 
   // A money surface that fails silently is worse than one that fails loudly.

@@ -19,7 +19,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { createPluginApi } from "@omnigateway/dashboard-sdk";
+import { createPluginApi, LiveProvider } from "@omnigateway/dashboard-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -50,7 +50,7 @@ type FetchStub = {
   calls: Array<{ method: string; url: string; body: string | undefined }>;
 };
 
-type Mounted = FetchStub & { unmount: () => void };
+type Mounted = FetchStub & { unmount: () => void; client: QueryClient };
 
 function stubFetch(routes: Record<string, StubHandler>): FetchStub {
   const table = new Map(Object.entries(routes));
@@ -83,20 +83,48 @@ function stubFetch(routes: Record<string, StubHandler>): FetchStub {
 /**
  * Mount the panel the way the host does: `mount` called in render position with
  * the two props the SDK promises, and nothing else in scope.
+ *
+ * **No `LiveProvider` by default, and that is the console's own contract rather
+ * than a shortcut.** `useLive` outside a provider reports paused, so `cadence`
+ * returns `false` and neither query polls — which is what makes every test
+ * below able to assert an exact sequence of fetches. Pass `live: true` for the
+ * two that are about polling; the provider comes from the SDK, which a plugin
+ * may import, unlike the console's own `session/live.tsx`.
  */
-function renderCompanion(routes: Record<string, StubHandler>): Mounted {
+function renderCompanion(
+  routes: Record<string, StubHandler>,
+  options: { live?: boolean } = {},
+): Mounted {
   const stub = stubFetch(routes);
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
-  const { unmount } = render(
+  const panel = (
     <QueryClientProvider client={client}>
       <Companion api={createPluginApi("pokemon")} pluginId="pokemon" />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const { unmount } = render(options.live === true ? <LiveProvider>{panel}</LiveProvider> : panel);
   // `unmount` is returned for the one thing that needs it: a preference stored
   // by one mount and read back by the next. Every other test mounts once.
-  return { ...stub, unmount };
+  return { ...stub, unmount, client };
+}
+
+/**
+ * What `refetchInterval` a live query ended up with.
+ *
+ * Read off the cache rather than waited for, because the alternative is a test
+ * that sleeps ten seconds to watch one refetch — and a shorter interval would
+ * mean changing the constant under test to observe it. This asserts the wiring,
+ * which is the part that breaks: `cadence(REFETCH_MS)` reaching the query, or
+ * not.
+ */
+function intervalOf(client: QueryClient, key: readonly unknown[]): unknown {
+  // Off the *observer*, not the query. A `Query` holds the options every
+  // observer agreed on and `refetchInterval` is not among them — it belongs to
+  // the subscription, which is the thing that owns the timer.
+  const query = client.getQueryCache().find({ queryKey: key });
+  return query?.observers[0]?.options.refetchInterval;
 }
 
 /**
@@ -1737,5 +1765,44 @@ describe("a request that fails", () => {
     await lookUp(KEY);
 
     expect(await screen.findByText("No companion for that key yet.")).toBeTruthy();
+  });
+});
+
+describe("the console's LIVE switch", () => {
+  /**
+   * Both queries, because the roster is the one that did not poll at all before
+   * and is the easier of the two to leave behind — the companion already had an
+   * interval, so a change that only reached it would look finished.
+   */
+  test("sets both intervals while the console is live", async () => {
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { live: true },
+    );
+    await openCompanion();
+
+    expect(intervalOf(client, ["roster"])).toBe(10_000);
+    expect(intervalOf(client, ["companion", KEY])).toBe(10_000);
+  });
+
+  /**
+   * The case an operator actually causes, and the case this panel gets in every
+   * other test in this file.
+   *
+   * `false`, not `0` and not `undefined`: react-query reads `0` as "as fast as
+   * possible", so a `cadence` that returned the wrong falsy value would turn a
+   * pause into a flood against the gateway the operator was trying to quieten.
+   */
+  test("stops polling when there is no live console above it", async () => {
+    const { client, calls } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+    );
+    await openCompanion();
+
+    expect(intervalOf(client, ["roster"])).toBe(false);
+    expect(intervalOf(client, ["companion", KEY])).toBe(false);
+    // And the panel still worked: paused means not refetching, never not
+    // fetching. An operator who pauses still sees the companion they opened.
+    expect(calls.filter((call) => call.url.endsWith(`/keys/${KEY}`))).toHaveLength(1);
   });
 });

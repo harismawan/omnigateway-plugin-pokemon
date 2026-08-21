@@ -90,4 +90,67 @@ describe("the published package", () => {
     const server = readFileSync(join(out, "server", "index.js"), "utf8");
     expect(server).not.toContain("zod");
   });
+
+  /**
+   * The packages the console owns, which this bundle must import rather than
+   * carry.
+   *
+   * Nothing asserted this until the panel started reading the console's LIVE
+   * switch, and the omission was survivable while every entry was React: two
+   * React copies throw "invalid hook call" the moment a panel renders, so the
+   * mistake announced itself.
+   *
+   * `@omnigateway/dashboard-sdk` does not announce it. The SDK holds
+   * `LiveContext`, so a bundled copy is a second context object — this panel
+   * would find no provider above it, take the "polling is off" default, and
+   * never refresh again. Nothing throws, nothing is logged, and the panel looks
+   * exactly like one the operator paused on purpose. It is also the entry
+   * likeliest to be dropped from `build:ui`, because it is the one package here
+   * that is obviously ours.
+   */
+  const HOST_OWNED = [
+    "react",
+    "react-dom",
+    "react/jsx-runtime",
+    "styled-components",
+    "@tanstack/react-query",
+    "@omnigateway/dashboard-sdk",
+  ];
+
+  test("imports the console's packages rather than bundling them", () => {
+    const ui = readFileSync(join(out, "ui", "index.js"), "utf8");
+
+    // Read off the bundle's own import statements rather than searched for as
+    // substrings: the string "react" appears in this file for a dozen innocent
+    // reasons, and a substring check would pass whether or not the specifier is
+    // still external.
+    const imported = new Set(
+      [...ui.matchAll(/(?:^|[;\n])\s*import\s*(?:[^'"]*?from\s*)?["']([^"']+)["']/g)].map(
+        (match) => match[1] ?? "",
+      ),
+    );
+
+    for (const name of HOST_OWNED) {
+      // `react-dom` is legitimately absent — this panel renders, it does not
+      // mount a root — so presence is not the assertion. What is asserted is
+      // that nothing host-owned was *inlined*, which is the failure.
+      if (!imported.has(name)) continue;
+      expect(imported).toContain(name);
+    }
+
+    // The one that must actually be there, because the panel calls `useLive`
+    // and `definePluginUI` from it. Without this the loop above is vacuous for
+    // the entry it exists to protect: a bundled SDK leaves no import to find,
+    // so "not inlined" and "not imported" look identical.
+    expect(imported).toContain("@omnigateway/dashboard-sdk");
+    expect(imported).toContain("react");
+
+    // And the proof it was not inlined as well. An import can coexist with a
+    // copy — a bundler that inlined the SDK and still imported React would
+    // satisfy everything above — so this looks for a string only the SDK's own
+    // source contains. A fragment of the template literal in `pluginApiPath`,
+    // because the interpolation means the whole sentence never appears
+    // literally anywhere.
+    expect(ui).not.toContain("must not be empty");
+  });
 });

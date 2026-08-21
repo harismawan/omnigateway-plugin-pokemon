@@ -107,6 +107,23 @@ is deliberate: a plugin developed inside the monorepo can reach packages an
 installed plugin cannot, and a build that only succeeds there proves nothing
 about one that has to run anywhere else.
 
+Both SDKs are **externals** of the UI build, alongside React and friends — the
+console serves one copy of each through its import map. `@omnigateway/dashboard-sdk`
+is the easiest to forget, because it is the one package here that is obviously
+ours, and forgetting it fails silently: the SDK holds the console's LIVE switch
+in a React context, so a bundled copy is a second context, and the panel stops
+refreshing without an error anywhere. `test/package.test.ts` checks the built
+bundle still imports it.
+
+## The console's LIVE switch
+
+The panel polls, because growth arrives from requests it cannot hear about. It
+polls on the console's cadence rather than its own: the chassis bar's LIVE
+control pauses every screen at once, this panel included, and there is
+deliberately no per-panel refresh setting. Paused means it stops refetching, not
+that it stops working — an operator who pauses still sees the companion they
+opened.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE). The licence covers this plugin's code and not the
