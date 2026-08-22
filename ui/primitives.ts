@@ -484,6 +484,19 @@ export const StatValue = styled.dd`
 /* grids                                                                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The trophy case keeps its tight track, and the 84px is what a cell needs.
+ *
+ * A sprite is drawn at 64px, and `Cell` now carries a card's surface: 8px of
+ * padding and a 1px border on each side is 18px around it, so 84 is the
+ * narrowest column that cannot clip one. The two numbers move together — a card
+ * with `ItemCard`'s 12px padding would need 90 — which is why the padding below
+ * is `sm` rather than the shop's `md`.
+ *
+ * Deliberately narrower than `ItemGrid`. The shop's floor comes from a sentence
+ * that has to wrap readably; a Dex cell holds a number, a name and a nature, and
+ * widening it to match would turn a case of forty graduates into a case of six.
+ */
 export const DexGrid = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
@@ -497,6 +510,18 @@ export const DexGrid = styled.div`
  * cell opens that entry's record, and a div with a click handler would need
  * `tabIndex` and a key listener to be reachable by a keyboard that a button is
  * reachable by for free.
+ *
+ * The same card surface as `ItemCard`, and it replaces a cell that was drawn on
+ * nothing until it was hovered or opened. A grid of transparent cells has no
+ * edges, so a name that wrapped to two lines read as belonging to whichever
+ * sprite it happened to sit under, and the only thing that said "this is one
+ * entry" was the click that had already been made. Sunk rather than raised for
+ * the same reason the shop's cards are: these sit *inside* a panel, and a raised
+ * tile on a raised panel is a surface with nowhere to be.
+ *
+ * Selection stays a wash and an accent border rather than becoming the presence
+ * of a border, because there is one now either way — `$open` changes the card's
+ * colour, and hover strengthens whichever border it currently has.
  */
 export const Cell = styled.button<{ $open: boolean }>`
   margin: 0;
@@ -504,21 +529,49 @@ export const Cell = styled.button<{ $open: boolean }>`
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: ${SPACE.xs};
-  background: ${(p) => (p.$open ? "var(--accent-wash)" : "none")};
-  border: 1px solid ${(p) => (p.$open ? "var(--accent)" : "transparent")};
+  padding: ${SPACE.sm};
+  background: ${(p) => (p.$open ? "var(--accent-wash)" : "var(--panel-sunk)")};
+  border: 1px solid ${(p) => (p.$open ? "var(--accent)" : "var(--rule)")};
   border-radius: 8px;
   color: inherit;
   font: inherit;
   cursor: pointer;
 
   &:hover {
-    border-color: ${(p) => (p.$open ? "var(--accent)" : "var(--rule)")};
+    border-color: ${(p) => (p.$open ? "var(--accent)" : "var(--rule-strong)")};
   }
   &:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
+`;
+
+/**
+ * A graduate's species number, which is the one label it always has.
+ *
+ * Mono and tabular for the reason every other number on this panel is: a column
+ * of cells is read down as much as across, and proportional digits make `#3` and
+ * `#134` sit at different widths in the same slot. Faint, because it is the
+ * identifier rather than the name — until the species cache fills in, it is also
+ * the only thing there, and that is an ordinary state rather than a gap.
+ */
+export const DexNumber = styled.span`
+  font-family: ${MONO};
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-faint);
+`;
+
+/**
+ * The rarity filters, with the grid held off the bottom of them.
+ *
+ * `Row` carries no vertical margin — right for a line of controls inside a card,
+ * wrong directly above a grid, where the first row of cells sat against the
+ * buttons and read as a fifth filter that happened to have a picture on it. Now
+ * that a cell has a border of its own, that collision is a visible one.
+ */
+export const FilterRow = styled(Row)`
+  margin: 0 0 ${SPACE.md};
 `;
 
 /**

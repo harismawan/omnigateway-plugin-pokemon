@@ -1183,6 +1183,31 @@ describe("the Pokédex", () => {
     expect(screen.getByText("#3")).toBeTruthy();
   });
 
+  test("numbers every cell, whether or not the species has a name yet", async () => {
+    // The number is the one identifier a graduate always has: `name` is filled
+    // in by a species cache that starts cold, so a grid captioned by name alone
+    // is a grid of anonymous sprites on a fresh install. Two entries, only one
+    // named, because the number has to survive sitting beside a resolved name
+    // rather than only standing in for a missing one.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexEntry({ id: "d1", finalId: 134, name: "Vaporeon", rarity: "legendary" }),
+            dexEntry({ id: "d2", finalId: 3, name: null }),
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText("#134")).toBeTruthy();
+    expect(screen.getByText("Vaporeon")).toBeTruthy();
+    // Exactly one `#3`: the number is its own line now, so an unnamed entry
+    // must not also print the number where its name would have gone.
+    expect(screen.getAllByText("#3")).toHaveLength(1);
+  });
+
   test("omits the nature of an entry recorded before natures were stored", async () => {
     // Nullable in the store, so the cell has to survive it without printing
     // "null" under a sprite.
