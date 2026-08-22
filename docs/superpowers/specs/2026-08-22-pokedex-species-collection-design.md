@@ -113,6 +113,16 @@ can lose something is not a collection.
 **`firstCaughtAt` is the earliest contributing catch.** "First caught" is the
 fact a Pokédex records.
 
+**Amendment, 22 Aug 2026 — the earliest contributing *stage instant*, not the
+earliest graduation.** See `2026-08-22-stage-instants-and-dex-dialog-design.md`.
+As written above this dated every species on a line to the moment the line
+finished, because a graduation was the only instant a Dex row held. The plugin
+now records when each stage was entered, `Catch` gains `enteredAt` and
+`SpeciesRecord` gains `firstCaughtExact`, and the earliest-wins comparison and
+the catches sort both key on the stage instant. A graduation from before that
+column existed falls back to the behaviour described here, per stage, and says
+so.
+
 **`rarity` comes from the earliest catch.** Every stage of a line shares one
 rarity by construction — `SpeciesCandidate` documents why only base forms are
 rollable, and rarity is read from the rolled base's capture rate — so this rule
@@ -213,6 +223,12 @@ would duplicate the payload and create two shapes that have to agree, and the
 one that drifts is the one nobody is looking at.
 
 ## Panel
+
+**Amendment, 22 Aug 2026 — the record is a modal dialog, not an expansion.** See
+`2026-08-22-stage-instants-and-dex-dialog-design.md`. The cell keeps everything
+below except the disclosure semantics: `aria-expanded`/`aria-controls` become
+`aria-haspopup="dialog"`, and the rarity filter no longer clears the selection
+because a modal has no grid position to be orphaned from.
 
 The cell keeps its card, its `SpeciesNumber`, its expand-in-place detail, and
 the rarity filter — a species inherits its line's rarity, so the filter needs no

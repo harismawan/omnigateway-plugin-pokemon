@@ -144,6 +144,17 @@ the finals. `readDex` still returns rows newest-first — `collectedFinals` and
 the `dex_by_key` index both want exactly that — and `src/collection.ts` does the
 expansion and the by-number sort on read.
 
+**Amendment, 22 Aug 2026 — migration 6 adds `stage_times` to the dex row, and
+this one *is* a schema change.** See
+`2026-08-22-stage-instants-and-dex-dialog-design.md`. A JSON array parallel to
+`chain_order`, recording when each stage was entered, nullable with no default
+on the same reasoning `last_credit_at` uses in migration 5. It cannot be derived:
+growth is counted in tokens, no arithmetic over tokens yields a date, and
+`request_logs` is pruned by retention and is forbidden as a source here by the
+rule two sections below. Rows written before it have SQL NULL, which means
+"never recorded" and is rendered as its own fact rather than backfilled from
+`caught_at` — that would invent a Bulbasaur date out of a Venusaur one.
+
 ### Failure directions are split on purpose
 
 - **Dex entries fail open.** An unknown `rarity` or `nature` on a historical row
@@ -198,6 +209,16 @@ Deliberately not derived from observed throughput: that makes two installs'
 numbers incomparable and introduces a feedback loop between playing and pacing.
 
 ## The pure core
+
+**Amendment, 22 Aug 2026 — `advance` takes `now`, and the rule is unchanged.**
+See `2026-08-22-stage-instants-and-dex-dialog-design.md`. The clock is *passed*,
+never read, which is what this section has always required; `advance` uses it for
+one thing, stamping the instant a stage was entered, and every transition still
+depends only on the stored total. A different `now` changes the timestamps and
+nothing else, so a retried settle is still the same settle. The stamp exists
+because that instant is unrecoverable afterwards: growth is counted in tokens, no
+arithmetic over tokens yields a date, and `request_logs` is pruned by retention
+and forbidden as a source here.
 
 Game rules live in the plugin's own pure module — no I/O, no clock, no ambient
 randomness:

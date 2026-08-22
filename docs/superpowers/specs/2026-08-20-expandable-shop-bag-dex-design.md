@@ -296,6 +296,16 @@ Nothing about the filter's *behaviour* changes: it still clears the selection,
 and it still says "No <rarity> graduates yet." rather than claiming the case is
 empty.
 
+**Amendment, 22 Aug 2026 — the record moved to a modal dialog, and this section
+is superseded from here to the end of it.** See
+`2026-08-22-stage-instants-and-dex-dialog-design.md`. The reasoning below was
+sound and is kept because the trade it describes is the one that was reversed: it
+named the ragged row and the vertical reflow as costs and accepted them, and a
+top-layer dialog makes both stop existing rather than mitigating them. The clever
+`1 / -1` placement was solving a problem created by putting the record in the
+grid at all. `aria-expanded` becomes `aria-haspopup="dialog"` with it, and the
+filter stops clearing the selection.
+
 The detail is a grid item spanning `grid-column: 1 / -1`, placed in DOM order
 immediately after the selected cell. Auto-placement cannot start a full-width
 item mid-row, so it drops to the next row line by itself — no column count, no
