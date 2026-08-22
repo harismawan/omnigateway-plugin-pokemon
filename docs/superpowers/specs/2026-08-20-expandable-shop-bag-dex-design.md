@@ -265,13 +265,26 @@ Padding is `sm` (8px) rather than the shop's `md`. That is derived, not chosen:
 floor comes from a blurb that has to wrap readably, and widening a Dex cell to
 match would turn a case of forty graduates into a case of six.
 
-The cell also gains the species number, in a new `DexNumber` (mono, tabular,
+The cell also gains the species number, in a new `SpeciesNumber` (mono, tabular,
 `--ink-faint`), above the name. It is **not** `speciesLabel`: that helper is for
 a single slot holding whichever of name-or-number exists, and there are two slots
 here, so using it would print `#3` twice on a species the cache has not resolved
 yet — the number, then the number again standing in for the name. So the number
 renders always and the name renders only when it is non-null. On a cold cache a
 cell is a sprite and a number, which is an ordinary state.
+
+The hero's heading follows the same rule, in a `HeroName` flex `h3` that puts
+`#25` in front of `Pikachu` the way a Pokédex prints one. Two slots again, so
+again not `speciesLabel` — it would render `#25 #25` on a cold cache. An egg gets
+neither: its species is not rolled until it hatches, so a number beside "Egg"
+would be the panel inventing a fact the save does not hold. The sprite's `alt`
+keeps the bare name, because an alt is read aloud in a sentence and the number
+belongs to the heading rather than to what the picture is of.
+
+`SpeciesNumber` is sized in `em` rather than pixels precisely because it is now
+used at two scales: at the panel's body size in a Dex cell it lands near the 11px
+of the captions beside it, and inside the hero's heading it stays subordinate to
+the name instead of reading as a footnote that drifted up a line.
 
 Finally, `FilterRow` — a `Row` with `margin-bottom: md` — separates the rarity
 filters from the grid. `Row` carries no vertical margin, correct for a line of

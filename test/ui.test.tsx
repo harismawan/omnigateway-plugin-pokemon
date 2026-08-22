@@ -641,10 +641,13 @@ describe("an active companion", () => {
     expect(screen.queryByRole("img", { name: "An egg, not yet hatched" })).toBeNull();
   });
 
-  test("calls the companion by name once the cache has one", async () => {
+  test("calls the companion by name once the cache has one, behind its number", async () => {
     // The number is what the panel could always say. The name is what an
     // operator recognises, and it is a fact the plugin already had on disk and
-    // was throwing away.
+    // was throwing away. Both, now, in the order a Pokédex prints them — and
+    // the heading's accessible name is the concatenation, which is what makes
+    // this assertion the real one rather than two `getByText` calls that would
+    // pass with the number rendered anywhere on the panel.
     renderCompanion(
       serving(
         view({
@@ -655,9 +658,9 @@ describe("an active companion", () => {
     );
     await openCompanion();
 
-    expect(await screen.findByRole("heading", { name: "Pikachu" })).toBeTruthy();
-    // And the sprite is named the same way, rather than keeping the number in
-    // its alt text while the heading says something else.
+    expect(await screen.findByRole("heading", { name: "#25 Pikachu" })).toBeTruthy();
+    // The sprite keeps the bare name. An alt is read aloud in a sentence, and
+    // the number belongs to the heading rather than to what the picture is of.
     expect(screen.getByRole("img", { name: "Pikachu" })).toBeTruthy();
   });
 
@@ -672,8 +675,28 @@ describe("an active companion", () => {
     );
     await openCompanion();
 
+    // `#25`, once. The number now has a slot of its own, so an unresolved name
+    // must leave that slot empty rather than filling it with the number again.
     expect(await screen.findByRole("heading", { name: "#25" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "null" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "#25 #25" })).toBeNull();
+  });
+
+  test("gives an egg no species number, because it has no species yet", async () => {
+    // The one case where the number is not merely unresolved but absent: a
+    // species is not rolled until an egg hatches, so a `#` beside "Egg" would
+    // be the panel inventing a fact the save does not hold.
+    renderCompanion(
+      serving(
+        view({
+          name: null,
+          state: { active: null, eggUsage: 0, eggTier: null, inventory: {} },
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByRole("heading", { name: "Egg" })).toBeTruthy();
   });
 
   test("draws the whole evolution line, with growth on the stage it is standing at", async () => {

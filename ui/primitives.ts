@@ -547,19 +547,44 @@ export const Cell = styled.button<{ $open: boolean }>`
 `;
 
 /**
- * A graduate's species number, which is the one label it always has.
+ * A species number, which is the one label a Pokémon always has.
  *
  * Mono and tabular for the reason every other number on this panel is: a column
- * of cells is read down as much as across, and proportional digits make `#3` and
- * `#134` sit at different widths in the same slot. Faint, because it is the
+ * of Dex cells is read down as much as across, and proportional digits make `#3`
+ * and `#134` sit at different widths in the same slot. Faint, because it is the
  * identifier rather than the name — until the species cache fills in, it is also
  * the only thing there, and that is an ordinary state rather than a gap.
+ *
+ * `0.8em` rather than a pixel size, because this is used at two scales: in a Dex
+ * cell, where it sits at the panel's body size and comes out near the 11px the
+ * captions beside it use, and in the hero's heading, where a fixed 11px beside a
+ * species name would read as a footnote that had drifted up a line. A number set
+ * relative to its heading stays subordinate to it at any console text size.
  */
-export const DexNumber = styled.span`
+export const SpeciesNumber = styled.span`
   font-family: ${MONO};
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 0.8em;
   color: var(--ink-faint);
+`;
+
+/**
+ * The companion's name, with its number in front of it.
+ *
+ * A flex heading rather than two elements and a space, so the number and the
+ * name are aligned rather than merely adjacent — `align-items: baseline` is what
+ * keeps a smaller mono number sitting on the same line as the name instead of
+ * centred against its cap height. The gap is the panel's `sm` step for the same
+ * reason every other gap here is: nothing on this panel is spaced by eye.
+ *
+ * The heading's accessible name is still the concatenation of both, which is
+ * both correct — "#25 Pikachu" is what the heading says — and what the panel's
+ * tests assert against, since they are written about roles and accessible names.
+ */
+export const HeroName = styled.h3`
+  display: flex;
+  align-items: baseline;
+  gap: ${SPACE.sm};
 `;
 
 /**

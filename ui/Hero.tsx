@@ -1,4 +1,4 @@
-import { type Activity, formatTokens, speciesLabel, spriteAlt, spriteUrl } from "./format.ts";
+import { type Activity, formatTokens, spriteAlt, spriteUrl } from "./format.ts";
 import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
   Button,
@@ -6,8 +6,10 @@ import {
   ChipRow,
   EggMark,
   Fact,
+  HeroName,
   Row,
   ShinyChip,
+  SpeciesNumber,
   Sprite,
   Stat,
   StatLabel,
@@ -62,7 +64,28 @@ export function Hero({
         )}
 
         <div>
-          <h3>{speciesId === null ? "Egg" : speciesLabel(view.name, speciesId)}</h3>
+          {/*
+            The number in front of the name, the way a Pokédex prints one — and
+            the same two-slot rule the Dex grid follows, for the same reason.
+            `speciesLabel` fills one slot with whichever of name-or-number
+            exists; here there are two, so it would render `#25 #25` on a
+            species the cache has not resolved yet. Number always, name only
+            when there is one.
+
+            An egg gets neither. Its species is not rolled until it hatches, so
+            a number beside "Egg" would be the panel inventing a fact the save
+            does not hold — and a `#` with nothing after it would be worse.
+          */}
+          <HeroName>
+            {speciesId === null ? (
+              "Egg"
+            ) : (
+              <>
+                <SpeciesNumber>#{speciesId}</SpeciesNumber>
+                {view.name === null ? null : <span>{view.name}</span>}
+              </>
+            )}
+          </HeroName>
 
           <ChipRow>
             {active === null ? (

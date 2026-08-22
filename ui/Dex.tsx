@@ -10,11 +10,11 @@ import {
   DexGrid,
   DexLine,
   DexLineStage,
-  DexNumber,
   Dim,
   FilterRow,
   Row,
   ShinyChip,
+  SpeciesNumber,
 } from "./primitives.ts";
 import type { DexEntry, Rarity } from "./types.ts";
 
@@ -122,7 +122,7 @@ export function Dex({ entries, pluginId }: { entries: readonly DexEntry[]; plugi
                     again standing in for the name. A cell that repeats itself
                     reads as a rendering bug rather than as a cold cache.
                   */}
-                  <DexNumber>#{entry.finalId}</DexNumber>
+                  <SpeciesNumber>#{entry.finalId}</SpeciesNumber>
                   {entry.name === null ? null : <Caption>{entry.name}</Caption>}
                   {/*
                     Nature is captioned rather than folded into the sprite's alt
