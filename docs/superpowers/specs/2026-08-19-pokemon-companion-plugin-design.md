@@ -489,6 +489,47 @@ an egg is drawn as an egg, and a save that could not be read is drawn as neither
 an egg nor a species. Dropping the unreadable key from the listing would hide
 the one key an operator most needs to find.
 
+**Amendment, 22 Aug 2026 — the egg is fetched, and the drawn mark becomes its
+fallback.** "Drawn as an egg" above described a CSS shape: `EggMark`, a rounded
+`div` in `--panel-sunk` with a 2px border. The reasoning was that the species
+sprite route parses its parameter as an integer, so `/sprite/egg` is a
+guaranteed 400 and a broken image on every unhatched companion. That reasoning
+still holds for *that* route — what changed is that the **item** sprite route
+looks its parameter up in a closed map, and the map now carries an entry for an
+incubating companion.
+
+`ITEM_SPRITE_FILES` therefore gains `incubating: "mystery-egg"`, and it is a
+second key rather than a reuse of the existing `egg`. The two mean different
+things: `egg` is the 32px icon on a shop card beside a price — a thing an
+operator buys — while `incubating` is the 192px figure that *is* the companion
+for its first 250M tokens. Drawing both with `lucky-egg` would make the offer
+and the thing it produces identical at a glance.
+
+`EggSprite` renders the fetched image and falls back to `EggMark` on the
+image's own `error`, the same mechanism `ItemIcon` uses and for the same two
+absences: a cold cache that 404s on first paint and fills in on a later poll,
+and an install without `net` where the route answers 503 forever. So the
+broken-image failure the original reasoning guarded against cannot occur — it is
+an egg either way. **The accessible name is identical on both branches**, so a
+screen reader cannot tell whether the artwork loaded.
+
+It is drawn at **180px inside the 192px slot**, not at 192px. Upstream has no
+large egg art — `sprites/pokemon/` holds none, and both egg files under
+`sprites/items/` are 30×30 — and 30 into 192 is 6.4, the fractional
+nearest-neighbour scale that `COMPANION_SIZE` exists to avoid. 30 × 6 = 180 is
+exact. The slot stays 192px so an egg and a hatched companion occupy the same
+space and the roster does not reflow when one hatches.
+
+The three-way distinction this paragraph is about is unchanged, and is now
+tested from the other side too: an unreadable save must not become an egg simply
+because the egg acquired real artwork. Both are `speciesId: null`, so the branch
+order in `KeyPicker` is the only thing keeping them apart.
+
+No manifest change: `net:outbound`, `files`, and the
+`https://raw.githubusercontent.com` origin were already declared for the sprite
+routes, and no asset is vendored — the egg is fetched at runtime and cached in
+the plugin's scoped data directory like every other sprite.
+
 All sprite and species requests go to the plugin's own routes. The browser never
 contacts `pokeapi.co` or `raw.githubusercontent.com`. **Species names are
 resolved server-side and cache-only** — `cachedSpeciesName` takes `files` and

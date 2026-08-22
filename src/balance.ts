@@ -258,18 +258,40 @@ export const ITEM_KINDS = Object.keys(ITEM_PRICES) as readonly ItemKind[];
  * bought was a route that answered 404 forever while the panel's fallback hid
  * it from everywhere except the browser console.
  */
-const ITEM_SPRITE_FILES: Readonly<Record<ItemKind, string> & { egg: string }> = {
-  rareCandy: "rare-candy",
-  shinyCharm: "shiny-charm",
-  everstone: "everstone",
-  sootheBell: "soothe-bell",
-  repel: "repel",
-  incense: "luck-incense",
-  lure: "honey",
-  mint: "mental-herb",
-  /** Every tier. The guarantee is carried by the rarity chip, not by the art. */
-  egg: "lucky-egg",
-};
+const ITEM_SPRITE_FILES: Readonly<Record<ItemKind, string> & { egg: string; incubating: string }> =
+  {
+    rareCandy: "rare-candy",
+    shinyCharm: "shiny-charm",
+    everstone: "everstone",
+    sootheBell: "soothe-bell",
+    repel: "repel",
+    incense: "luck-incense",
+    lure: "honey",
+    mint: "mental-herb",
+    /** Every tier. The guarantee is carried by the rarity chip, not by the art. */
+    egg: "lucky-egg",
+    /**
+     * The companion that has not hatched, which is a state and not a purchase.
+     *
+     * Deliberately different art from `egg` above, and the distinction is the
+     * reason this key exists rather than the hero reusing that one. `egg` is a
+     * 32px icon on a shop card beside a price — a thing an operator buys.
+     * `incubating` is the 192px figure that *is* the companion for its first
+     * 250M tokens. Drawing both with `lucky-egg` would make the offer and the
+     * thing it produces identical at a glance, which is the one confusion this
+     * panel spends most of its care avoiding.
+     *
+     * `mystery-egg` because that is what it is: an egg whose species is not
+     * rolled yet. `lucky-egg` is a held item that happens to be egg-shaped, and
+     * borrowing it here would put a piece of equipment where a creature goes.
+     *
+     * Upstream has nothing larger — `sprites/pokemon/` holds no egg at all, and
+     * both egg files under `sprites/items/` are 30×30. That is why the panel
+     * draws this at 180px (6× exactly) rather than at the 192px the species
+     * sprites use; see `EggImage`.
+     */
+    incubating: "mystery-egg",
+  };
 
 export const ITEM_SPRITE_NAMES: ReadonlyMap<string, string> = new Map(
   Object.entries(ITEM_SPRITE_FILES),

@@ -11,8 +11,10 @@ import {
   DexLine,
   DexLineStage,
   Dim,
+  FilterRow,
   Row,
   ShinyChip,
+  SpeciesNumber,
 } from "./primitives.ts";
 import type { DexEntry, Rarity } from "./types.ts";
 
@@ -37,7 +39,7 @@ export function Dex({ entries, pluginId }: { entries: readonly DexEntry[]; plugi
 
   return (
     <>
-      <Row>
+      <FilterRow>
         {RARITY_FILTERS.map((rarity) => (
           // Pressed, not disabled. Disabling the active filter takes the one
           // control that says which filter is active out of the tab order, and
@@ -61,7 +63,7 @@ export function Dex({ entries, pluginId }: { entries: readonly DexEntry[]; plugi
             {rarity ?? "all"}
           </Button>
         ))}
-      </Row>
+      </FilterRow>
 
       {shown.length === 0 ? (
         // Not "Nothing graduated yet." A filter that hides everything and an
@@ -109,7 +111,19 @@ export function Dex({ entries, pluginId }: { entries: readonly DexEntry[]; plugi
                     src={spriteUrl(pluginId, entry.finalId, entry.isShiny)}
                     style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
                   />
-                  <Caption>{speciesLabel(entry.name, entry.finalId)}</Caption>
+                  {/*
+                    The number always, and the name only when there is one.
+
+                    Not `speciesLabel`, which is the right helper where a single
+                    slot has to hold whichever of the two exists — the detail's
+                    heading, the evolution line. Here there are two slots, and
+                    using it would print `#3` in both of them for a species the
+                    cache has not resolved yet: the number, and then the number
+                    again standing in for the name. A cell that repeats itself
+                    reads as a rendering bug rather than as a cold cache.
+                  */}
+                  <SpeciesNumber>#{entry.finalId}</SpeciesNumber>
+                  {entry.name === null ? null : <Caption>{entry.name}</Caption>}
                   {/*
                     Nature is captioned rather than folded into the sprite's alt
                     text: the alt text names the thing, and a nullable field

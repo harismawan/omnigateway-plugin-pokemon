@@ -29,7 +29,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Dex } from "../ui/Dex.tsx";
-import { itemSpriteUrl } from "../ui/format.ts";
+import { eggSpriteUrl, itemSpriteUrl } from "../ui/format.ts";
 import companionUi, { activityOf } from "../ui/index.tsx";
 
 const Companion = companionUi.mount;
@@ -641,10 +641,13 @@ describe("an active companion", () => {
     expect(screen.queryByRole("img", { name: "An egg, not yet hatched" })).toBeNull();
   });
 
-  test("calls the companion by name once the cache has one", async () => {
+  test("calls the companion by name once the cache has one, behind its number", async () => {
     // The number is what the panel could always say. The name is what an
     // operator recognises, and it is a fact the plugin already had on disk and
-    // was throwing away.
+    // was throwing away. Both, now, in the order a Pokédex prints them — and
+    // the heading's accessible name is the concatenation, which is what makes
+    // this assertion the real one rather than two `getByText` calls that would
+    // pass with the number rendered anywhere on the panel.
     renderCompanion(
       serving(
         view({
@@ -655,9 +658,9 @@ describe("an active companion", () => {
     );
     await openCompanion();
 
-    expect(await screen.findByRole("heading", { name: "Pikachu" })).toBeTruthy();
-    // And the sprite is named the same way, rather than keeping the number in
-    // its alt text while the heading says something else.
+    expect(await screen.findByRole("heading", { name: "#25 Pikachu" })).toBeTruthy();
+    // The sprite keeps the bare name. An alt is read aloud in a sentence, and
+    // the number belongs to the heading rather than to what the picture is of.
     expect(screen.getByRole("img", { name: "Pikachu" })).toBeTruthy();
   });
 
@@ -672,8 +675,28 @@ describe("an active companion", () => {
     );
     await openCompanion();
 
+    // `#25`, once. The number now has a slot of its own, so an unresolved name
+    // must leave that slot empty rather than filling it with the number again.
     expect(await screen.findByRole("heading", { name: "#25" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "null" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "#25 #25" })).toBeNull();
+  });
+
+  test("gives an egg no species number, because it has no species yet", async () => {
+    // The one case where the number is not merely unresolved but absent: a
+    // species is not rolled until an egg hatches, so a `#` beside "Egg" would
+    // be the panel inventing a fact the save does not hold.
+    renderCompanion(
+      serving(
+        view({
+          name: null,
+          state: { active: null, eggUsage: 0, eggTier: null, inventory: {} },
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByRole("heading", { name: "Egg" })).toBeTruthy();
   });
 
   test("draws the whole evolution line, with growth on the stage it is standing at", async () => {
@@ -1183,6 +1206,31 @@ describe("the Pokédex", () => {
     expect(screen.getByText("#3")).toBeTruthy();
   });
 
+  test("numbers every cell, whether or not the species has a name yet", async () => {
+    // The number is the one identifier a graduate always has: `name` is filled
+    // in by a species cache that starts cold, so a grid captioned by name alone
+    // is a grid of anonymous sprites on a fresh install. Two entries, only one
+    // named, because the number has to survive sitting beside a resolved name
+    // rather than only standing in for a missing one.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexEntry({ id: "d1", finalId: 134, name: "Vaporeon", rarity: "legendary" }),
+            dexEntry({ id: "d2", finalId: 3, name: null }),
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText("#134")).toBeTruthy();
+    expect(screen.getByText("Vaporeon")).toBeTruthy();
+    // Exactly one `#3`: the number is its own line now, so an unnamed entry
+    // must not also print the number where its name would have gone.
+    expect(screen.getAllByText("#3")).toHaveLength(1);
+  });
+
   test("omits the nature of an entry recorded before natures were stored", async () => {
     // Nullable in the store, so the cell has to survive it without printing
     // "null" under a sprite.
@@ -1548,6 +1596,70 @@ describe("an item icon", () => {
     // Every egg tier shares one icon: the guarantee is a fact about the offer,
     // carried by the chip, not by the artwork.
     expect(itemSpriteUrl("pokemon", "egg")).toBe("/api/plugins/pokemon/item-sprite/egg");
+  });
+});
+
+describe("an incubating egg", () => {
+  test("asks for the incubating sprite, not the shop's egg icon", async () => {
+    // The "ask for the right thing" half, asserted without a renderer for the
+    // reason the item icon's URL test is: happy-dom fires `error` on every
+    // `img` the moment it attaches, so the loaded state cannot be observed here
+    // at all and only the fallback survives.
+    //
+    // Two keys and not one, deliberately. `egg` is the 32px icon on a shop card
+    // beside a price; `incubating` is the 192px figure of a companion that has
+    // not hatched. Collapsing them would draw the offer and the thing it
+    // produces identically.
+    // `eggSpriteUrl` and not `itemSpriteUrl("incubating")`: asserting the latter
+    // would only prove the URL builder concatenates, which it already has a
+    // test for. This is the function `EggSprite` actually calls, so a rename of
+    // the sprite key cannot pass here and 404 in the panel.
+    expect(eggSpriteUrl("pokemon")).toBe("/api/plugins/pokemon/item-sprite/incubating");
+    expect(eggSpriteUrl("pokemon")).not.toBe(itemSpriteUrl("pokemon", "egg"));
+  });
+
+  test("falls back to the drawn mark, keeping the name a reader hears", async () => {
+    // The "cope when it is not there" half, and it covers the two absences that
+    // matter: a cold cache, where the route 404s on first paint and fills in on
+    // a later poll, and an install without `net`, where it answers 503 and no
+    // art is ever coming. An unhatched companion must never be a broken-image
+    // icon — that is the failure the drawn mark existed for in the first place.
+    renderCompanion(
+      serving(view({ state: { active: null, eggUsage: 0, eggTier: null, inventory: {} } })),
+    );
+    await openCompanion();
+
+    // The accessible name is unchanged whichever branch renders, so a screen
+    // reader cannot tell that the artwork moved.
+    expect(await screen.findByRole("img", { name: "An egg, not yet hatched" })).toBeTruthy();
+    // Replaced, not covered: an image left in the tree is one still asking the
+    // gateway for a sprite that is never coming.
+    expect(document.querySelector('img[src*="item-sprite/incubating"]')).toBeNull();
+  });
+
+  test("an unreadable save on the roster is still not an egg", async () => {
+    // The guard, and the one confusion this plugin refuses to make anywhere.
+    // Giving the egg real artwork must not tempt the roster into drawing a save
+    // it could not read as a companion that merely has not hatched — both are
+    // `speciesId: null`, so the only thing keeping them apart is the branch
+    // order in `KeyPicker`.
+    // Two keys, so the panel stays on the roster instead of opening the only
+    // one — and the hatched second key is what proves the assertion below is
+    // about the broken card rather than about an empty screen.
+    renderCompanion({
+      [GET_ROSTER]: () => ({
+        body: {
+          keys: [
+            rosterKey({ apiKeyId: "key_broken", unreadable: true, speciesId: null, name: null }),
+            rosterKey({ apiKeyId: "key_b", name: "Snorlax" }),
+          ],
+        },
+      }),
+      [GET_KEY]: () => ({ body: view() }),
+    });
+
+    expect(await screen.findByText("Save unreadable")).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "An egg, not yet hatched" })).toBeNull();
   });
 });
 

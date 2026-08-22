@@ -326,7 +326,21 @@ export const Sprite = styled.img`
   image-rendering: pixelated;
 `;
 
-/** An egg, drawn rather than fetched — there is no sprite for one. */
+/**
+ * An egg, drawn — now the *fallback* for one that could not be fetched.
+ *
+ * It used to be the only egg there was, on the reasoning that the species
+ * sprite route parses its parameter as an integer so `/sprite/egg` is a
+ * guaranteed 400. That is still true; what changed is that the *item* sprite
+ * route looks its parameter up in a closed map, and the map now has an entry
+ * for an unhatched companion. So the egg is fetched like everything else and
+ * this shape is what shows when it cannot be: a cold cache on first paint, or
+ * an install with no `net` where the route answers 503 forever.
+ *
+ * Which is why it keeps its full 192px rather than shrinking to match the
+ * artwork below. It is a drawn shape and not a picture of one — the box *is*
+ * the graphic — so it should fill the slot the sprite is centred in.
+ */
 export const EggMark = styled.div`
   box-sizing: border-box;
   width: ${COMPANION_SIZE};
@@ -334,6 +348,36 @@ export const EggMark = styled.div`
   border-radius: 50% 50% 45% 45%;
   background: var(--panel-sunk);
   border: 2px solid var(--rule-strong);
+`;
+
+/**
+ * The fetched egg, and the reason it is 180px rather than 192px.
+ *
+ * Upstream has no large egg art: `sprites/pokemon/` holds none at all, and both
+ * egg files under `sprites/items/` are **30×30**. At `COMPANION_SIZE` that is a
+ * 6.4× upscale, and nearest-neighbour turns a fractional scale into alternating
+ * six- and seven-pixel source pixels — the same lumpiness the 192px figure was
+ * chosen to avoid for the 96px species sprites, arrived at from the other
+ * direction. 30 × 6 = 180 is exact.
+ *
+ * The *slot* stays `COMPANION_SIZE`, so an egg and a hatched companion occupy
+ * the same space and the roster does not reflow the moment one hatches. The
+ * image is centred in it; the twelve pixels of margin are invisible against a
+ * transparent PNG.
+ */
+export const EggSlot = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
+`;
+
+export const EggImage = styled.img`
+  width: 180px;
+  height: 180px;
+  image-rendering: pixelated;
 `;
 
 /**
@@ -484,6 +528,19 @@ export const StatValue = styled.dd`
 /* grids                                                                       */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The trophy case keeps its tight track, and the 84px is what a cell needs.
+ *
+ * A sprite is drawn at 64px, and `Cell` now carries a card's surface: 8px of
+ * padding and a 1px border on each side is 18px around it, so 84 is the
+ * narrowest column that cannot clip one. The two numbers move together — a card
+ * with `ItemCard`'s 12px padding would need 90 — which is why the padding below
+ * is `sm` rather than the shop's `md`.
+ *
+ * Deliberately narrower than `ItemGrid`. The shop's floor comes from a sentence
+ * that has to wrap readably; a Dex cell holds a number, a name and a nature, and
+ * widening it to match would turn a case of forty graduates into a case of six.
+ */
 export const DexGrid = styled.div`
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
@@ -497,6 +554,18 @@ export const DexGrid = styled.div`
  * cell opens that entry's record, and a div with a click handler would need
  * `tabIndex` and a key listener to be reachable by a keyboard that a button is
  * reachable by for free.
+ *
+ * The same card surface as `ItemCard`, and it replaces a cell that was drawn on
+ * nothing until it was hovered or opened. A grid of transparent cells has no
+ * edges, so a name that wrapped to two lines read as belonging to whichever
+ * sprite it happened to sit under, and the only thing that said "this is one
+ * entry" was the click that had already been made. Sunk rather than raised for
+ * the same reason the shop's cards are: these sit *inside* a panel, and a raised
+ * tile on a raised panel is a surface with nowhere to be.
+ *
+ * Selection stays a wash and an accent border rather than becoming the presence
+ * of a border, because there is one now either way — `$open` changes the card's
+ * colour, and hover strengthens whichever border it currently has.
  */
 export const Cell = styled.button<{ $open: boolean }>`
   margin: 0;
@@ -504,21 +573,74 @@ export const Cell = styled.button<{ $open: boolean }>`
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  padding: ${SPACE.xs};
-  background: ${(p) => (p.$open ? "var(--accent-wash)" : "none")};
-  border: 1px solid ${(p) => (p.$open ? "var(--accent)" : "transparent")};
+  padding: ${SPACE.sm};
+  background: ${(p) => (p.$open ? "var(--accent-wash)" : "var(--panel-sunk)")};
+  border: 1px solid ${(p) => (p.$open ? "var(--accent)" : "var(--rule)")};
   border-radius: 8px;
   color: inherit;
   font: inherit;
   cursor: pointer;
 
   &:hover {
-    border-color: ${(p) => (p.$open ? "var(--accent)" : "var(--rule)")};
+    border-color: ${(p) => (p.$open ? "var(--accent)" : "var(--rule-strong)")};
   }
   &:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
+`;
+
+/**
+ * A species number, which is the one label a Pokémon always has.
+ *
+ * Mono and tabular for the reason every other number on this panel is: a column
+ * of Dex cells is read down as much as across, and proportional digits make `#3`
+ * and `#134` sit at different widths in the same slot. Faint, because it is the
+ * identifier rather than the name — until the species cache fills in, it is also
+ * the only thing there, and that is an ordinary state rather than a gap.
+ *
+ * `0.8em` rather than a pixel size, because this is used at two scales: in a Dex
+ * cell, where it sits at the panel's body size and comes out near the 11px the
+ * captions beside it use, and in the hero's heading, where a fixed 11px beside a
+ * species name would read as a footnote that had drifted up a line. A number set
+ * relative to its heading stays subordinate to it at any console text size.
+ */
+export const SpeciesNumber = styled.span`
+  font-family: ${MONO};
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8em;
+  color: var(--ink-faint);
+`;
+
+/**
+ * The companion's name, with its number in front of it.
+ *
+ * A flex heading rather than two elements and a space, so the number and the
+ * name are aligned rather than merely adjacent — `align-items: baseline` is what
+ * keeps a smaller mono number sitting on the same line as the name instead of
+ * centred against its cap height. The gap is the panel's `sm` step for the same
+ * reason every other gap here is: nothing on this panel is spaced by eye.
+ *
+ * The heading's accessible name is still the concatenation of both, which is
+ * both correct — "#25 Pikachu" is what the heading says — and what the panel's
+ * tests assert against, since they are written about roles and accessible names.
+ */
+export const HeroName = styled.h3`
+  display: flex;
+  align-items: baseline;
+  gap: ${SPACE.sm};
+`;
+
+/**
+ * The rarity filters, with the grid held off the bottom of them.
+ *
+ * `Row` carries no vertical margin — right for a line of controls inside a card,
+ * wrong directly above a grid, where the first row of cells sat against the
+ * buttons and read as a fifth filter that happened to have a picture on it. Now
+ * that a cell has a border of its own, that collision is a visible one.
+ */
+export const FilterRow = styled(Row)`
+  margin: 0 0 ${SPACE.md};
 `;
 
 /**

@@ -26,6 +26,31 @@ export function itemSpriteUrl(pluginId: string, item: string): string {
   return `/api/plugins/${pluginId}/item-sprite/${item}`;
 }
 
+/**
+ * The sprite key for a companion that has not hatched.
+ *
+ * Named rather than spelled out at the call site, and it is the *server's* map
+ * key — `ITEM_SPRITE_NAMES` in `src/balance.ts` — so the two halves have one
+ * spelling between them. A literal in the component would 404 silently the day
+ * somebody renamed the map entry, and the panel's fallback would hide it
+ * everywhere except the browser console. That is exactly how `mint` shipped
+ * without art for a release.
+ */
+const INCUBATING_SPRITE = "incubating";
+
+/**
+ * Where an unhatched companion's artwork comes from.
+ *
+ * Its own function rather than `itemSpriteUrl(id, "incubating")` inline,
+ * because an egg is not an item and this is the only thing that keeps that true
+ * on the panel: the shop's egg offer is a purchase and uses the `egg` key, while
+ * this is the creature itself. They are different art on purpose, and one
+ * function per meaning is what stops a later tidy-up from merging them.
+ */
+export function eggSpriteUrl(pluginId: string): string {
+  return itemSpriteUrl(pluginId, INCUBATING_SPRITE);
+}
+
 export function formatTokens(value: number): string {
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;

@@ -242,6 +242,60 @@ layout; the refusal reasoning is untouched.
 
 ## Pokédex: a cell expands in place
 
+**Amendment, 22 Aug 2026 — the cell is a card, and it is numbered.**
+
+The Dex cell was drawn on nothing: transparent background, transparent border,
+4px of padding, with a border appearing only on hover or selection. Beside a shop
+and a bag whose entries are cards, that made the trophy case the one grid on the
+panel with no edges — a name wrapping to two lines read as belonging to whichever
+sprite it sat under, and the only thing that ever said "this is one entry" was a
+click already made.
+
+`Cell` therefore takes `ItemCard`'s surface: `--panel-sunk`, a `--rule` border,
+an 8px radius. Sunk and not raised, for the reason the shop's cards are sunk —
+these sit inside a panel, and a raised tile on a raised panel is a surface with
+nowhere to be. Selection and hover are unchanged in kind: `$open` still swaps the
+fill to `--accent-wash` and the border to `--accent`, and hover still strengthens
+whichever border the cell currently has (`--rule-strong` when closed).
+
+Padding is `sm` (8px) rather than the shop's `md`. That is derived, not chosen:
+`DexGrid` keeps its `minmax(84px, 1fr)` track, a sprite is drawn at 64px, and
+8px of padding plus a 1px border on each side is exactly the 18px that leaves.
+12px would need a 90px floor. The tighter track is the point — the shop's 260px
+floor comes from a blurb that has to wrap readably, and widening a Dex cell to
+match would turn a case of forty graduates into a case of six.
+
+The cell also gains the species number, in a new `SpeciesNumber` (mono, tabular,
+`--ink-faint`), above the name. It is **not** `speciesLabel`: that helper is for
+a single slot holding whichever of name-or-number exists, and there are two slots
+here, so using it would print `#3` twice on a species the cache has not resolved
+yet — the number, then the number again standing in for the name. So the number
+renders always and the name renders only when it is non-null. On a cold cache a
+cell is a sprite and a number, which is an ordinary state.
+
+The hero's heading follows the same rule, in a `HeroName` flex `h3` that puts
+`#25` in front of `Pikachu` the way a Pokédex prints one. Two slots again, so
+again not `speciesLabel` — it would render `#25 #25` on a cold cache. An egg gets
+neither: its species is not rolled until it hatches, so a number beside "Egg"
+would be the panel inventing a fact the save does not hold. The sprite's `alt`
+keeps the bare name, because an alt is read aloud in a sentence and the number
+belongs to the heading rather than to what the picture is of.
+
+`SpeciesNumber` is sized in `em` rather than pixels precisely because it is now
+used at two scales: at the panel's body size in a Dex cell it lands near the 11px
+of the captions beside it, and inside the hero's heading it stays subordinate to
+the name instead of reading as a footnote that drifted up a line.
+
+Finally, `FilterRow` — a `Row` with `margin-bottom: md` — separates the rarity
+filters from the grid. `Row` carries no vertical margin, correct for a line of
+controls and wrong directly above a grid whose first row sat against the buttons
+and read as a fifth filter with a picture on it. Now that a cell has a border,
+that collision is a visible one.
+
+Nothing about the filter's *behaviour* changes: it still clears the selection,
+and it still says "No <rarity> graduates yet." rather than claiming the case is
+empty.
+
 The detail is a grid item spanning `grid-column: 1 / -1`, placed in DOM order
 immediately after the selected cell. Auto-placement cannot start a full-width
 item mid-row, so it drops to the next row line by itself — no column count, no

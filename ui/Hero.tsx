@@ -1,13 +1,15 @@
-import { type Activity, formatTokens, speciesLabel, spriteAlt, spriteUrl } from "./format.ts";
+import { EggSprite } from "./EggSprite.tsx";
+import { type Activity, formatTokens, spriteAlt, spriteUrl } from "./format.ts";
 import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
   Button,
   Chip,
   ChipRow,
-  EggMark,
   Fact,
+  HeroName,
   Row,
   ShinyChip,
+  SpeciesNumber,
   Sprite,
   Stat,
   StatLabel,
@@ -48,12 +50,17 @@ export function Hero({
     <>
       <Row>
         {/*
-          An egg is drawn, never fetched. The sprite route parses its parameter
-          as an integer, so `/sprite/egg` was a guaranteed 400 and a broken-image
-          icon on every unhatched companion.
+          Fetched now, through the *item* sprite route rather than the species
+          one. The distinction is the whole reason this is possible: the species
+          route parses its parameter as an integer, so `/sprite/egg` was a
+          guaranteed 400 and a broken-image icon on every unhatched companion —
+          whereas the item route looks its parameter up in a closed map, which
+          now has an entry for an incubating companion. `EggSprite` still falls
+          back to the drawn mark, so the 400 that used to be certain is now an
+          egg either way.
         */}
         {speciesId === null ? (
-          <EggMark aria-label="An egg, not yet hatched" role="img" />
+          <EggSprite pluginId={pluginId} />
         ) : (
           <Sprite
             alt={spriteAlt(view.name, speciesId, active?.isShiny === true)}
@@ -62,7 +69,28 @@ export function Hero({
         )}
 
         <div>
-          <h3>{speciesId === null ? "Egg" : speciesLabel(view.name, speciesId)}</h3>
+          {/*
+            The number in front of the name, the way a Pokédex prints one — and
+            the same two-slot rule the Dex grid follows, for the same reason.
+            `speciesLabel` fills one slot with whichever of name-or-number
+            exists; here there are two, so it would render `#25 #25` on a
+            species the cache has not resolved yet. Number always, name only
+            when there is one.
+
+            An egg gets neither. Its species is not rolled until it hatches, so
+            a number beside "Egg" would be the panel inventing a fact the save
+            does not hold — and a `#` with nothing after it would be worse.
+          */}
+          <HeroName>
+            {speciesId === null ? (
+              "Egg"
+            ) : (
+              <>
+                <SpeciesNumber>#{speciesId}</SpeciesNumber>
+                {view.name === null ? null : <span>{view.name}</span>}
+              </>
+            )}
+          </HeroName>
 
           <ChipRow>
             {active === null ? (
