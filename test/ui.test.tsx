@@ -1385,6 +1385,20 @@ describe("a Pokédex record", () => {
     expect(screen.getByText("#133 Eevee")).toBeTruthy();
   });
 
+  test("marks which stage of the line this record is about", async () => {
+    // The chain exists to say where a Pokémon sits among its own forms, so the
+    // "you are here" is the point of drawing it. Asserted through
+    // `aria-current` rather than through the accent border, because the border
+    // is styling — and because a marker only a sighted reader gets is half a
+    // marker.
+    await openRecord(line, "Ivysaur");
+
+    const current = screen.getByRole("figure", { current: true });
+    expect(current.textContent).toContain("#2 Ivysaur");
+    // Exactly one, so the marker cannot be on every tile or on none.
+    expect(screen.getAllByRole("figure", { current: true })).toHaveLength(1);
+  });
+
   test("draws one line per branch a species was caught through", async () => {
     // Eevee. Its chain branches, so one Eevee record can hold a Vaporeon catch
     // and a Jolteon catch. A single line on the record would have to pick a
@@ -1493,9 +1507,10 @@ describe("a Pokédex record", () => {
       "Venusaur",
     );
 
-    expect(
-      screen.getByText(`first caught ${new Date(Date.UTC(2024, 0, 15)).toLocaleDateString()}`),
-    ).toBeTruthy();
+    // Label and value are separate elements now, so they are asserted
+    // separately — and the label is what says which *kind* of date this is.
+    expect(screen.getByText("first caught")).toBeTruthy();
+    expect(screen.getByText(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString())).toBeTruthy();
   });
 
   test("says a date is the graduation when the stage instant was never recorded", async () => {
@@ -1517,9 +1532,11 @@ describe("a Pokédex record", () => {
       "Bulbasaur",
     );
 
-    const when = new Date(Date.UTC(2024, 0, 15)).toLocaleDateString();
-    expect(screen.getByText(`line graduated ${when}`)).toBeTruthy();
-    expect(screen.queryByText(`first caught ${when}`)).toBeNull();
+    // The field label carries the distinction. Both dates on this fixture are
+    // the same instant, so the label is the *only* thing that says a graduation
+    // is standing in for a first sighting.
+    expect(screen.getByText("line graduated")).toBeTruthy();
+    expect(screen.queryByText("first caught")).toBeNull();
   });
 
   test("dates a catch from the stage it reached, not the line it finished", async () => {
@@ -1545,12 +1562,14 @@ describe("a Pokédex record", () => {
       "Bulbasaur",
     );
 
-    expect(
-      screen.getByText(`${new Date(Date.UTC(2024, 0, 15)).toLocaleDateString()} · modest`),
-    ).toBeTruthy();
-    expect(
-      screen.queryByText(new RegExp(new Date(Date.UTC(2024, 6, 30)).toLocaleDateString())),
-    ).toBeNull();
+    // The encounter row is a grid, so the date and the nature are their own
+    // cells. Asserted through the row's own text, which keeps this a claim
+    // about the row rather than about the page.
+    const row = screen.getByRole("listitem");
+    expect(row.textContent).toContain(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString());
+    expect(row.textContent).toContain("modest");
+    // Never the graduation, which is six months later on this fixture.
+    expect(row.textContent).not.toContain(new Date(Date.UTC(2024, 6, 30)).toLocaleDateString());
   });
 
   test("dates each catch from its own instant", async () => {
@@ -1586,10 +1605,11 @@ describe("a Pokédex record", () => {
 
     const newest = new Date(Date.UTC(2026, 5, 1)).toLocaleDateString();
     const oldest = new Date(Date.UTC(2025, 2, 9)).toLocaleDateString();
-    // Each date beside its own catch's nature, which is what makes this an
-    // assertion about the row rather than about the page.
-    expect(screen.getByText(`${newest} · modest`)).toBeTruthy();
-    expect(screen.getByText(`${oldest} · adamant`)).toBeTruthy();
+    // Each date beside its own catch's nature, asserted per row — which is what
+    // makes this a claim about the pairing rather than about the page. Two rows
+    // with the dates swapped would pass a pair of bare `getByText` calls.
+    const rows = screen.getAllByRole("listitem").map((row) => row.textContent);
+    expect(rows).toEqual([`${newest}modest`, `${oldest}adamant`]);
   });
 });
 

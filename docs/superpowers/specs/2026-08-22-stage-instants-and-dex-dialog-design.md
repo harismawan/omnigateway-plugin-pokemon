@@ -160,6 +160,66 @@ thing on the page that will not follow the theme.
   child — which is also what keeps a click on the heading from dismissing the
   record. `contains` would not.
 
+### The record's own layout
+
+Moving the record into a dialog and leaving its layout alone would have been
+half the change. What it had was the inline detail's layout — a 96px sprite in a
+flex row, everything else stacked in one left-aligned column at a uniform `sm`
+gap. That was right for a detail wedged into a grid, where it had to be short.
+It is wrong in a dialog: heading, chips, date, evolution line and catch log all
+carried the same weight, with nothing saying which was the specimen and which
+was the log.
+
+The palette and the typefaces are not this panel's to choose — the console's
+custom properties are the contract and there are no webfonts — so the design is
+made of **structure and the mono face**, which in an ops console reads as an
+instrument readout. That happens to be the Pokédex's own vernacular, so the
+constraint and the subject point the same way.
+
+**Two zones, split by a hairline.** A specimen plate — the art at 1:1 on
+`--panel-sunk`, with the identity beside it — and a register below it. A rule
+rather than a larger gap, because the two are different kinds of thing and a
+rule says that where whitespace only says "some distance".
+
+**The art is not resized.** The fetched sprites are a 96px canvas drawn with
+`image-rendering: pixelated`, and a record is read up close, so the honest size
+is 1:1 and the plate is what gives it presence. This is the only sprite on the
+panel that is never scaled, which is why it is the sharpest.
+
+**Labelled fields.** `FIRST CAUGHT` / `EVOLUTION` / `ENCOUNTERS` in the 10px
+letterspaced small caps rarity already uses — the panel's existing idiom rather
+than a device invented here. It also gives the exact/approximate distinction a
+home: the label reads `LINE GRADUATED` instead of `FIRST CAUGHT`, so the
+qualifier sits in the structure rather than inside the sentence.
+
+**The signature: the chain, with a you-are-here marker.** The stages were three
+sprites `sm` apart, which reads as three unrelated Pokémon that happen to be
+adjacent — the one thing a line is not. They are now sunk tiles joined by rules,
+and the species whose record this is carries the `--accent` border. That is
+*state*, which is what the panel's colour rule permits, and it is the same
+accent the open cell in the grid carries so the two read as one idea.
+
+The marker is deliberately not colour alone: the current tile's caption is also
+the only one at full `--ink`, and it carries `aria-current`. A marker a screen
+reader cannot see is half a marker — and `aria-current` is also the only part of
+it a test can assert without reaching into styled-components internals, which
+the panel's testing rule forbids.
+
+**Encounters as a table.** A three-column grid — mono date, nature, shiny glyph
+— replacing `14 Aug 2026 · relaxed · ✦`. A log is read down a column, and
+dot-separated text gives the eye no column to run down. The date column is fixed
+in `ch` so the natures line up whatever length the dates render at in the
+reader's locale.
+
+**One transition, on open.** 120ms of rise, so a record does not appear as a jump
+cut in the middle of the page. Nothing else animates: the chain and the log are
+information, and information that moves is harder to read. `prefers-reduced-
+motion` turns it off.
+
+The registry number stays `#3` rather than becoming `003`. Zero-padding only
+here would break step with the cells and the hero heading, and it would change
+the dialog's accessible name for no gain.
+
 ### What the tests can and cannot reach
 
 happy-dom implements `showModal()` and `close()`, so open, close, backdrop

@@ -1,20 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RARITY_FILTERS, spriteAlt, spriteUrl } from "./format.ts";
 import {
   Button,
   Caption,
   CatchList,
+  CatchMark,
   CatchRow,
+  CatchWhen,
   Cell,
   Chip,
+  DexChainLink,
   DexClose,
   DexDetail,
   DexDialog,
   DexFacts,
+  DexField,
+  DexFieldHead,
   DexGrid,
   DexHeading,
   DexLine,
   DexLineStage,
+  DexPlate,
+  DexRegister,
+  DexWhen,
   Dim,
   FilterRow,
   Row,
@@ -302,61 +310,88 @@ function Record({
         ✕
       </DexClose>
       <DexDetail>
-        <img
-          alt={spriteAlt(entry.name, entry.speciesId, entry.isShiny)}
-          src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
-          style={{ width: "96px", height: "96px", imageRendering: "pixelated" }}
-        />
-        <DexFacts>
-          {/* Number in front of the name, the way a Pokédex prints one, and by
-            the same two-slot rule the cell and the hero heading follow. */}
-          <DexHeading id={headingId}>
-            <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
-            {entry.name === null ? null : entry.name}
-          </DexHeading>
-          <Row>
-            <Chip>{entry.rarity}</Chip>
-            {entry.isShiny ? <ShinyChip>{SHINY} shiny</ShinyChip> : null}
-          </Row>
+        {/*
+          The specimen and what identifies it. Everything else the record knows
+          is below the rule — an identity and a log are different kinds of
+          thing, and separating them is what the flat column could not do.
+        */}
+        <DexPlate>
+          <img
+            alt={spriteAlt(entry.name, entry.speciesId, entry.isShiny)}
+            src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
+          />
+          <DexFacts>
+            {/* Number in front of the name, the way a Pokédex prints one, and by
+              the same two-slot rule the cell and the hero heading follow. */}
+            <DexHeading id={headingId}>
+              <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
+              {entry.name === null ? null : entry.name}
+            </DexHeading>
+            <Row>
+              <Chip>{entry.rarity}</Chip>
+              {entry.isShiny ? <ShinyChip>{SHINY} shiny</ShinyChip> : null}
+            </Row>
+          </DexFacts>
+        </DexPlate>
+
+        <DexRegister>
+          {/*
+            Which kind of date this is, said in the label rather than buried in
+            the value.
+
+            `firstCaughtExact` is false when no catch recorded an instant for
+            this stage — every graduation from before the instants were stored —
+            and `firstCaughtAt` is then the moment the *line* finished. For a
+            pre-evolution those are months apart, so labelling a graduation
+            "first caught" would date a Bulbasaur to its Venusaur.
+          */}
+          <DexField>
+            <DexFieldHead>
+              {entry.firstCaughtExact ? "first caught" : "line graduated"}
+            </DexFieldHead>
+            <DexWhen>{new Date(entry.firstCaughtAt).toLocaleDateString()}</DexWhen>
+          </DexField>
 
           {/*
-          Which kind of date this is, said rather than implied.
-
-          `firstCaughtExact` is false when no catch recorded an instant for this
-          stage — every graduation from before the instants were stored — and
-          `firstCaughtAt` is then the moment the *line* finished. For a
-          pre-evolution those are months apart, so printing "first caught" over
-          a graduation would date a Bulbasaur to its Venusaur. One word is
-          cheaper than the wrong fact.
-        */}
-          <Dim>
-            {entry.firstCaughtExact ? "first caught" : "line graduated"}{" "}
-            {new Date(entry.firstCaughtAt).toLocaleDateString()}
-          </Dim>
-
-          {/*
-          One line per branch this species was actually caught through, drawn as
-          it was stored rather than as the species cache currently resolves it.
-          A stage whose name has not been fetched shows its number, the same
-          fallback the grid uses, and fills in on a later poll.
-        */}
-          {linesOf(entry.catches).map((line) => (
-            <DexLine key={line.key}>
-              {line.stages.map((speciesId, index) => (
-                /* A well-formed line cannot repeat a species — `lineThrough`
-                 walks a tree — but `readDex` fails open and only drops chain
-                 members that are not numbers, so a corrupt row reaches here
-                 intact and `key={speciesId}` alone would be two identical keys:
-                 a React bug stacked on a data one. The index belongs in the key
-                 regardless, for the same reason it does in `GrowthTrack`: a
-                 line is ordered, and a stage *is* its position in it. */
-                // biome-ignore lint/suspicious/noArrayIndexKey: a stage is its position in the line
-                <DexLineStage key={`${speciesId}-${index}`}>
-                  <img
-                    alt={spriteAlt(names.get(speciesId) ?? null, speciesId, false)}
-                    src={spriteUrl(pluginId, speciesId, false)}
-                  />
-                  {/*
+            One line per branch this species was actually caught through, drawn
+            as it was stored rather than as the species cache currently resolves
+            it. A stage whose name has not been fetched shows its number, the
+            same fallback the grid uses, and fills in on a later poll.
+          */}
+          <DexField>
+            <DexFieldHead>
+              {linesOf(entry.catches).length > 1 ? "evolutions" : "evolution"}
+            </DexFieldHead>
+            {linesOf(entry.catches).map((line) => (
+              <DexLine key={line.key}>
+                {line.stages.map((speciesId, index) => (
+                  /* A well-formed line cannot repeat a species — `lineThrough`
+                   walks a tree — but `readDex` fails open and only drops chain
+                   members that are not numbers, so a corrupt row reaches here
+                   intact and `key={speciesId}` alone would be two identical
+                   keys: a React bug stacked on a data one. The index belongs in
+                   the key regardless, for the same reason it does in
+                   `GrowthTrack`: a line is ordered, and a stage *is* its
+                   position in it. */
+                  // biome-ignore lint/suspicious/noArrayIndexKey: a stage is its position in the line
+                  <Fragment key={`${speciesId}-${index}`}>
+                    {index === 0 ? null : <DexChainLink aria-hidden="true" />}
+                    {/* `aria-current` and not colour alone. The tile the
+                        record is about is marked by an accent border and a
+                        brighter caption, and neither of those reaches a screen
+                        reader — so the state that makes the chain worth drawing
+                        would have been visual-only. It is also the one part of
+                        the marker a test can assert without reaching into
+                        styled-components internals. */}
+                    <DexLineStage
+                      $here={speciesId === entry.speciesId}
+                      aria-current={speciesId === entry.speciesId ? "true" : undefined}
+                    >
+                      <img
+                        alt={spriteAlt(names.get(speciesId) ?? null, speciesId, false)}
+                        src={spriteUrl(pluginId, speciesId, false)}
+                      />
+                      {/*
                   Both, on every stage. This used to name whichever stage
                   matched `final_id` and number the rest, so a Venusaur's line
                   read `#1 → #2 → Venusaur` — and permanently, because no name
@@ -372,35 +407,51 @@ function Record({
                   Two slots again, so again not `speciesLabel`: it would render
                   `#1 #1` on a species the cache has not named.
                 */}
-                  <Caption>
-                    #{speciesId}
-                    {names.has(speciesId) ? ` ${names.get(speciesId)}` : ""}
-                  </Caption>
-                </DexLineStage>
-              ))}
-            </DexLine>
-          ))}
+                      <Caption>
+                        #{speciesId}
+                        {names.has(speciesId) ? ` ${names.get(speciesId)}` : ""}
+                      </Caption>
+                    </DexLineStage>
+                  </Fragment>
+                ))}
+              </DexLine>
+            ))}
+          </DexField>
 
           {/*
-          The individuals behind the species. Nature lives here rather than on
-          the cell because it belongs to one of them and not to all of them.
-        */}
-          <CatchList>
-            {entry.catches.map((taken) => (
-              <CatchRow key={taken.id}>
-                {/* The stage instant, falling back to the graduation for a row
-                  that never recorded one. Same rule as the heading above, per
-                  individual. */}
-                {new Date(taken.enteredAt ?? taken.caughtAt).toLocaleDateString()}
-                {/* Null for a graduation recorded before natures were stored,
-                  which is an absent fact rather than an unknown one — so
-                  nothing at all, rather than the word "unknown". */}
-                {taken.nature === null ? null : ` · ${taken.nature}`}
-                {taken.isShiny ? ` · ${SHINY}` : ""}
-              </CatchRow>
-            ))}
-          </CatchList>
-        </DexFacts>
+            The individuals behind the species. Nature lives here rather than on
+            the cell because it belongs to one of them and not to all of them.
+
+            A grid rather than the `date · nature · ✦` sentence this replaces: a
+            log is read down a column, and dot-separated text gives the eye no
+            column to run down.
+          */}
+          <DexField>
+            <DexFieldHead>
+              <span>{entry.catches.length === 1 ? "encounter" : "encounters"}</span>
+              {/* The count only above one, for the reason the cell suppresses
+                  `× 1`: a number that is always there stops being information. */}
+              {entry.catches.length > 1 ? <span>{entry.catches.length}</span> : null}
+            </DexFieldHead>
+            <CatchList>
+              {entry.catches.map((taken) => (
+                <CatchRow key={taken.id}>
+                  {/* The stage instant, falling back to the graduation for a row
+                      that never recorded one. Same rule as the field label
+                      above, per individual. */}
+                  <CatchWhen>
+                    {new Date(taken.enteredAt ?? taken.caughtAt).toLocaleDateString()}
+                  </CatchWhen>
+                  {/* Null for a graduation recorded before natures were stored,
+                      which is an absent fact rather than an unknown one — so an
+                      empty cell, rather than the word "unknown". */}
+                  <span>{taken.nature ?? ""}</span>
+                  {taken.isShiny ? <CatchMark>{SHINY}</CatchMark> : <span />}
+                </CatchRow>
+              ))}
+            </CatchList>
+          </DexField>
+        </DexRegister>
       </DexDetail>
     </DexDialog>
   );
