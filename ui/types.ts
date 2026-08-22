@@ -28,7 +28,16 @@ export type DexCatch = {
   isShiny: boolean;
   /** Null for a graduation recorded before natures were stored. */
   nature: string | null;
+  /** When the whole line graduated — the same instant for every species on it. */
   caughtAt: number;
+  /**
+   * When this individual reached *this* species, or null for never recorded.
+   *
+   * Null for a graduation from before the plugin stored stage instants, and for
+   * a stage that graduation had already passed when it started. The record
+   * falls back to `caughtAt` and says that is what it did.
+   */
+  enteredAt: number | null;
 };
 
 /**
@@ -46,7 +55,16 @@ export type DexSpecies = {
   /** True when **any** individual of this species was shiny. */
   isShiny: boolean;
   firstCaughtAt: number;
-  /** Newest first. */
+  /**
+   * Whether `firstCaughtAt` is when this species was reached, or a stand-in.
+   *
+   * False when no catch recorded an instant for this stage, in which case the
+   * date is the earliest *graduation* instead. For a pre-evolution the two can
+   * be months apart, so the panel names which one it is showing rather than
+   * presenting a graduation as a first sighting.
+   */
+  firstCaughtExact: boolean;
+  /** Newest first by stage instant. */
   catches: DexCatch[];
   /** Resolved from the plugin's own species cache, so null on a cold one. */
   name: string | null;

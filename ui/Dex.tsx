@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RARITY_FILTERS, spriteAlt, spriteUrl } from "./format.ts";
 import {
   Button,
@@ -7,7 +7,9 @@ import {
   CatchRow,
   Cell,
   Chip,
+  DexClose,
   DexDetail,
+  DexDialog,
   DexFacts,
   DexGrid,
   DexHeading,
@@ -42,6 +44,25 @@ const SHINY = "✦";
 export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; pluginId: string }) {
   const [rarityFilter, setRarityFilter] = useState<Rarity | null>(null);
   const [openId, setOpenId] = useState<number | null>(null);
+  /*
+    The cell that opened the record, so focus can go back to it.
+
+    Held rather than looked up again on close, because by then it may not be
+    findable: the grid re-renders while the dialog is open — a poll can add a
+    species, and the rarity filter can take this very cell off the grid — and
+    "the button whose accessible name matches" is not a stable handle across
+    that. The element itself is.
+  */
+  const opener = useRef<HTMLButtonElement | null>(null);
+
+  const close = useCallback(() => {
+    setOpenId(null);
+    // Restored by us rather than by the browser. `close()` returns focus to the
+    // invoker only when the dialog was opened by a form control targeting it;
+    // opened imperatively, focus lands back on `<body>` and the keyboard starts
+    // over at the top of the console.
+    opener.current?.focus();
+  }, []);
 
   /*
     Names by species id, built from the **whole** collection and never from
@@ -70,6 +91,9 @@ export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; plu
 
   const shown =
     rarityFilter === null ? entries : entries.filter((entry) => entry.rarity === rarityFilter);
+  // Found in `entries` rather than in `shown`, so a record stays open across a
+  // filter change that would have hidden its cell.
+  const open = entries.find((entry) => entry.speciesId === openId);
 
   return (
     <>
@@ -82,16 +106,13 @@ export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; plu
           <Button
             aria-pressed={rarityFilter === rarity}
             key={rarity ?? "all"}
-            onClick={() => {
-              setRarityFilter(rarity);
-              // The open record is cleared with the filter, because narrowing
-              // to "legendary" can take the open entry off the grid entirely.
-              // A detail panel describing a sprite that is no longer on screen
-              // is the same class of lie as a bag listing something it does not
-              // hold — and worse here, because the panel would sit under a grid
-              // of unrelated Pokémon looking like one of theirs.
-              setOpenId(null);
-            }}
+            // The open record is deliberately *not* cleared here any more.
+            // That rule existed because the detail lived in the grid, so
+            // filtering away the cell it sat under left it describing a sprite
+            // that was no longer on screen. A modal has no grid position to be
+            // orphaned from, and closing it would throw away what the operator
+            // was reading because they touched an unrelated control.
+            onClick={() => setRarityFilter(rarity)}
             type="button"
           >
             {rarity ?? "all"}
@@ -108,43 +129,44 @@ export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; plu
         <DexGrid>
           {shown.map((entry) => {
             const open = openId === entry.speciesId;
-            const detailId = `dex-detail-${entry.speciesId}`;
             return (
               /*
-                A keyed `Fragment`, and the bare array it replaces was a real
-                bug rather than a style preference.
+                One cell, keyed by species. The record used to be a sibling here
+                — the two were returned inside a keyed `Fragment`, because a bare
+                `[cell, detail]` array is reconciled by *position* and made the
+                grid index part of every cell's identity, remounting every sprite
+                whenever a species appeared on a poll.
 
-                Returning `[cell, detail]` looks keyed — both children carry
-                one — but React reconciles an *unkeyed nested array* as an
-                implicit fragment matched by position, so the outer index
-                became part of each cell's identity. A species appearing on a
-                poll then shifted every index after it and remounted the rest
-                of the grid: every sprite destroyed and refetched, and a
-                focused cell losing focus underneath the keyboard.
-
-                The fragment is transparent to the grid — it creates no DOM
-                node, so the cell and the detail stay direct children and the
-                `1 / -1` placement below is unaffected.
+                The record is a dialog now and no longer lives in the grid at
+                all, so the fragment has nothing to wrap. The key moves onto the
+                cell itself and the hazard is gone rather than handled.
               */
-              <Fragment key={entry.speciesId}>
-                <Cell
-                  $open={open}
-                  aria-controls={detailId}
-                  aria-expanded={open}
-                  onClick={() => setOpenId(open ? null : entry.speciesId)}
-                  type="button"
-                >
-                  <img
-                    // The species number stays in the alt text when there is no
-                    // name: an alt is read aloud in a sentence, and `#3` is not
-                    // a word.
-                    alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} ${
-                      entry.name ?? `species ${entry.speciesId}`
-                    }`}
-                    src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
-                    style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
-                  />
-                  {/*
+              <Cell
+                $open={open}
+                // `haspopup`, not `expanded`. The cell summons something that
+                // takes over the page rather than revealing a region that stays
+                // part of it, and `aria-expanded` would describe a containment
+                // relationship that does not exist. `aria-controls` goes with
+                // it: the dialog is not in the grid's subtree to be controlled.
+                aria-haspopup="dialog"
+                key={entry.speciesId}
+                onClick={(event) => {
+                  opener.current = event.currentTarget;
+                  setOpenId(entry.speciesId);
+                }}
+                type="button"
+              >
+                <img
+                  // The species number stays in the alt text when there is no
+                  // name: an alt is read aloud in a sentence, and `#3` is not
+                  // a word.
+                  alt={`${entry.rarity}${entry.isShiny ? " shiny" : ""} ${
+                    entry.name ?? `species ${entry.speciesId}`
+                  }`}
+                  src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
+                  style={{ width: "64px", height: "64px", imageRendering: "pixelated" }}
+                />
+                {/*
                     The number always, and the name only when there is one.
 
                     Not `speciesLabel`, which is the right helper where a single
@@ -155,9 +177,9 @@ export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; plu
                     again standing in for the name. A cell that repeats itself
                     reads as a rendering bug rather than as a cold cache.
                   */}
-                  <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
-                  {entry.name === null ? null : <Caption>{entry.name}</Caption>}
-                  {/*
+                <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
+                {entry.name === null ? null : <Caption>{entry.name}</Caption>}
+                {/*
                     Shininess and how many were caught, in one caption or none.
 
                     Nature used to sit here and no longer can: a cell is a
@@ -169,15 +191,23 @@ export function Dex({ entries, pluginId }: { entries: readonly DexSpecies[]; plu
                     stops being information — the interesting fact is the second
                     one, not the first.
                   */}
-                  {tally(entry) === null ? null : <Caption>{tally(entry)}</Caption>}
-                </Cell>
-                {open ? (
-                  <Detail entry={entry} id={detailId} names={names} pluginId={pluginId} />
-                ) : null}
-              </Fragment>
+                {tally(entry) === null ? null : <Caption>{tally(entry)}</Caption>}
+              </Cell>
             );
           })}
         </DexGrid>
+      )}
+
+      {/*
+        Outside the grid and outside the filter's empty branch, deliberately.
+        A record is modal, so it does not belong to a cell's position — and
+        rendering it inside the grid would tie its lifetime to whether its own
+        species currently passes the filter, which is the coupling the dialog
+        exists to remove. `open` is looked up against the whole collection for
+        the same reason.
+      */}
+      {open === undefined ? null : (
+        <Record entry={open} names={names} onClose={close} pluginId={pluginId} />
       )}
     </>
   );
@@ -212,66 +242,121 @@ function linesOf(catches: readonly DexCatch[]): Array<{ key: string; stages: num
 }
 
 /**
- * One species' record, sitting in the grid immediately after its own cell.
+ * One species' record, modal, in the top layer.
  *
- * A sibling of the cells rather than a child of one, which is what lets it span
- * every column — see `DexDetail` for why that placement needs no column count.
+ * Opened imperatively in an effect rather than with the `open` attribute, and
+ * the two are not equivalent: `open` renders a *non-modal* dialog, in flow, with
+ * no focus trap, no Escape, no backdrop and no inertness for the rest of the
+ * page. Only `showModal()` gives any of that. Mounting the component is what
+ * opens it, so the effect has no dependency but the ref.
+ *
+ * Escape is the browser's and is not exercised in the suite — happy-dom
+ * implements `showModal`/`close` but not the user-agent key handling — so
+ * `onClose` is wired to the element's own `close` event rather than to the
+ * buttons alone. That way every route out, including the one the tests cannot
+ * press, goes through the same place.
  */
-function Detail({
+function Record({
   entry,
-  id,
   names,
+  onClose,
   pluginId,
 }: {
   entry: DexSpecies;
-  id: string;
   names: ReadonlyMap<number, string>;
+  onClose: () => void;
   pluginId: string;
 }) {
+  const dialog = useRef<HTMLDialogElement | null>(null);
+  const headingId = `dex-record-${entry.speciesId}`;
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    element.showModal();
+    return () => {
+      // Closed on unmount as well as by the close event. Without this a record
+      // whose species vanished from the collection mid-poll would leave a
+      // top-layer element behind with nothing rendering into it.
+      if (element.open) element.close();
+    };
+  }, []);
+
   return (
-    <DexDetail id={id}>
-      <img
-        alt={spriteAlt(entry.name, entry.speciesId, entry.isShiny)}
-        src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
-        style={{ width: "96px", height: "96px", imageRendering: "pixelated" }}
-      />
-      <DexFacts>
-        {/* Number in front of the name, the way a Pokédex prints one, and by
+    <DexDialog
+      aria-labelledby={headingId}
+      onClick={(event) => {
+        // The backdrop is the dialog element's own box; the card inside it is
+        // `DexDetail`. So a click whose target *is* the dialog landed outside
+        // the card — which is what "clicking the backdrop" means. Comparing
+        // against `currentTarget` rather than checking `contains` is what keeps
+        // a click on the heading from dismissing the record.
+        if (event.target === event.currentTarget) onClose();
+      }}
+      // Fires for the close button, for Escape, and for `close()` — so the
+      // panel's state cannot drift out of step with the element's.
+      onClose={onClose}
+      ref={dialog}
+    >
+      <DexClose aria-label="Close" onClick={onClose} type="button">
+        ✕
+      </DexClose>
+      <DexDetail>
+        <img
+          alt={spriteAlt(entry.name, entry.speciesId, entry.isShiny)}
+          src={spriteUrl(pluginId, entry.speciesId, entry.isShiny)}
+          style={{ width: "96px", height: "96px", imageRendering: "pixelated" }}
+        />
+        <DexFacts>
+          {/* Number in front of the name, the way a Pokédex prints one, and by
             the same two-slot rule the cell and the hero heading follow. */}
-        <DexHeading>
-          <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
-          {entry.name === null ? null : entry.name}
-        </DexHeading>
-        <Row>
-          <Chip>{entry.rarity}</Chip>
-          {entry.isShiny ? <ShinyChip>{SHINY} shiny</ShinyChip> : null}
-        </Row>
+          <DexHeading id={headingId}>
+            <SpeciesNumber>#{entry.speciesId}</SpeciesNumber>
+            {entry.name === null ? null : entry.name}
+          </DexHeading>
+          <Row>
+            <Chip>{entry.rarity}</Chip>
+            {entry.isShiny ? <ShinyChip>{SHINY} shiny</ShinyChip> : null}
+          </Row>
 
-        <Dim>first caught {new Date(entry.firstCaughtAt).toLocaleDateString()}</Dim>
+          {/*
+          Which kind of date this is, said rather than implied.
 
-        {/*
+          `firstCaughtExact` is false when no catch recorded an instant for this
+          stage — every graduation from before the instants were stored — and
+          `firstCaughtAt` is then the moment the *line* finished. For a
+          pre-evolution those are months apart, so printing "first caught" over
+          a graduation would date a Bulbasaur to its Venusaur. One word is
+          cheaper than the wrong fact.
+        */}
+          <Dim>
+            {entry.firstCaughtExact ? "first caught" : "line graduated"}{" "}
+            {new Date(entry.firstCaughtAt).toLocaleDateString()}
+          </Dim>
+
+          {/*
           One line per branch this species was actually caught through, drawn as
           it was stored rather than as the species cache currently resolves it.
           A stage whose name has not been fetched shows its number, the same
           fallback the grid uses, and fills in on a later poll.
         */}
-        {linesOf(entry.catches).map((line) => (
-          <DexLine key={line.key}>
-            {line.stages.map((speciesId, index) => (
-              /* A well-formed line cannot repeat a species — `lineThrough`
+          {linesOf(entry.catches).map((line) => (
+            <DexLine key={line.key}>
+              {line.stages.map((speciesId, index) => (
+                /* A well-formed line cannot repeat a species — `lineThrough`
                  walks a tree — but `readDex` fails open and only drops chain
                  members that are not numbers, so a corrupt row reaches here
                  intact and `key={speciesId}` alone would be two identical keys:
                  a React bug stacked on a data one. The index belongs in the key
                  regardless, for the same reason it does in `GrowthTrack`: a
                  line is ordered, and a stage *is* its position in it. */
-              // biome-ignore lint/suspicious/noArrayIndexKey: a stage is its position in the line
-              <DexLineStage key={`${speciesId}-${index}`}>
-                <img
-                  alt={spriteAlt(names.get(speciesId) ?? null, speciesId, false)}
-                  src={spriteUrl(pluginId, speciesId, false)}
-                />
-                {/*
+                // biome-ignore lint/suspicious/noArrayIndexKey: a stage is its position in the line
+                <DexLineStage key={`${speciesId}-${index}`}>
+                  <img
+                    alt={spriteAlt(names.get(speciesId) ?? null, speciesId, false)}
+                    src={spriteUrl(pluginId, speciesId, false)}
+                  />
+                  {/*
                   Both, on every stage. This used to name whichever stage
                   matched `final_id` and number the rest, so a Venusaur's line
                   read `#1 → #2 → Venusaur` — and permanently, because no name
@@ -287,32 +372,36 @@ function Detail({
                   Two slots again, so again not `speciesLabel`: it would render
                   `#1 #1` on a species the cache has not named.
                 */}
-                <Caption>
-                  #{speciesId}
-                  {names.has(speciesId) ? ` ${names.get(speciesId)}` : ""}
-                </Caption>
-              </DexLineStage>
-            ))}
-          </DexLine>
-        ))}
+                  <Caption>
+                    #{speciesId}
+                    {names.has(speciesId) ? ` ${names.get(speciesId)}` : ""}
+                  </Caption>
+                </DexLineStage>
+              ))}
+            </DexLine>
+          ))}
 
-        {/*
+          {/*
           The individuals behind the species. Nature lives here rather than on
           the cell because it belongs to one of them and not to all of them.
         */}
-        <CatchList>
-          {entry.catches.map((taken) => (
-            <CatchRow key={taken.id}>
-              {new Date(taken.caughtAt).toLocaleDateString()}
-              {/* Null for a graduation recorded before natures were stored,
+          <CatchList>
+            {entry.catches.map((taken) => (
+              <CatchRow key={taken.id}>
+                {/* The stage instant, falling back to the graduation for a row
+                  that never recorded one. Same rule as the heading above, per
+                  individual. */}
+                {new Date(taken.enteredAt ?? taken.caughtAt).toLocaleDateString()}
+                {/* Null for a graduation recorded before natures were stored,
                   which is an absent fact rather than an unknown one — so
                   nothing at all, rather than the word "unknown". */}
-              {taken.nature === null ? null : ` · ${taken.nature}`}
-              {taken.isShiny ? ` · ${SHINY}` : ""}
-            </CatchRow>
-          ))}
-        </CatchList>
-      </DexFacts>
-    </DexDetail>
+                {taken.nature === null ? null : ` · ${taken.nature}`}
+                {taken.isShiny ? ` · ${SHINY}` : ""}
+              </CatchRow>
+            ))}
+          </CatchList>
+        </DexFacts>
+      </DexDetail>
+    </DexDialog>
   );
 }

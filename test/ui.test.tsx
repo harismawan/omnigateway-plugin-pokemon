@@ -199,7 +199,10 @@ type DexCatch = {
   chainOrder: number[];
   isShiny: boolean;
   nature: string | null;
+  /** When the whole line graduated. */
   caughtAt: number;
+  /** When this individual reached this species, or null for never recorded. */
+  enteredAt: number | null;
 };
 
 type DexSpecies = {
@@ -208,6 +211,8 @@ type DexSpecies = {
   /** True when any individual of this species was shiny. */
   isShiny: boolean;
   firstCaughtAt: number;
+  /** False when `firstCaughtAt` is a graduation standing in for a stage instant. */
+  firstCaughtExact: boolean;
   catches: DexCatch[];
   /** Resolved from the plugin's own cache, so null on a cold one. */
   name: string | null;
@@ -251,6 +256,9 @@ function dexCatch(patch: Partial<DexCatch> = {}): DexCatch {
     // Distinct from every id and species number in the fixture, so a row that
     // renders the wrong field is visible rather than coincidentally right.
     caughtAt: 1_700_000_000_777,
+    // Distinct again from `caughtAt`, so a row printing the graduation where
+    // the stage instant belongs is visible rather than coincidentally right.
+    enteredAt: 1_700_000_000_555,
     ...patch,
   };
 }
@@ -264,6 +272,9 @@ function dexSpecies(patch: Partial<DexSpecies> = {}): DexSpecies {
     // visible. A species with two catches gets neither of these by default —
     // the tests that care set all three.
     firstCaughtAt: 1_700_000_000_111,
+    // Exact by default: the ordinary case once instants are being recorded. The
+    // tests about legacy graduations set it false.
+    firstCaughtExact: true,
     catches: [dexCatch()],
     // Unnamed by default, which is the cold cache and the offline install. The
     // tests that care about names set one; every other assertion in this file
@@ -1487,6 +1498,61 @@ describe("a Pokédex record", () => {
     ).toBeTruthy();
   });
 
+  test("says a date is the graduation when the stage instant was never recorded", async () => {
+    // Every Pokémon caught before the instants were stored reads this way. The
+    // date is real but it is the wrong *kind* of date — the moment the line
+    // finished, not the moment this species was reached — and a record that
+    // printed "first caught" over it would be presenting a Venusaur's date as a
+    // Bulbasaur's. Saying which it is costs a word and buys the difference.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          firstCaughtExact: false,
+          catches: [dexCatch({ id: "c1", enteredAt: null, caughtAt: Date.UTC(2024, 0, 15) })],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    const when = new Date(Date.UTC(2024, 0, 15)).toLocaleDateString();
+    expect(screen.getByText(`line graduated ${when}`)).toBeTruthy();
+    expect(screen.queryByText(`first caught ${when}`)).toBeNull();
+  });
+
+  test("dates a catch from the stage it reached, not the line it finished", async () => {
+    // The per-catch half of the same rule, and the one a fixture can get wrong
+    // silently: `enteredAt` and `caughtAt` are different days here, so a row
+    // printing the graduation is visible.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          catches: [
+            dexCatch({
+              id: "c1",
+              nature: "modest",
+              enteredAt: Date.UTC(2024, 0, 15),
+              caughtAt: Date.UTC(2024, 6, 30),
+            }),
+          ],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    expect(
+      screen.getByText(`${new Date(Date.UTC(2024, 0, 15)).toLocaleDateString()} · modest`),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(new RegExp(new Date(Date.UTC(2024, 6, 30)).toLocaleDateString())),
+    ).toBeNull();
+  });
+
   test("dates each catch from its own instant", async () => {
     // The history rows carry a date each and nothing asserted them, so a record
     // that printed `firstCaughtAt` on every row — or dropped the date from the
@@ -1500,8 +1566,18 @@ describe("a Pokédex record", () => {
           name: "Venusaur",
           firstCaughtAt: Date.UTC(2024, 0, 15),
           catches: [
-            dexCatch({ id: "c1", nature: "modest", caughtAt: Date.UTC(2026, 5, 1) }),
-            dexCatch({ id: "c2", nature: "adamant", caughtAt: Date.UTC(2025, 2, 9) }),
+            dexCatch({
+              id: "c1",
+              nature: "modest",
+              enteredAt: Date.UTC(2026, 5, 1),
+              caughtAt: Date.UTC(2026, 5, 1),
+            }),
+            dexCatch({
+              id: "c2",
+              nature: "adamant",
+              enteredAt: Date.UTC(2025, 2, 9),
+              caughtAt: Date.UTC(2025, 2, 9),
+            }),
           ],
         }),
       ],
@@ -1952,16 +2028,23 @@ describe("a Dex record opened", () => {
     catches: [dexCatch({ id: "c1", chainOrder: [172, 25, 26], nature: "brave" })],
   });
 
-  test("shows the record the grid has no room for", async () => {
+  test("shows the record the grid has no room for, in a modal dialog", async () => {
     renderCompanion(serving(view({ dex: [raichu] })));
     await openCompanion();
 
     const cell = await screen.findByRole("button", { name: /Raichu/ });
-    expect(cell.getAttribute("aria-expanded")).toBe("false");
+    // A dialog is not a disclosure: the cell summons something that takes over
+    // the page rather than revealing a region that stays part of it. Nothing is
+    // expanded, so `aria-expanded` would be a lie about the relationship.
+    expect(cell.getAttribute("aria-expanded")).toBeNull();
+    expect(cell.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     await userEvent.click(cell);
 
-    expect(cell.getAttribute("aria-expanded")).toBe("true");
+    // Named by the species, so a screen reader announces which record opened
+    // rather than "dialog".
+    expect(screen.getByRole("dialog", { name: "#26 Raichu" })).toBeTruthy();
     // The whole line, not only the form it graduated as. Neither earlier stage
     // is in this fixture's collection, so neither has a name and both fall back
     // to a bare number — the same fallback the grid uses.
@@ -1974,24 +2057,65 @@ describe("a Dex record opened", () => {
     expect(screen.getAllByText("rare")).toHaveLength(2);
   });
 
-  test("closes when the same record is clicked again", async () => {
+  test("closes on its own close control", async () => {
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("closes when the backdrop is clicked", async () => {
+    // A click that lands on the dialog element itself rather than on its
+    // contents is a click on the backdrop — the top-layer box fills the
+    // viewport and the panel inside it is what the eye reads as "the dialog".
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    await userEvent.click(screen.getByRole("dialog"));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("a click inside the record does not close it", async () => {
+    // The other half of the backdrop rule, and the half that breaks: a handler
+    // on the dialog that does not check the target dismisses the record the
+    // moment somebody clicks its heading.
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    await userEvent.click(screen.getByRole("heading", { name: "#26 Raichu" }));
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
+  test("gives focus back to the cell that opened it", async () => {
+    // Without this the keyboard lands back at the top of the document and an
+    // operator has to tab through the whole panel to reach the next cell. React
+    // re-renders the grid while the dialog is open, so the element has to be
+    // held by ref rather than found again afterwards.
     renderCompanion(serving(view({ dex: [raichu] })));
     await openCompanion();
 
     const cell = await screen.findByRole("button", { name: /Raichu/ });
     await userEvent.click(cell);
-    expect(screen.getByText("#172")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
-    await userEvent.click(cell);
-    expect(cell.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("#172")).toBeNull();
+    expect(document.activeElement).toBe(cell);
   });
 
-  test("closes when a filter could take the open record off the grid", async () => {
-    // A detail panel describing a sprite that is no longer on screen is the
-    // same class of lie as a bag listing something it does not hold — and worse
-    // here, because it would sit under a grid of unrelated Pokémon looking like
-    // one of theirs.
+  test("stays open when a filter would have taken its cell off the grid", async () => {
+    // The rule that expand-in-place needed and a dialog does not. A detail
+    // placed *in* the grid was orphaned when a filter removed the cell it sat
+    // under, so the selection had to be cleared; a modal has no grid position
+    // to be orphaned from, and closing it would discard what the operator was
+    // reading because they touched an unrelated control.
     renderCompanion(
       serving(
         view({
@@ -2002,12 +2126,9 @@ describe("a Dex record opened", () => {
     await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
-    expect(screen.getByText("#172")).toBeTruthy();
-
     await userEvent.click(screen.getByRole("button", { name: "common" }));
 
-    expect(screen.queryByText("#172")).toBeNull();
-    expect(screen.queryByText(/brave/)).toBeNull();
+    expect(screen.getByRole("dialog", { name: "#26 Raichu" })).toBeTruthy();
   });
 });
 

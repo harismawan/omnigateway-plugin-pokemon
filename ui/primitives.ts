@@ -644,28 +644,82 @@ export const FilterRow = styled(Row)`
 `;
 
 /**
- * One graduate's whole record, opened in place.
+ * One species' whole record, in the top layer.
  *
- * `1 / -1` is what makes this work without measuring anything. Auto-placement
- * cannot start a full-width item part-way along a row, so a cell spanning every
- * column drops to the next row line by itself — which means the detail always
- * appears directly beneath the cell that opened it, under `auto-fill`, at any
- * container width, with no column count to compute and no `ResizeObserver` to
- * keep in step with one.
+ * A native `<dialog>` opened with `showModal`, which replaces a detail that was
+ * placed into the grid at `grid-column: 1 / -1`. That trick was a good answer to
+ * the question it was asked — it put the record under its own cell at any width
+ * with no column count and no `ResizeObserver` — but it accepted two costs to do
+ * it: the row went ragged while the record was open, and the grid reflowed
+ * vertically under the reader every time one was. A dialog is out of flow
+ * entirely, so both simply stop existing.
  *
- * The cost is that non-dense flow does not backfill: the slots to the right of
- * the selected cell stay empty while this is open. That gap is the selection
- * pointing at its own panel, and it is cheaper than the alternative, which is
- * knowing how many columns there are.
+ * Native rather than a `div` with `role="dialog"`, and the difference is not
+ * cosmetic. `showModal` puts this in the top layer, above every stacking context
+ * on the page without a `z-index` to lose an argument with; it traps focus; it
+ * closes on Escape; and it makes the rest of the document inert. Hand-rolling
+ * that is a well-known way to ship a keyboard trap that only goes one way.
+ *
+ * `::backdrop` is styled rather than left to the user agent's default, which is
+ * an opaque-ish black that ignores the console's theme. `color-mix` against
+ * `--panel-sunk` keeps it in whichever theme is loaded — the panel's rule is
+ * that a hardcoded colour is the one thing on the page that will not follow the
+ * theme, and a full-viewport wash is a conspicuous place to break it.
+ */
+export const DexDialog = styled.dialog`
+  /* The close control anchors to this box rather than to the viewport, which is
+     what an absolutely-positioned child of a top-layer element gets otherwise. */
+  position: relative;
+  margin: auto;
+  max-width: min(560px, calc(100vw - ${SPACE.lg} * 2));
+  padding: 0;
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  color: var(--ink);
+
+  &::backdrop {
+    background: color-mix(in srgb, var(--panel-sunk) 70%, transparent);
+  }
+`;
+
+/**
+ * The record itself, inside the dialog's box.
+ *
+ * A child rather than the dialog's own padding, because the backdrop test is
+ * "did the click land on the dialog element itself" — and an element with
+ * padding has a region that belongs to it but reads to the eye as inside the
+ * card. Giving the contents their own box makes the hit areas match what is
+ * drawn.
  */
 export const DexDetail = styled.div`
-  grid-column: 1 / -1;
   display: flex;
   gap: ${SPACE.lg};
   padding: ${SPACE.md};
-  background: var(--panel-sunk);
-  border: 1px solid var(--rule);
-  border-radius: 8px;
+`;
+
+/** The record's dismiss control, top-right of the dialog. */
+export const DexClose = styled.button`
+  position: absolute;
+  top: ${SPACE.sm};
+  right: ${SPACE.sm};
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-dim);
+  font: inherit;
+  line-height: 1;
+  padding: 2px ${SPACE.xs};
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ink);
+    border-color: var(--rule);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 `;
 
 /** The right-hand column of a detail: everything the sprite cannot say. */
