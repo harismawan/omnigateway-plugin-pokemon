@@ -314,18 +314,61 @@ test("an offline or 404 item sprite returns null rather than throwing", async ()
   expect(store.size).toBe(0);
 });
 
-test("the sprite map names every shop item and nothing else", () => {
+/**
+ * The keys that are art without being merchandise.
+ *
+ * Two now rather than one, and they are not interchangeable. `egg` is the icon
+ * on a shop card — the thing an operator buys, priced beside it. `incubating` is
+ * the 192px figure of a companion that has not hatched, which is a state and not
+ * a purchase. They are deliberately different art for the same reason the panel
+ * keeps an unreadable save and an egg apart: two facts that render identically
+ * are two facts an operator cannot tell apart.
+ */
+const NON_ITEM_SPRITES = ["egg", "incubating"] as const;
+
+test("the sprite map names every shop item, the egg, and nothing else", () => {
   // Both directions, and they fail differently. A name in here the shop does
   // not sell is a URL this plugin fetches for nothing. An item the shop sells
   // that is *not* in here is a route that answers 404 for the life of the
   // install, which the panel's emoji fallback hides everywhere except the
   // browser console — `mint` shipped that way for a release.
   for (const item of ITEM_SPRITE_NAMES.keys()) {
-    expect(ITEM_KINDS.includes(item as ItemKind) || item === "egg").toBe(true);
+    const allowed =
+      ITEM_KINDS.includes(item as ItemKind) ||
+      NON_ITEM_SPRITES.includes(item as (typeof NON_ITEM_SPRITES)[number]);
+    expect(allowed).toBe(true);
   }
   for (const item of ITEM_KINDS) {
     expect(ITEM_SPRITE_NAMES.get(item)).toBeTypeOf("string");
   }
+  // The allowance is a list rather than a wildcard, so each entry still has to
+  // be real. Widening it without adding the art would otherwise pass silently.
+  for (const name of NON_ITEM_SPRITES) {
+    expect(ITEM_SPRITE_NAMES.get(name)).toBeTypeOf("string");
+  }
+});
+
+test("the incubating egg and the shop's egg are different art", () => {
+  // The whole point of a second key. If a rename ever collapses these onto one
+  // sprite, the hero's 192px egg becomes the shop's 32px icon blown up — and
+  // the panel stops distinguishing "your companion is incubating" from "here is
+  // an egg you can buy".
+  expect(ITEM_SPRITE_NAMES.get("incubating")).toBe("mystery-egg");
+  expect(ITEM_SPRITE_NAMES.get("egg")).toBe("lucky-egg");
+  expect(ITEM_SPRITE_NAMES.get("incubating")).not.toBe(ITEM_SPRITE_NAMES.get("egg"));
+});
+
+test("the incubating egg is fetched and cached like any other icon", async () => {
+  // It goes through the same closed-map gate as the items, so this is really a
+  // check that adding a non-item key did not need a second code path.
+  const { files, store } = memoryFiles();
+  const { net, calls } = stubNet(() => new Response(PNG));
+
+  const bytes = await itemSpriteBytes(deps(net, files), "incubating");
+
+  expect(bytes).toEqual(PNG);
+  expect(calls).toEqual([`${ITEM_SPRITE_BASE}/mystery-egg.png`]);
+  expect(store.get("sprites/items/mystery-egg.png")).toEqual(PNG);
 });
 
 test("the three substituted icons name the sprites that were chosen for them", async () => {

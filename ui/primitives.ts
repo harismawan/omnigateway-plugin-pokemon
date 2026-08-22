@@ -326,7 +326,21 @@ export const Sprite = styled.img`
   image-rendering: pixelated;
 `;
 
-/** An egg, drawn rather than fetched — there is no sprite for one. */
+/**
+ * An egg, drawn — now the *fallback* for one that could not be fetched.
+ *
+ * It used to be the only egg there was, on the reasoning that the species
+ * sprite route parses its parameter as an integer so `/sprite/egg` is a
+ * guaranteed 400. That is still true; what changed is that the *item* sprite
+ * route looks its parameter up in a closed map, and the map now has an entry
+ * for an unhatched companion. So the egg is fetched like everything else and
+ * this shape is what shows when it cannot be: a cold cache on first paint, or
+ * an install with no `net` where the route answers 503 forever.
+ *
+ * Which is why it keeps its full 192px rather than shrinking to match the
+ * artwork below. It is a drawn shape and not a picture of one — the box *is*
+ * the graphic — so it should fill the slot the sprite is centred in.
+ */
 export const EggMark = styled.div`
   box-sizing: border-box;
   width: ${COMPANION_SIZE};
@@ -334,6 +348,36 @@ export const EggMark = styled.div`
   border-radius: 50% 50% 45% 45%;
   background: var(--panel-sunk);
   border: 2px solid var(--rule-strong);
+`;
+
+/**
+ * The fetched egg, and the reason it is 180px rather than 192px.
+ *
+ * Upstream has no large egg art: `sprites/pokemon/` holds none at all, and both
+ * egg files under `sprites/items/` are **30×30**. At `COMPANION_SIZE` that is a
+ * 6.4× upscale, and nearest-neighbour turns a fractional scale into alternating
+ * six- and seven-pixel source pixels — the same lumpiness the 192px figure was
+ * chosen to avoid for the 96px species sprites, arrived at from the other
+ * direction. 30 × 6 = 180 is exact.
+ *
+ * The *slot* stays `COMPANION_SIZE`, so an egg and a hatched companion occupy
+ * the same space and the roster does not reflow the moment one hatches. The
+ * image is centred in it; the twelve pixels of margin are invisible against a
+ * transparent PNG.
+ */
+export const EggSlot = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: ${COMPANION_SIZE};
+  height: ${COMPANION_SIZE};
+`;
+
+export const EggImage = styled.img`
+  width: 180px;
+  height: 180px;
+  image-rendering: pixelated;
 `;
 
 /**

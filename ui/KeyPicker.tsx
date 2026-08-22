@@ -1,11 +1,11 @@
 import { useState } from "react";
+import { EggSprite } from "./EggSprite.tsx";
 import { activityOf, formatTokens, speciesLabel, spriteAlt, spriteUrl } from "./format.ts";
 import {
   BrokenMark,
   Button,
   Chip,
   Dim,
-  EggMark,
   KeyCard,
   KeyId,
   Lede,
@@ -118,7 +118,7 @@ function RosterCard({
       {entry.unreadable ? (
         <BrokenMark aria-label="This key's save could not be read" role="img" />
       ) : entry.speciesId === null ? (
-        <EggMark aria-label="An egg, not yet hatched" role="img" />
+        <EggSprite pluginId={pluginId} />
       ) : (
         <Sprite
           alt={spriteAlt(entry.name, entry.speciesId, entry.isShiny)}

@@ -1,10 +1,10 @@
+import { EggSprite } from "./EggSprite.tsx";
 import { type Activity, formatTokens, spriteAlt, spriteUrl } from "./format.ts";
 import { GrowthTrack, trackValueText } from "./GrowthTrack.tsx";
 import {
   Button,
   Chip,
   ChipRow,
-  EggMark,
   Fact,
   HeroName,
   Row,
@@ -50,12 +50,17 @@ export function Hero({
     <>
       <Row>
         {/*
-          An egg is drawn, never fetched. The sprite route parses its parameter
-          as an integer, so `/sprite/egg` was a guaranteed 400 and a broken-image
-          icon on every unhatched companion.
+          Fetched now, through the *item* sprite route rather than the species
+          one. The distinction is the whole reason this is possible: the species
+          route parses its parameter as an integer, so `/sprite/egg` was a
+          guaranteed 400 and a broken-image icon on every unhatched companion —
+          whereas the item route looks its parameter up in a closed map, which
+          now has an entry for an incubating companion. `EggSprite` still falls
+          back to the drawn mark, so the 400 that used to be certain is now an
+          egg either way.
         */}
         {speciesId === null ? (
-          <EggMark aria-label="An egg, not yet hatched" role="img" />
+          <EggSprite pluginId={pluginId} />
         ) : (
           <Sprite
             alt={spriteAlt(view.name, speciesId, active?.isShiny === true)}

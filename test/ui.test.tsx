@@ -29,7 +29,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Dex } from "../ui/Dex.tsx";
-import { itemSpriteUrl } from "../ui/format.ts";
+import { eggSpriteUrl, itemSpriteUrl } from "../ui/format.ts";
 import companionUi, { activityOf } from "../ui/index.tsx";
 
 const Companion = companionUi.mount;
@@ -1596,6 +1596,70 @@ describe("an item icon", () => {
     // Every egg tier shares one icon: the guarantee is a fact about the offer,
     // carried by the chip, not by the artwork.
     expect(itemSpriteUrl("pokemon", "egg")).toBe("/api/plugins/pokemon/item-sprite/egg");
+  });
+});
+
+describe("an incubating egg", () => {
+  test("asks for the incubating sprite, not the shop's egg icon", async () => {
+    // The "ask for the right thing" half, asserted without a renderer for the
+    // reason the item icon's URL test is: happy-dom fires `error` on every
+    // `img` the moment it attaches, so the loaded state cannot be observed here
+    // at all and only the fallback survives.
+    //
+    // Two keys and not one, deliberately. `egg` is the 32px icon on a shop card
+    // beside a price; `incubating` is the 192px figure of a companion that has
+    // not hatched. Collapsing them would draw the offer and the thing it
+    // produces identically.
+    // `eggSpriteUrl` and not `itemSpriteUrl("incubating")`: asserting the latter
+    // would only prove the URL builder concatenates, which it already has a
+    // test for. This is the function `EggSprite` actually calls, so a rename of
+    // the sprite key cannot pass here and 404 in the panel.
+    expect(eggSpriteUrl("pokemon")).toBe("/api/plugins/pokemon/item-sprite/incubating");
+    expect(eggSpriteUrl("pokemon")).not.toBe(itemSpriteUrl("pokemon", "egg"));
+  });
+
+  test("falls back to the drawn mark, keeping the name a reader hears", async () => {
+    // The "cope when it is not there" half, and it covers the two absences that
+    // matter: a cold cache, where the route 404s on first paint and fills in on
+    // a later poll, and an install without `net`, where it answers 503 and no
+    // art is ever coming. An unhatched companion must never be a broken-image
+    // icon — that is the failure the drawn mark existed for in the first place.
+    renderCompanion(
+      serving(view({ state: { active: null, eggUsage: 0, eggTier: null, inventory: {} } })),
+    );
+    await openCompanion();
+
+    // The accessible name is unchanged whichever branch renders, so a screen
+    // reader cannot tell that the artwork moved.
+    expect(await screen.findByRole("img", { name: "An egg, not yet hatched" })).toBeTruthy();
+    // Replaced, not covered: an image left in the tree is one still asking the
+    // gateway for a sprite that is never coming.
+    expect(document.querySelector('img[src*="item-sprite/incubating"]')).toBeNull();
+  });
+
+  test("an unreadable save on the roster is still not an egg", async () => {
+    // The guard, and the one confusion this plugin refuses to make anywhere.
+    // Giving the egg real artwork must not tempt the roster into drawing a save
+    // it could not read as a companion that merely has not hatched — both are
+    // `speciesId: null`, so the only thing keeping them apart is the branch
+    // order in `KeyPicker`.
+    // Two keys, so the panel stays on the roster instead of opening the only
+    // one — and the hatched second key is what proves the assertion below is
+    // about the broken card rather than about an empty screen.
+    renderCompanion({
+      [GET_ROSTER]: () => ({
+        body: {
+          keys: [
+            rosterKey({ apiKeyId: "key_broken", unreadable: true, speciesId: null, name: null }),
+            rosterKey({ apiKeyId: "key_b", name: "Snorlax" }),
+          ],
+        },
+      }),
+      [GET_KEY]: () => ({ body: view() }),
+    });
+
+    expect(await screen.findByText("Save unreadable")).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "An egg, not yet hatched" })).toBeNull();
   });
 });
 
