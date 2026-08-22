@@ -201,6 +201,39 @@ test("catches sharing a millisecond come back in the same order whichever way th
   expect(collect([two, one])[0]?.catches.map((entry) => entry.id)).toEqual(["aaa", "bbb"]);
 });
 
+test("ids are ordered by code unit, not by the host's collation", () => {
+  // The rule the module states and the one nothing else here enforces: two
+  // catches tied on the millisecond are separated by `byId`, and `byId` must
+  // not be `localeCompare`. That one reads the runtime's default collation,
+  // which makes the tie-break a property of the host rather than of the data.
+  //
+  // These two ids are what makes the difference visible, and they are the shape
+  // `dexId` actually produces: `key:base:final:now:sequence`. A digit is code
+  // unit 48-57 and `:` is 58, so code-unit ordering puts `1:3:` *after* `133:`;
+  // CLDR root collation puts punctuation below digits and answers the other
+  // way. Every other id pair in this file agrees under both, which is why a
+  // realistic pair is needed rather than "aaa" and "bbb".
+  //
+  // Honest about its reach: on a Bun built without full ICU, `localeCompare`
+  // degrades to code-unit order and this test would pass against it. That
+  // asymmetry is itself the argument for not using `localeCompare`.
+  const low = row({ id: "k1:1:3:1755800000000:7", caughtAt: 5_000_000 });
+  const high = row({ id: "k1:133:134:1755800000000:8", caughtAt: 5_000_000 });
+
+  // `133…` sorts first by code unit. Both directions, because a rule that
+  // depends on input order passes whichever one the fixture happens to use.
+  const expected = ["k1:133:134:1755800000000:8", "k1:1:3:1755800000000:7"];
+  expect(collect([low, high])[0]?.catches.map((entry) => entry.id)).toEqual(expected);
+  expect(collect([high, low])[0]?.catches.map((entry) => entry.id)).toEqual(expected);
+
+  // And the same comparison settles `rarity`, so the lower id by that ordering
+  // is the one whose rarity survives.
+  const uncommon = row({ ...low, rarity: "uncommon" });
+  const legendary = row({ ...high, rarity: "legendary" });
+  expect(collect([uncommon, legendary])[0]?.rarity).toBe("legendary");
+  expect(collect([legendary, uncommon])[0]?.rarity).toBe("legendary");
+});
+
 test("an empty log collects nothing", () => {
   // A key that has graduated nothing has an empty case, which the panel draws
   // as its own state rather than as a filter that hid everything.

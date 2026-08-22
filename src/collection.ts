@@ -90,7 +90,7 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
   type Accumulating = {
     rarity: string;
     isShiny: boolean;
-    first: { id: string; caughtAt: number };
+    first: Stamped;
     catches: Catch[];
   };
   const bySpecies = new Map<number, Accumulating>();
@@ -163,10 +163,20 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
  * chose. The id is not chronological and does not need to be; what it has to
  * be is the same on every read, so a detail does not reshuffle on a poll.
  */
-function earlier(entry: DexEntry, first: { id: string; caughtAt: number }): boolean {
-  if (entry.caughtAt !== first.caughtAt) return entry.caughtAt < first.caughtAt;
-  return byId(entry.id, first.id) < 0;
+function earlier(a: Stamped, b: Stamped): boolean {
+  if (a.caughtAt !== b.caughtAt) return a.caughtAt < b.caughtAt;
+  return byId(a.id, b.id) < 0;
 }
+
+/**
+ * The two fields that decide which catch is first.
+ *
+ * Named, and the *same* type on both sides of `earlier`, so that it is a
+ * lexicographic order on `(caughtAt, id)` is visible from the signature rather
+ * than something a reader has to reconstruct. A `DexEntry` satisfies it
+ * structurally, which is what lets the caller pass one directly.
+ */
+type Stamped = { id: string; caughtAt: number };
 
 /**
  * Ids ordered by code unit, deliberately not by `localeCompare`.
