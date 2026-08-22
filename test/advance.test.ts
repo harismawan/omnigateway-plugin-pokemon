@@ -8,6 +8,16 @@ import {
 } from "../src/balance.ts";
 import { type CompanionState, freshState, parseState, serialiseState } from "../src/state.ts";
 
+/**
+ * The instant every test that does not care about time passes in.
+ *
+ * `advance` takes the clock as a parameter rather than reading one, so most of
+ * this file can hand it the same value forever — a transition depends on the
+ * stored total and nothing else, and a fixed `now` is what makes that visible.
+ * The stage-instant tests at the bottom are the ones that vary it.
+ */
+const NOW = 1_700_000_000_000;
+
 /** An egg with a species already rolled, which is the normal steady state. */
 function readyEgg(over: Partial<CompanionState> = {}): CompanionState {
   return {
@@ -28,8 +38,8 @@ test("advancing twice with the same total changes nothing the second time", () =
   // The property everything else rests on. `advance` runs on every read as well
   // as every credit, and the console polls — so a version that credited what it
   // was handed rather than the difference would double-count on every refresh.
-  const once = advance(readyEgg(), 4_000_000);
-  const twice = advance(once.state, 4_000_000);
+  const once = advance(readyEgg(), 4_000_000, NOW);
+  const twice = advance(once.state, 4_000_000, NOW);
 
   expect(twice.state).toEqual(once.state);
   expect(twice.events).toEqual([]);
@@ -38,15 +48,15 @@ test("advancing twice with the same total changes nothing the second time", () =
 test("a total that went backwards credits nothing rather than un-growing", () => {
   // Should not happen — the counter is monotonic — but if it ever did, the
   // answer is to do nothing, not to reverse an evolution.
-  const grown = advance(readyEgg(), 4_000_000);
-  const backwards = advance(grown.state, 1_000);
+  const grown = advance(readyEgg(), 4_000_000, NOW);
+  const backwards = advance(grown.state, 1_000, NOW);
 
   expect(backwards.state.eggUsage).toBe(grown.state.eggUsage);
   expect(backwards.events).toEqual([]);
 });
 
 test("an egg hatches at its threshold and carries the excess into the hatchling", () => {
-  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD + 250_000);
+  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD + 250_000, NOW);
 
   expect(result.events).toEqual([{ kind: "hatched", speciesId: 1, isShiny: false, ditto: false }]);
   expect(result.state.active?.usedAtStage).toBe(250_000);
@@ -57,7 +67,7 @@ test("an egg with no rolled species holds at its threshold instead of opening", 
   // The offline case. The species is rolled ahead of time, so with no roll there
   // is nothing to become — and the progress has to wait rather than drain, or an
   // outage would silently cost a player their incubation.
-  const result = advance(freshState(), EGG_HATCH_THRESHOLD * 3);
+  const result = advance(freshState(), EGG_HATCH_THRESHOLD * 3, NOW);
 
   expect(result.events).toEqual([]);
   expect(result.state.active).toBeNull();
@@ -70,16 +80,16 @@ test("an egg with no rolled species holds at its threshold instead of opening", 
   // until the next request happened to arrive, which on a quiet or revoked key
   // is never. Transitions are driven by the state now, not by the arrival of
   // tokens.
-  const withRoll = advance({ ...result.state, pendingHatch: readyEgg().pendingHatch }, 0);
+  const withRoll = advance({ ...result.state, pendingHatch: readyEgg().pendingHatch }, 0, NOW);
   expect(withRoll.events[0]?.kind).toBe("hatched");
   expect(withRoll.state.active?.usedAtStage).toBe(EGG_HATCH_THRESHOLD * 2);
 });
 
 test("a stage completes into an evolution, and the overflow carries", () => {
-  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
   const firstStage = phaseThreshold("common", 3, 0);
 
-  const result = advance(hatched, hatched.consumedTotal + firstStage + 1_000);
+  const result = advance(hatched, hatched.consumedTotal + firstStage + 1_000, NOW);
 
   expect(result.events).toEqual([{ kind: "evolved", from: 1, to: 2 }]);
   expect(result.state.active?.stageIndex).toBe(1);
@@ -90,7 +100,7 @@ test("a whole line graduates and returns to an egg", () => {
   // The full arc in one credit, which also exercises the carry between stages:
   // the graduation total is by definition enough for every stage of the line.
   const start = readyEgg();
-  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("common"));
+  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("common"), NOW);
 
   const kinds = result.events.map((e) => e.kind);
   expect(kinds).toEqual(["hatched", "evolved", "evolved", "graduated"]);
@@ -109,7 +119,7 @@ test("a graduation seeds the next egg with what overshot it", () => {
   // finishes a Pokémon and starts the next one must not be charged twice for the
   // part that started the next one.
   const excess = 12_345_678;
-  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD + graduationTotal("common") + excess);
+  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD + graduationTotal("common") + excess, NOW);
 
   expect(result.events.map((e) => e.kind)).toEqual(["hatched", "evolved", "evolved", "graduated"]);
   expect(result.state.active).toBeNull();
@@ -140,7 +150,7 @@ test("a graduation carries the whole line and the nature, not just its ends", ()
       ditto: false,
     },
   });
-  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("common"));
+  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("common"), NOW);
   const graduation = result.events.at(-1);
 
   expect(graduation).toMatchObject({
@@ -161,7 +171,7 @@ test("a one-form line graduates without ever evolving", () => {
       ditto: false,
     },
   });
-  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("rare"));
+  const result = advance(start, EGG_HATCH_THRESHOLD + graduationTotal("rare"), NOW);
 
   expect(result.events.map((e) => e.kind)).toEqual(["hatched", "graduated"]);
   expect(result.events.at(-1)).toMatchObject({ finalId: 50, isShiny: true });
@@ -180,7 +190,7 @@ test("a hatch carries the shininess and disguise that were rolled with it", () =
       ditto: true,
     },
   });
-  const result = advance(start, EGG_HATCH_THRESHOLD);
+  const result = advance(start, EGG_HATCH_THRESHOLD, NOW);
 
   expect(result.events[0]).toMatchObject({ kind: "hatched", isShiny: true, ditto: true });
   expect(result.state.active?.isShiny).toBe(true);
@@ -192,8 +202,8 @@ test("consumed total always matches what was credited, whatever happened", () =>
   // The meter and the ledger cannot drift. A transition that blocks — a missing
   // roll — must still consume, or the gap grows every time it happens.
   for (const total of [1, EGG_HATCH_THRESHOLD - 1, EGG_HATCH_THRESHOLD * 2, 10_000_000_000]) {
-    expect(advance(readyEgg(), total).state.consumedTotal).toBe(total);
-    expect(advance(freshState(), total).state.consumedTotal).toBe(total);
+    expect(advance(readyEgg(), total, NOW).state.consumedTotal).toBe(total);
+    expect(advance(freshState(), total, NOW).state.consumedTotal).toBe(total);
   }
 });
 
@@ -210,7 +220,7 @@ test("growth never runs backwards across a long random walk", () => {
     if (state.active === null && state.pendingHatch === null) {
       state = { ...state, pendingHatch: readyEgg().pendingHatch };
     }
-    state = advance(state, total).state;
+    state = advance(state, total, NOW).state;
     expect(state.consumedTotal).toBeGreaterThanOrEqual(previous);
     previous = state.consumedTotal;
   }
@@ -219,14 +229,14 @@ test("growth never runs backwards across a long random walk", () => {
 // -------------------------------------------------------------- persistence
 
 test("a companion round-trips through storage", () => {
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD + 400_000).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD + 400_000, NOW).state;
   expect(parseState(serialiseState(grown))).toEqual(grown);
 });
 
 test("an unreadable rarity refuses the whole save rather than guessing", () => {
   // Fails closed. A defaulted rarity silently changes the graduation total —
   // how much work the Pokémon costs — and nothing would report it.
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
   (corrupted.active as Record<string, unknown>).rarity = "mythic-ultra";
 
@@ -241,7 +251,7 @@ test("a damaged consumed total refuses the save rather than defaulting to zero",
   // companion over and over and writing free Dex rows for work already paid
   // for. That is a wrong guess nothing reports, which is what fail-closed is
   // for.
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
 
   for (const damaged of [undefined, "lots", Number.NaN, null]) {
     const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
@@ -257,7 +267,7 @@ test("a consumed total of zero is still an ordinary save", () => {
 });
 
 test("an empty evolution path refuses the save", () => {
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
   (corrupted.active as Record<string, unknown>).plannedPath = [];
 
@@ -265,7 +275,7 @@ test("an empty evolution path refuses the save", () => {
 });
 
 test("an unknown nature degrades instead of refusing, because it costs an adjective", () => {
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
   (corrupted.active as Record<string, unknown>).nature = "grumpy";
 
@@ -275,7 +285,7 @@ test("an unknown nature degrades instead of refusing, because it costs an adject
 });
 
 test("a stage index past the end is clamped rather than discarding the save", () => {
-  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD).state;
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, NOW).state;
   const corrupted = JSON.parse(serialiseState(grown)) as Record<string, unknown>;
   (corrupted.active as Record<string, unknown>).stageIndex = 99;
 
@@ -317,6 +327,7 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
       baseId: 1,
       plannedPath: path,
       stageIndex: 0,
+      stageTimes: [NOW],
       usedAtStage: 0,
       rarity: "common",
       isShiny: false,
@@ -331,7 +342,7 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
 
   // Far more than the whole path could ever need, so the loop is bounded by the
   // cap and by nothing else.
-  const result = advance(state, graduationTotal("common") * stages);
+  const result = advance(state, graduationTotal("common") * stages, NOW);
 
   // The cap is a ceiling on transitions per call, not a refusal: what it must
   // not do is loop unboundedly, and what it must not do either is lose the
@@ -348,7 +359,7 @@ test("a corrupt path with more stages than the step cap cannot spin the loop", (
   // runs out. That is the intended trade — bounded work per call, no progress
   // lost, guaranteed termination — and it costs nothing in practice because a
   // real path is three stages and never reaches the cap at all.
-  const again = advance(result.state, graduationTotal("common") * stages);
+  const again = advance(result.state, graduationTotal("common") * stages, NOW);
   expect(again.state.active?.stageIndex).toBeGreaterThan(result.state.active?.stageIndex ?? 0);
   expect(again.events.length).toBeLessThanOrEqual(64);
 });
@@ -368,6 +379,7 @@ function disguisedMon(over: Partial<NonNullable<CompanionState["active"]>> = {})
     baseId: 10,
     plannedPath: [10, 11],
     stageIndex: 0,
+    stageTimes: [NOW],
     usedAtStage: 0,
     rarity: "common" as const,
     isShiny: false,
@@ -395,7 +407,7 @@ function disguised(over: Partial<CompanionState> = {}): CompanionState {
 const DISGUISE_THRESHOLD = phaseThreshold("common", 2, 0);
 
 test("a disguised companion reveals instead of taking its first evolution", () => {
-  const result = advance(disguised(), DISGUISE_THRESHOLD);
+  const result = advance(disguised(), DISGUISE_THRESHOLD, NOW);
 
   expect(result.events).toEqual([{ kind: "revealed", disguisedAs: 10, speciesId: 132 }]);
   expect(result.state.active?.plannedPath).toEqual([132]);
@@ -410,6 +422,7 @@ test("the reveal carries the overflow and keeps what was rolled at hatch", () =>
   const result = advance(
     disguised({ active: disguisedMon({ isShiny: true }) }),
     DISGUISE_THRESHOLD + 7_000,
+    NOW,
   );
 
   expect(result.state.active?.usedAtStage).toBe(7_000);
@@ -431,7 +444,7 @@ test("a reveal that has not been resolved holds at the threshold", () => {
   // than draining, so the moment the line arrives the reveal happens with its
   // growth intact. Inventing Ditto's rarity here would decide what the revealed
   // companion costs to graduate.
-  const result = advance(disguised({ pendingReveal: null }), DISGUISE_THRESHOLD + 7_000);
+  const result = advance(disguised({ pendingReveal: null }), DISGUISE_THRESHOLD + 7_000, NOW);
 
   expect(result.events).toEqual([]);
   expect(result.state.active?.dittoRevealed).toBe(false);
@@ -455,7 +468,7 @@ test("an already-revealed Ditto evolves and graduates as an ordinary companion",
     pendingReveal: null,
   });
 
-  const result = advance(revealed, graduationTotal("rare"));
+  const result = advance(revealed, graduationTotal("rare"), NOW);
 
   expect(result.events.map((event) => event.kind)).toEqual(["graduated"]);
   expect(result.events[0]).toMatchObject({ baseId: 132, finalId: 132 });
@@ -471,6 +484,7 @@ function pinnable(over: Partial<NonNullable<CompanionState["active"]>> = {}): Co
       baseId: 10,
       plannedPath: [10, 11],
       stageIndex: 0,
+      stageTimes: [NOW],
       usedAtStage: 0,
       rarity: "common",
       isShiny: false,
@@ -488,7 +502,7 @@ function pinnable(over: Partial<NonNullable<CompanionState["active"]>> = {}): Co
 const FIRST_STAGE = phaseThreshold("common", 2, 0);
 
 test("an everstone holds a companion at its stage however much arrives", () => {
-  const result = advance(pinnable({ everstone: true }), FIRST_STAGE * 4);
+  const result = advance(pinnable({ everstone: true }), FIRST_STAGE * 4, NOW);
 
   expect(result.events).toEqual([]);
   expect(result.state.active?.stageIndex).toBe(0);
@@ -502,7 +516,7 @@ test("a pinned companion does not graduate either", () => {
   // last stage, graduating away — which is exactly the individual somebody pins
   // a stone to keep.
   const single = pinnable({ plannedPath: [10], everstone: true });
-  const result = advance(single, graduationTotal("common") * 2);
+  const result = advance(single, graduationTotal("common") * 2, NOW);
 
   expect(result.events).toEqual([]);
   expect(result.state.active).not.toBeNull();
@@ -515,7 +529,7 @@ test("a disguised companion with an everstone does not reveal", () => {
   const disguisedAndPinned = disguised({
     active: disguisedMon({ everstone: true }),
   });
-  const result = advance(disguisedAndPinned, DISGUISE_THRESHOLD * 3);
+  const result = advance(disguisedAndPinned, DISGUISE_THRESHOLD * 3, NOW);
 
   expect(result.events).toEqual([]);
   expect(result.state.active?.dittoRevealed).toBe(false);
@@ -524,19 +538,23 @@ test("a disguised companion with an everstone does not reveal", () => {
 test("releasing an everstone lets the held growth spend itself", () => {
   // The reversibility, end to end: a companion that banked four stages' worth
   // while pinned catches up in one settle once the stone comes off.
-  const banked = advance(pinnable({ everstone: true }), FIRST_STAGE * 4).state;
+  const banked = advance(pinnable({ everstone: true }), FIRST_STAGE * 4, NOW).state;
   const active = banked.active;
   expect(active).not.toBeNull();
   if (active === null) return;
 
-  const released = advance({ ...banked, active: { ...active, everstone: false } }, FIRST_STAGE * 4);
+  const released = advance(
+    { ...banked, active: { ...active, everstone: false } },
+    FIRST_STAGE * 4,
+    NOW,
+  );
 
   expect(released.events.map((event) => event.kind)).toContain("evolved");
 });
 
 test("a soothe bell grows the companion faster without earning it more", () => {
-  const plain = advance(pinnable(), 1_000_000);
-  const belled = advance(pinnable({ soothe: true }), 1_000_000);
+  const plain = advance(pinnable(), 1_000_000, NOW);
+  const belled = advance(pinnable({ soothe: true }), 1_000_000, NOW);
 
   expect(plain.state.active?.usedAtStage).toBe(1_000_000);
   expect(belled.state.active?.usedAtStage).toBe(1_000_000 * (1 + SOOTHE_BONUS));
@@ -547,8 +565,8 @@ test("a soothe bell grows the companion faster without earning it more", () => {
 });
 
 test("a soothe bell is still idempotent when the same total is settled twice", () => {
-  const once = advance(pinnable({ soothe: true }), 1_000_000);
-  const twice = advance(once.state, 1_000_000);
+  const once = advance(pinnable({ soothe: true }), 1_000_000, NOW);
+  const twice = advance(once.state, 1_000_000, NOW);
 
   expect(twice.state.active?.usedAtStage).toBe(once.state.active?.usedAtStage as number);
 });
@@ -557,7 +575,7 @@ test("a soothe bell does nothing for an egg", () => {
   // The bell is applied to a companion, and an egg is not one. Nothing here
   // should scale incubation.
   const egg = { ...freshState(), eggUsage: 0 };
-  expect(advance(egg, 1_000).state.eggUsage).toBe(1_000);
+  expect(advance(egg, 1_000, NOW).state.eggUsage).toBe(1_000);
 });
 
 test("a soothe bell grants the same growth however the credits were chunked", () => {
@@ -570,9 +588,9 @@ test("a soothe bell grants the same growth however the credits were chunked", ()
 
   let chunked = belled;
   for (let credit = 1; credit <= 10; credit++) {
-    chunked = advance(chunked, credit * 2).state;
+    chunked = advance(chunked, credit * 2, NOW).state;
   }
-  const oneShot = advance(belled, 20).state;
+  const oneShot = advance(belled, 20, NOW).state;
 
   expect(chunked.active?.usedAtStage).toBe(oneShot.active?.usedAtStage as number);
   // And the total is the honest one: 20 earned plus a quarter of it.
@@ -587,8 +605,143 @@ test("a soothe bell never grants more than its share of what was earned", () => 
     let earned = 0;
     for (let credit = 0; credit < 20; credit++) {
       earned += size;
-      state = advance(state, earned).state;
+      state = advance(state, earned, NOW).state;
     }
     expect(state.active?.usedAtStage).toBe(earned + Math.floor(earned * SOOTHE_BONUS));
   }
+});
+
+/* -------------------------------------------------------------------------- */
+/* stage instants                                                              */
+/* -------------------------------------------------------------------------- */
+
+test("a hatchling records the instant it entered its first stage", () => {
+  // The clock is a parameter here like everywhere else in this plugin — the
+  // point of stamping at all is that nothing downstream can reconstruct it:
+  // growth is measured in tokens, and no arithmetic over tokens yields a date.
+  const result = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+
+  expect(result.state.active?.stageTimes).toEqual([5_000]);
+});
+
+test("each evolution appends the instant it was observed", () => {
+  // One entry per stage entered, in order, so `stageTimes[i]` is when the
+  // companion reached `plannedPath[i]`.
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+  const evolved = advance(
+    hatched.state,
+    EGG_HATCH_THRESHOLD + phaseThreshold("common", 3, 0),
+    9_000,
+  );
+
+  expect(evolved.state.active?.stageIndex).toBe(1);
+  expect(evolved.state.active?.stageTimes).toEqual([5_000, 9_000]);
+});
+
+test("several stages crossed by one credit share that credit's instant", () => {
+  // Not a defect to be smoothed over. The plugin learns about growth when a
+  // credit arrives, so "when we saw it evolve" is the only truth available —
+  // and interpolating between credits would manufacture instants the plugin
+  // does not have. Stated here so the equality is a decision and not a
+  // surprise.
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+  const leapt = advance(hatched.state, EGG_HATCH_THRESHOLD + graduationTotal("common"), 9_000);
+
+  // Straight to graduation, so the line is gone from the state — the instants
+  // left with it, on the event.
+  expect(leapt.state.active).toBeNull();
+  const graduated = leapt.events.find((event) => event.kind === "graduated");
+  expect(graduated?.kind === "graduated" ? graduated.stageTimes : null).toEqual([
+    5_000, 9_000, 9_000,
+  ]);
+});
+
+test("a graduation carries the instants of every stage it walked", () => {
+  // What `recordGraduation` writes. The state is thrown away at graduation, so
+  // the event is the only place these can leave from.
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+  const first = advance(hatched.state, EGG_HATCH_THRESHOLD + phaseThreshold("common", 3, 0), 9_000);
+  const second = advance(
+    first.state,
+    EGG_HATCH_THRESHOLD + phaseThreshold("common", 3, 0) + phaseThreshold("common", 3, 1),
+    11_000,
+  );
+  const third = advance(second.state, EGG_HATCH_THRESHOLD + graduationTotal("common"), 17_000);
+
+  const graduated = third.events.find((event) => event.kind === "graduated");
+  expect(graduated?.kind === "graduated" ? graduated.stageTimes : null).toEqual([
+    5_000, 9_000, 11_000,
+  ]);
+});
+
+test("an everstone stamps nothing, because nothing was entered", () => {
+  // The stone blocks the transition, so there is no new stage and no instant to
+  // record. A version that stamped on the attempt rather than on the transition
+  // would give a pinned companion a stream of dates for a stage it never left.
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+  const pinned: CompanionState = {
+    ...hatched.state,
+    active: { ...(hatched.state.active as NonNullable<CompanionState["active"]>), everstone: true },
+  };
+  const held = advance(pinned, EGG_HATCH_THRESHOLD + graduationTotal("common"), 9_000);
+
+  expect(held.state.active?.stageTimes).toEqual([5_000]);
+});
+
+test("a Ditto reveal starts the revealed line's instants over", () => {
+  // A reveal hands back a different Pokémon on a different line, and
+  // `stageIndex` resets to 0 with it. Carrying the disguise's instants across
+  // would date the revealed line's base form to a stage it never occupied.
+  const disguised = advance(
+    readyEgg({
+      pendingHatch: {
+        speciesId: 10,
+        path: [10, 11],
+        rarity: "common",
+        isShiny: false,
+        nature: "hardy",
+        ditto: true,
+      },
+    }),
+    EGG_HATCH_THRESHOLD,
+    5_000,
+  );
+  const armed: CompanionState = {
+    ...disguised.state,
+    pendingReveal: { path: [132], rarity: "rare" },
+  };
+  const revealed = advance(armed, EGG_HATCH_THRESHOLD + graduationTotal("common"), 9_000);
+
+  expect(revealed.state.active?.dittoRevealed).toBe(true);
+  expect(revealed.state.active?.stageTimes).toEqual([9_000]);
+});
+
+test("stage instants survive a round trip through storage", () => {
+  // The whole point of stamping is that the instant outlives the process that
+  // observed it. `serialiseState` is `JSON.stringify`, so this is really a test
+  // of `parseState`'s narrowing — which filters the array element by element
+  // and could drop a perfectly good one.
+  const hatched = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000);
+  const evolved = advance(
+    hatched.state,
+    EGG_HATCH_THRESHOLD + phaseThreshold("common", 3, 0),
+    9_000,
+  );
+
+  expect(parseState(serialiseState(evolved.state))?.active?.stageTimes).toEqual([5_000, 9_000]);
+});
+
+test("a companion saved before stage instants existed reads back with none", () => {
+  // Every companion alive when this shipped is in exactly this state, so it is
+  // the ordinary case rather than a corruption. It degrades to empty and never
+  // refuses: refusing would render as "this save could not be read" and destroy
+  // months of growth over a decoration. The Dex draws the absence as its own
+  // fact further down rather than inventing a date here.
+  const grown = advance(readyEgg(), EGG_HATCH_THRESHOLD, 5_000).state;
+  const old = JSON.parse(serialiseState(grown)) as { active: Record<string, unknown> };
+  delete old.active.stageTimes;
+
+  const read = parseState(JSON.stringify(old));
+  expect(read).not.toBeNull();
+  expect(read?.active?.stageTimes).toEqual([]);
 });

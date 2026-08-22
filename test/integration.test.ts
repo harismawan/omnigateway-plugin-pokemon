@@ -16,6 +16,7 @@ import {
   graduationTotal,
   ITEM_KINDS,
   ITEM_PRICES,
+  phaseThreshold,
 } from "../src/balance.ts";
 import companion from "../src/server.ts";
 import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
@@ -437,6 +438,7 @@ test("the panel is sent a species collection, ascending by number", async () => 
       baseId: 20,
       finalId: 22,
       chainOrder: [20, 21, 22],
+      stageTimes: null,
       rarity: "uncommon",
       isShiny: true,
       nature: "sassy",
@@ -451,6 +453,7 @@ test("the panel is sent a species collection, ascending by number", async () => 
       baseId: 10,
       finalId: 12,
       chainOrder: [10, 11, 12],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "jolly",
@@ -477,6 +480,7 @@ test("the panel is sent a species collection, ascending by number", async () => 
         isShiny: boolean;
         nature: string | null;
         caughtAt: number;
+        enteredAt: number | null;
       }>;
     }>;
   };
@@ -498,9 +502,61 @@ test("the panel is sent a species collection, ascending by number", async () => 
       isShiny: false,
       nature: "jolly",
       caughtAt: 1_700_000_002_000,
+      // Null because this fixture's row predates the instants, which is what
+      // every graduation on an existing install looks like.
+      enteredAt: null,
     },
   ]);
   expect(dex[4]).toMatchObject({ speciesId: 21, rarity: "uncommon", isShiny: true });
+});
+
+test("a line grown over days dates each stage from the day it was reached", async () => {
+  // The complaint, end to end and through real SQLite: the clock moves between
+  // credits, so the Dex must show three different dates rather than three
+  // copies of the graduation. Nothing below stubs `collect` — this is the
+  // event handler, `advance`, migration 6 and `readDex` agreeing.
+  await boot({}, cachedSpecies());
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  clock = 1_700_000_100_000;
+  spend(EGG_HATCH_THRESHOLD, "req_hatch");
+  // The roll is fired by the panel route, unawaited, so the egg cannot open
+  // until a poll has been through — which is the ordinary case and the reason
+  // stage 0 is stamped at the transition rather than when the egg filled up.
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  clock = 1_700_000_200_000;
+  spend(1, "req_open");
+
+  clock = 1_700_000_300_000;
+  spend(phaseThreshold("common", 3, 0), "req_eleven");
+
+  clock = 1_700_000_400_000;
+  spend(phaseThreshold("common", 3, 1), "req_twelve");
+
+  clock = 1_700_000_500_000;
+  spend(phaseThreshold("common", 3, 2), "req_grad");
+
+  const [graduation] = readDex(storage, KEY);
+  expect(graduation?.chainOrder).toEqual([10, 11, 12]);
+  // Three distinct instants, one per stage, and none of them the graduation's
+  // own `caught_at` except the last.
+  expect(graduation?.stageTimes).toEqual([1_700_000_200_000, 1_700_000_300_000, 1_700_000_400_000]);
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as {
+    dex: Array<{ speciesId: number; firstCaughtAt: number; firstCaughtExact: boolean }>;
+  };
+
+  expect(dex.map((record) => [record.speciesId, record.firstCaughtAt])).toEqual([
+    [10, 1_700_000_200_000],
+    [11, 1_700_000_300_000],
+    [12, 1_700_000_400_000],
+  ]);
+  expect(dex.every((record) => record.firstCaughtExact)).toBe(true);
 });
 
 test("a weekly ceiling pays at most weekly, and never on the install itself", async () => {
@@ -866,6 +922,7 @@ test("a lure steers the next roll and is spent by it", async () => {
       baseId: 10,
       finalId: 12,
       chainOrder: [10, 11, 12],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -909,6 +966,7 @@ test("a lure with nothing left to find waits rather than being spent", async () 
       baseId: 10,
       finalId: 12,
       chainOrder: [10, 11, 12],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -1235,6 +1293,7 @@ test("a guaranteed egg still hatches when a lure rules out everything it allows"
       baseId: 1,
       finalId: 3,
       chainOrder: [1, 2, 3],
+      stageTimes: null,
       rarity: "rare",
       isShiny: false,
       nature: "sassy",
@@ -1984,6 +2043,7 @@ test("a dex entry the cache has never seen is warmed too", async () => {
       baseId: 20,
       finalId: 22,
       chainOrder: [20, 21, 22],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -2035,6 +2095,7 @@ test("a pre-evolution nobody has a dex row for is warmed too", async () => {
       baseId: 20,
       finalId: 22,
       chainOrder: [20, 21, 22],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -2124,6 +2185,7 @@ test("a forgotten species does not starve the entries behind it", async () => {
         baseId: finalId,
         finalId,
         chainOrder: [finalId],
+        stageTimes: null,
         rarity: "common",
         isShiny: false,
         nature: "sassy",
@@ -2139,6 +2201,7 @@ test("a forgotten species does not starve the entries behind it", async () => {
       baseId: 38,
       finalId: 38,
       chainOrder: [38],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -2183,6 +2246,7 @@ test("one poll's warms share a chain rather than fetching it once each", async (
       baseId: 40,
       finalId: 41,
       chainOrder: [40, 41],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -2329,6 +2393,7 @@ test("every species in a graduated line carries its own name, and a cold one car
       baseId: 10,
       finalId: 12,
       chainOrder: [10, 11, 12],
+      stageTimes: null,
       rarity: "common",
       isShiny: false,
       nature: "sassy",

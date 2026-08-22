@@ -20,6 +20,24 @@ export type MonState = {
   /** Species ids from first form to last, decided at hatch. */
   plannedPath: readonly number[];
   stageIndex: number;
+  /**
+   * When each stage was entered, parallel to `plannedPath` up to `stageIndex`.
+   *
+   * Stored because nothing downstream can reconstruct it. Growth is measured in
+   * tokens and no arithmetic over tokens yields a date, and the one table that
+   * holds instants — `request_logs` — is pruned by retention and is forbidden
+   * as a source here for exactly that reason.
+   *
+   * **The instant is when the gateway *observed* the stage, not when it truly
+   * began.** The plugin only learns about growth when a credit arrives, so one
+   * large credit that carries a companion through three stages stamps all three
+   * with its own instant. That is the honest granularity; interpolating across
+   * the gap between credits would manufacture times the plugin does not have.
+   *
+   * Empty for a companion that hatched before this field existed — an absent
+   * fact rather than a zero, and the Dex renders it as one.
+   */
+  stageTimes: readonly number[];
   /** Tokens accumulated into the current stage. */
   usedAtStage: number;
   rarity: Rarity;
@@ -253,6 +271,15 @@ export function parseState(raw: string): CompanionState | null {
       // by pinning it to the last form, and the alternative is discarding a save
       // over an off-by-one.
       stageIndex: Math.min(Math.max(0, asInt(storedActive.stageIndex, 0)), path.length - 1),
+      // Degrades to empty, never refuses. A save written before this field
+      // existed has none, and that is the ordinary case for every companion
+      // alive at the moment it shipped — refusing those would destroy months of
+      // growth over a decoration. The Dex draws an absent instant as its own
+      // state rather than guessing one, so "we did not record this" survives
+      // all the way to the panel instead of being papered over here.
+      stageTimes: Array.isArray(storedActive.stageTimes)
+        ? storedActive.stageTimes.filter((at): at is number => typeof at === "number" && at >= 0)
+        : [],
       usedAtStage: Math.max(0, asInt(storedActive.usedAtStage, 0)),
       rarity,
       isShiny: storedActive.isShiny === true,

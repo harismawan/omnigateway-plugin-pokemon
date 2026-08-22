@@ -243,6 +243,7 @@ test("the dex fails open: one corrupt row costs its row and nothing else", () =>
         baseId: final - 2,
         finalId: final,
         chainOrder: [final - 2, final - 1, final],
+        stageTimes: null,
         rarity: "common",
         isShiny: false,
         nature: "hardy",
@@ -257,6 +258,81 @@ test("the dex fails open: one corrupt row costs its row and nothing else", () =>
   expect(entries.map((e) => e.finalId)).toEqual([9, 3]);
 });
 
+test("a graduation stores the instant each stage was entered", () => {
+  // The column migration 6 added, and the reason this feature needed one at
+  // all: growth is measured in tokens and no arithmetic over tokens yields a
+  // date, so an instant not written here can never be recovered.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [111, 222, 333],
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 999,
+    },
+    "dex_stamped",
+  );
+
+  expect(readDex(storage, KEY)[0]).toMatchObject({ stageTimes: [111, 222, 333], caughtAt: 999 });
+});
+
+test("a dex row written before stage instants existed reads back with none", () => {
+  // Migration 6 is `ADD COLUMN` with no default, so every row already in the
+  // table has SQL NULL here. Null and not `[]`: "never recorded" and "recorded
+  // as empty" are different facts, and the panel says so rather than dating an
+  // old graduate to an instant nobody observed.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [111, 222, 333],
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 999,
+    },
+    "dex_legacy",
+  );
+  storage.run("UPDATE {{dex}} SET stage_times = NULL WHERE id = ?", ["dex_legacy"]);
+
+  expect(readDex(storage, KEY)[0]?.stageTimes).toBeNull();
+});
+
+test("an unreadable stage_times costs the instants, never the row", () => {
+  // Fails open, like every other soft field on this table and unlike the active
+  // companion. A trophy case is history: the graduation itself is still a fact
+  // worth showing, and losing the row over a decoration would be the trade this
+  // table exists to refuse.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [111, 222, 333],
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 999,
+    },
+    "dex_bad_times",
+  );
+  storage.run("UPDATE {{dex}} SET stage_times = ? WHERE id = ?", ["{{{", "dex_bad_times"]);
+
+  const row = readDex(storage, KEY)[0];
+  expect(row?.finalId).toBe(3);
+  expect(row?.stageTimes).toBeNull();
+});
+
 test("a dex chain that parses but is not a chain is dropped, not returned", () => {
   // Valid JSON that is not an array of ids. The corrupt-row test above never
   // reaches this branch because its fixture fails at JSON.parse, so without this
@@ -269,6 +345,7 @@ test("a dex chain that parses but is not a chain is dropped, not returned", () =
         baseId: final - 2,
         finalId: final,
         chainOrder: [final - 2, final - 1, final],
+        stageTimes: null,
         rarity: "common",
         isShiny: false,
         nature: "hardy",
@@ -293,6 +370,7 @@ test("one key cannot see another key's dex", () => {
       baseId: 1,
       finalId: 3,
       chainOrder: [1, 2, 3],
+      stageTimes: null,
       rarity: "rare",
       isShiny: true,
       nature: "brave",

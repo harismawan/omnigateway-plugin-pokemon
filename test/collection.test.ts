@@ -15,6 +15,9 @@ function row(patch: Partial<DexEntry> = {}): DexEntry {
     baseId: 1,
     finalId: 3,
     chainOrder: [1, 2, 3],
+    // Null by default, which is every graduation recorded before migration 6 —
+    // the case the fallback exists for. The tests about per-stage dates set it.
+    stageTimes: null,
     rarity: "common",
     isShiny: false,
     nature: "hardy",
@@ -238,4 +241,114 @@ test("an empty log collects nothing", () => {
   // A key that has graduated nothing has an empty case, which the panel draws
   // as its own state rather than as a filter that hid everything.
   expect(collect([])).toEqual([]);
+});
+
+/* -------------------------------------------------------------------------- */
+/* per-stage dates                                                             */
+/* -------------------------------------------------------------------------- */
+
+test("each species is dated from when its own stage was entered", () => {
+  // The complaint this answers. Every stage of a line used to carry the
+  // graduation instant, so a Bulbasaur raised in January was dated to the March
+  // afternoon its Venusaur finished — the collection said the whole line was
+  // caught in one moment, which is the one thing it certainly was not.
+  const collection = collect([
+    row({ chainOrder: [1, 2, 3], stageTimes: [111, 222, 333], caughtAt: 999 }),
+  ]);
+
+  expect(collection.map((record) => record.firstCaughtAt)).toEqual([111, 222, 333]);
+  // And every one of them is exact, so the panel dates them plainly.
+  expect(collection.map((record) => record.firstCaughtExact)).toEqual([true, true, true]);
+});
+
+test("a catch carries the instant that individual reached that species", () => {
+  // The record's history, not just its headline. Species #2's list has to say
+  // when this individual became an Ivysaur, not when it graduated.
+  const collection = collect([
+    row({ chainOrder: [1, 2, 3], stageTimes: [111, 222, 333], caughtAt: 999 }),
+  ]);
+
+  expect(collection.map((record) => record.catches[0]?.enteredAt)).toEqual([111, 222, 333]);
+});
+
+test("a graduation from before the instants were recorded falls back to its own date", () => {
+  // Every Pokémon caught before migration 6 is here. The date shown is the
+  // graduation, which is the only instant that row has ever held — and
+  // `firstCaughtExact` is what lets the panel say so rather than pass it off as
+  // the real thing.
+  const collection = collect([row({ chainOrder: [1, 2, 3], stageTimes: null, caughtAt: 999 })]);
+
+  expect(collection.map((record) => record.firstCaughtAt)).toEqual([999, 999, 999]);
+  expect(collection.map((record) => record.firstCaughtExact)).toEqual([false, false, false]);
+  expect(collection.map((record) => record.catches[0]?.enteredAt)).toEqual([null, null, null]);
+});
+
+test("a stage_times shorter than its chain falls back for the stages it does not cover", () => {
+  // Not hypothetical: a companion that hatched before migration 6 and graduated
+  // after it has instants for the stages it walked since, and none for the ones
+  // it had already passed. Per stage, not all-or-nothing — throwing away a real
+  // instant because its neighbour is missing would be the wrong trade.
+  const collection = collect([row({ chainOrder: [1, 2, 3], stageTimes: [111], caughtAt: 999 })]);
+
+  expect(collection.map((record) => record.firstCaughtAt)).toEqual([111, 999, 999]);
+  expect(collection.map((record) => record.firstCaughtExact)).toEqual([true, false, false]);
+});
+
+test("the earliest catch of a species is decided by the stage instant, not the graduation", () => {
+  // Two individuals through one line. The one that graduated *later* reached
+  // Bulbasaur *earlier*, which is exactly the case a comparison on `caughtAt`
+  // gets backwards — and it is the ordinary case, because a slow-growing
+  // companion is one that was hatched long ago.
+  const slow = row({
+    id: "slow",
+    chainOrder: [1, 2, 3],
+    stageTimes: [100, 800, 900],
+    caughtAt: 900,
+  });
+  const quick = row({
+    id: "quick",
+    chainOrder: [1, 2, 3],
+    stageTimes: [500, 510, 520],
+    caughtAt: 520,
+  });
+
+  const bulbasaur = collect([slow, quick])[0];
+  expect(bulbasaur?.speciesId).toBe(1);
+  expect(bulbasaur?.firstCaughtAt).toBe(100);
+});
+
+test("a catch list is ordered by the stage instant, newest first", () => {
+  // The history of *this* species. Ordering it by graduation would put the
+  // individual that reached this stage most recently in the wrong place
+  // whenever the two orders disagree — which is the fixture above.
+  const slow = row({ id: "slow", chainOrder: [1, 2], stageTimes: [100, 900], caughtAt: 900 });
+  const quick = row({ id: "quick", chainOrder: [1, 2], stageTimes: [500, 520], caughtAt: 520 });
+
+  const bulbasaur = collect([slow, quick])[0];
+  expect(bulbasaur?.catches.map((entry) => entry.id)).toEqual(["quick", "slow"]);
+  // And species #2 the other way round, because there the orders agree.
+  expect(collect([slow, quick])[1]?.catches.map((entry) => entry.id)).toEqual(["slow", "quick"]);
+});
+
+test("rarity follows the catch that reached the stage first, not the one that graduated first", () => {
+  // `rarity` and `firstCaughtAt` are decided together, so moving the comparison
+  // to the stage instant has to move both — otherwise a record could show one
+  // catch's date beside another catch's rarity.
+  const slow = row({
+    id: "slow",
+    rarity: "uncommon",
+    chainOrder: [1, 2],
+    stageTimes: [100, 900],
+    caughtAt: 900,
+  });
+  const quick = row({
+    id: "quick",
+    rarity: "legendary",
+    chainOrder: [1, 2],
+    stageTimes: [500, 520],
+    caughtAt: 520,
+  });
+
+  expect(collect([slow, quick])[0]?.rarity).toBe("uncommon");
+  expect(collect([quick, slow])[0]?.rarity).toBe("uncommon");
 });

@@ -290,6 +290,11 @@ export default definePlugin({
             baseId: event.baseId,
             finalId: event.finalId,
             chainOrder: event.chainOrder,
+            // Straight from the event, because the state that accumulated these
+            // is discarded by the graduation that produced it. `ctx.now()` here
+            // would date every stage to the settle that finished the line,
+            // which is precisely the single-date behaviour this replaces.
+            stageTimes: event.stageTimes,
             rarity: event.rarity,
             isShiny: event.isShiny,
             nature: event.nature,
