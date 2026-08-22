@@ -74,6 +74,21 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     // an idle-looking companion is a smaller lie than a working-looking one.
     sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at INTEGER`,
   },
+  {
+    version: 6,
+    // When each stage in `chain_order` was entered, as a JSON array parallel to
+    // it. Stored because it cannot be derived: growth is counted in tokens, no
+    // arithmetic over tokens yields a date, and the one table that holds
+    // instants — `request_logs` — is pruned by retention and is forbidden as a
+    // source here for that exact reason.
+    //
+    // Nullable with no default, on the same reasoning as `last_credit_at` in
+    // migration 5. A graduation recorded before this column existed has no
+    // observed instants, and writing `caught_at` into every slot would invent a
+    // Bulbasaur date out of a Venusaur one. NULL says "never recorded", which
+    // the panel renders as its own fact rather than as a date.
+    sql: `ALTER TABLE {{dex}} ADD COLUMN stage_times TEXT`,
+  },
 ];
 
 /**
@@ -89,6 +104,15 @@ export type DexEntry = {
   baseId: number;
   finalId: number;
   chainOrder: readonly number[];
+  /**
+   * When each stage in `chainOrder` was entered, or null for never recorded.
+   *
+   * Null rather than an empty array, because those are different facts: a
+   * graduation from before migration 6 has no observed instants, and one that
+   * somehow stored an empty list would be a bug worth seeing. The panel dates a
+   * null line from `caughtAt` and says that is what it did.
+   */
+  stageTimes: readonly number[] | null;
   rarity: string;
   isShiny: boolean;
   nature: string | null;
@@ -225,7 +249,7 @@ export function settle(
   if (row === null) return null;
   if (row.state === null) return { row, events: [] };
 
-  const result = advance(row.state, row.tokensTotal);
+  const result = advance(row.state, row.tokensTotal, now);
   if (result.events.length === 0 && result.state === row.state) return { row, events: [] };
 
   storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
@@ -243,14 +267,18 @@ export function recordGraduation(
   id: string,
 ): void {
   storage.run(
-    `INSERT INTO {{dex}} (id, api_key_id, base_id, final_id, chain_order, rarity, is_shiny, nature, caught_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO {{dex}} (id, api_key_id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       apiKeyId,
       entry.baseId,
       entry.finalId,
       JSON.stringify(entry.chainOrder),
+      // Null stays null on the way in as well as out. A caller with nothing to
+      // record must not write `[]`, or "never observed" becomes indistinguishable
+      // from "observed nothing" the moment it is read back.
+      entry.stageTimes === null ? null : JSON.stringify(entry.stageTimes),
       entry.rarity,
       entry.isShiny ? 1 : 0,
       entry.nature,
@@ -264,6 +292,7 @@ type StoredDex = {
   base_id: number;
   final_id: number;
   chain_order: string;
+  stage_times: string | null;
   rarity: string;
   is_shiny: number;
   nature: string | null;
@@ -280,9 +309,35 @@ type StoredDex = {
  * precedent, and the contrast with `parseState` is deliberate rather than
  * inconsistent.
  */
+/**
+ * Stored stage instants, or null for absent, unparseable, or not a list of
+ * numbers.
+ *
+ * All three collapse to null on purpose. The panel already has to render "we
+ * never recorded this" for every graduation predating migration 6, so a corrupt
+ * value has a correct rendering waiting for it — and distinguishing "corrupt"
+ * from "absent" on screen would be a distinction nobody can act on.
+ */
+function parseStageTimes(raw: string | null): readonly number[] | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  // Every element or none. A partly-numeric array would silently shift every
+  // instant after the bad one onto the wrong stage, which is worse than having
+  // no dates at all — a wrong date reads as a fact.
+  return parsed.every((at) => typeof at === "number" && Number.isFinite(at))
+    ? (parsed as number[])
+    : null;
+}
+
 export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
   const rows = storage.all<StoredDex>(
-    `SELECT id, base_id, final_id, chain_order, rarity, is_shiny, nature, caught_at
+    `SELECT id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at
      FROM {{dex}} WHERE api_key_id = ? ORDER BY caught_at DESC`,
     [apiKeyId],
   );
@@ -304,6 +359,13 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
       baseId: row.base_id,
       finalId: row.final_id,
       chainOrder: chain,
+      // Fails open *within* the row, which is a softer failure than the chain
+      // above gets. A chain that will not parse leaves nothing to draw, so the
+      // row goes; instants that will not parse cost the dates and leave a
+      // graduation that is still worth showing. Both directions collapse to
+      // "never recorded", which the panel already has to render for every row
+      // written before migration 6.
+      stageTimes: parseStageTimes(row.stage_times),
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
       nature: row.nature,

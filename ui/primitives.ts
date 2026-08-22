@@ -56,6 +56,24 @@ const COMPANION_SIZE = "192px";
  */
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
+/**
+ * A Dex specimen: the art at its native size, and the plate it sits on.
+ *
+ * The art is **not resized at all**, which is the point. The fetched sprites are
+ * a 96px canvas drawn with `image-rendering: pixelated`, so any scale that is
+ * not a whole number turns nearest-neighbour into alternating one- and
+ * two-pixel rows — the reason `COMPANION_SIZE` is 192 and not 168. Here there is
+ * no reason to scale at all: a record is read up close, so the honest size is
+ * 1:1 and the plate is what gives it presence.
+ *
+ * The plate is the art plus `lg` of padding on each side and a hairline: 96 +
+ * 40 + 2, so 138 square. `content-box` is spelled out rather than assumed — the
+ * console may or may not ship a global `border-box` reset, and whether the
+ * sprite renders at 96 or at 54 should not depend on finding out.
+ */
+const DEX_SPECIMEN = "96px";
+const DEX_PLATE_PAD = SPACE.lg;
+
 export const Panel = styled.section`
   background: var(--panel);
   border: 1px solid var(--rule);
@@ -644,28 +662,208 @@ export const FilterRow = styled(Row)`
 `;
 
 /**
- * One graduate's whole record, opened in place.
+ * One species' whole record, in the top layer.
  *
- * `1 / -1` is what makes this work without measuring anything. Auto-placement
- * cannot start a full-width item part-way along a row, so a cell spanning every
- * column drops to the next row line by itself — which means the detail always
- * appears directly beneath the cell that opened it, under `auto-fill`, at any
- * container width, with no column count to compute and no `ResizeObserver` to
- * keep in step with one.
+ * A native `<dialog>` opened with `showModal`, which replaces a detail that was
+ * placed into the grid at `grid-column: 1 / -1`. That trick was a good answer to
+ * the question it was asked — it put the record under its own cell at any width
+ * with no column count and no `ResizeObserver` — but it accepted two costs to do
+ * it: the row went ragged while the record was open, and the grid reflowed
+ * vertically under the reader every time one was. A dialog is out of flow
+ * entirely, so both simply stop existing.
  *
- * The cost is that non-dense flow does not backfill: the slots to the right of
- * the selected cell stay empty while this is open. That gap is the selection
- * pointing at its own panel, and it is cheaper than the alternative, which is
- * knowing how many columns there are.
+ * Native rather than a `div` with `role="dialog"`, and the difference is not
+ * cosmetic. `showModal` puts this in the top layer, above every stacking context
+ * on the page without a `z-index` to lose an argument with; it traps focus; it
+ * closes on Escape; and it makes the rest of the document inert. Hand-rolling
+ * that is a well-known way to ship a keyboard trap that only goes one way.
+ *
+ * `::backdrop` is styled rather than left to the user agent's default, which is
+ * an opaque-ish black that ignores the console's theme. `color-mix` against
+ * `--panel-sunk` keeps it in whichever theme is loaded — the panel's rule is
+ * that a hardcoded colour is the one thing on the page that will not follow the
+ * theme, and a full-viewport wash is a conspicuous place to break it.
+ */
+export const DexDialog = styled.dialog`
+  /* The close control anchors to this box rather than to the viewport, which is
+     what an absolutely-positioned child of a top-layer element gets otherwise. */
+  position: relative;
+  margin: auto;
+  width: min(520px, calc(100vw - ${SPACE.lg} * 2));
+  max-height: calc(100vh - ${SPACE.xl} * 2);
+  overflow: auto;
+  padding: 0;
+  background: var(--panel-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  color: var(--ink);
+
+  &::backdrop {
+    background: color-mix(in srgb, var(--panel-sunk) 70%, transparent);
+  }
+
+  /* One transition, on open only. A record appearing instantly at full size in
+     the middle of the page reads as a jump cut; 120ms of rise is enough to say
+     it came from the grid. Nothing else in this dialog animates — the chain and
+     the log are information, and information that moves is harder to read. */
+  &[open] {
+    animation: dex-record-in 120ms ease-out;
+  }
+
+  @keyframes dex-record-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    &[open] {
+      animation: none;
+    }
+  }
+`;
+
+/**
+ * The record itself, inside the dialog's box.
+ *
+ * A child rather than the dialog's own padding, because the backdrop test is
+ * "did the click land on the dialog element itself" — and an element with
+ * padding has a region that belongs to it but reads to the eye as inside the
+ * card. Giving the contents their own box makes the hit areas match what is
+ * drawn.
+ *
+ * A column of two zones rather than the sprite-beside-facts row this replaces.
+ * That row was the inline detail's layout, where it was right: a detail wedged
+ * into a grid has to be short. A dialog does not, and stacking six facts in one
+ * column at a uniform gap left nothing saying which was the specimen and which
+ * was the log.
  */
 export const DexDetail = styled.div`
-  grid-column: 1 / -1;
   display: flex;
+  flex-direction: column;
+`;
+
+/**
+ * The specimen plate: the sprite, and what identifies it.
+ *
+ * The sprite sits on `--panel-sunk` rather than on nothing, which is the
+ * opposite of `Sprite`'s rule for the companion — and the difference is real.
+ * The companion is the page's subject and a plate behind it is a box drawn
+ * around the thing you came to see. Here the sprite is a *specimen*, one of
+ * several images in a record, and the plate is what separates it from the
+ * evolution tiles further down that are drawn the same way.
+ */
+export const DexPlate = styled.div`
+  display: flex;
+  align-items: center;
   gap: ${SPACE.lg};
-  padding: ${SPACE.md};
-  background: var(--panel-sunk);
-  border: 1px solid var(--rule);
-  border-radius: 8px;
+  padding: ${SPACE.lg};
+
+  img {
+    box-sizing: content-box;
+    width: ${DEX_SPECIMEN};
+    height: ${DEX_SPECIMEN};
+    padding: ${DEX_PLATE_PAD};
+    image-rendering: pixelated;
+    background: var(--panel-sunk);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    flex: none;
+  }
+
+  /* Below this the plate is wider than a phone, and a 128px sprite beside a
+     name that has to wrap is worse than the two stacked. */
+  @media (max-width: 420px) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: ${SPACE.md};
+  }
+`;
+
+/**
+ * The register: everything the specimen plate does not say.
+ *
+ * Separated from the plate by a rule rather than by a larger gap, because the
+ * two are different kinds of thing — an identity and a log — and a rule says
+ * that where whitespace only says "some distance".
+ */
+export const DexRegister = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: ${SPACE.lg};
+  padding: ${SPACE.lg};
+  border-top: 1px solid var(--rule);
+`;
+
+/**
+ * A labelled field in the register.
+ *
+ * The label is the panel's existing small-caps treatment — the one rarity uses —
+ * rather than a new device invented for this dialog. Three of these turn a stack
+ * of facts into something a reader can skip through, which is what the flat
+ * column could not do.
+ */
+export const DexField = styled.section`
+  display: flex;
+  flex-direction: column;
+  gap: ${SPACE.sm};
+`;
+
+/**
+ * A field's value where that value is a date.
+ *
+ * Mono and tabular, matching the encounter rows below it — the two are the same
+ * kind of fact at different scales, and setting the headline date in the body
+ * face while the log is in mono would make them look unrelated.
+ */
+export const DexWhen = styled.span`
+  font-family: ${MONO};
+  font-variant-numeric: tabular-nums;
+`;
+
+export const DexFieldHead = styled.div`
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: ${SPACE.sm};
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+`;
+
+/** The record's dismiss control, top-right of the dialog. */
+export const DexClose = styled.button`
+  position: absolute;
+  top: ${SPACE.md};
+  right: ${SPACE.md};
+  /* 28px square. Smaller than the 44px a touch target wants, and deliberately:
+     this is a modal with three other ways out — Escape, the backdrop, and the
+     cell that opened it — so the control is a convenience rather than the only
+     exit. Sized to sit inside the plate's padding without displacing it. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-faint);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--ink);
+    border-color: var(--rule);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 `;
 
 /** The right-hand column of a detail: everything the sprite cannot say. */
@@ -685,24 +883,74 @@ export const DexFacts = styled.div`
  * evolution line is a horizontally scrolling region inside a vertically
  * scrolling panel.
  */
+/**
+ * An evolution line, drawn as a chain rather than as a row.
+ *
+ * The stages used to be three sprites sitting `sm` apart, which reads as three
+ * unrelated Pokémon that happen to be adjacent — the one thing a line is not.
+ * `DexChainLink` puts a rule between them, so the sequence is stated by the
+ * drawing and not left to be inferred from the order.
+ *
+ * Wraps, because a nine-stage Eevee branch on a narrow panel has to go
+ * somewhere. `align-items: stretch` keeps the tiles a common height when one
+ * caption wraps to two lines and its neighbours do not.
+ */
 export const DexLine = styled.div`
   display: flex;
-  align-items: center;
-  gap: ${SPACE.sm};
+  align-items: stretch;
   flex-wrap: wrap;
+  gap: ${SPACE.xs};
 `;
 
-export const DexLineStage = styled.figure`
+/**
+ * The rule between two stages.
+ *
+ * `aria-hidden` at the call site: it is a picture of the relationship the order
+ * already encodes, and a screen reader announcing "image" between every stage
+ * would make the line harder to follow rather than easier.
+ */
+export const DexChainLink = styled.span`
+  align-self: center;
+  width: ${SPACE.md};
+  height: 1px;
+  background: var(--rule-strong);
+  flex: none;
+`;
+
+/**
+ * One stage of a line.
+ *
+ * `$here` marks the species whose record this is — the you-are-here of the
+ * chain, and the reason the chain is worth drawing at all: it says where this
+ * Pokémon sits among its own forms. Accent rather than a hue of its own, which
+ * is what the panel's colour rule allows: this is *state*, the same state the
+ * open cell in the grid carries, and it is drawn the same way so the two read as
+ * one idea.
+ *
+ * The mark is not carried by colour alone. The current tile is also the only one
+ * whose caption is at full `--ink`, so it is distinguishable with no colour
+ * vision at all.
+ */
+export const DexLineStage = styled.figure<{ $here: boolean }>`
   margin: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: ${SPACE.xs};
+  width: 76px;
+  padding: ${SPACE.sm} ${SPACE.xs};
+  background: ${(p) => (p.$here ? "var(--accent-wash)" : "var(--panel-sunk)")};
+  border: 1px solid ${(p) => (p.$here ? "var(--accent)" : "var(--rule)")};
+  border-radius: 8px;
 
   img {
     width: 48px;
     height: 48px;
     image-rendering: pixelated;
+  }
+
+  figcaption {
+    color: ${(p) => (p.$here ? "var(--ink)" : "var(--ink-dim)")};
   }
 `;
 
@@ -711,6 +959,96 @@ export const Caption = styled.figcaption`
   font-size: 11px;
   text-align: center;
   overflow-wrap: anywhere;
+`;
+
+/**
+ * A Dex record's title: the species number, then its name.
+ *
+ * `HeroName`'s shape one rank down, and an `h4` rather than the `strong` this
+ * replaces. `SectionHead` and `HeroName` are both `h3`, so a record opened
+ * inside a section nests correctly here — and the rank is what buys the thing
+ * `strong` could not give: a `heading` role, whose accessible name is the
+ * concatenation of both slots. That is what lets a test assert "#3 Venusaur" as
+ * one fact rather than as two `getByText` calls that would pass with the number
+ * rendered anywhere on the panel. The hero heading is asserted the same way for
+ * the same reason.
+ *
+ * `baseline` for the reason `HeroName` gives: it is what keeps a smaller mono
+ * number sitting on the name's line rather than centred against its cap height.
+ * Margins zeroed because a heading's default ones are sized for prose, and this
+ * one sits in a `DexFacts` column that already spaces its children.
+ */
+export const DexHeading = styled.h4`
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: ${SPACE.sm};
+  font-size: 18px;
+
+  /* The number is the identity in a Pokédex and the name is the annotation, so
+     here it is set at the heading's own size rather than at the 0.8em
+     SpeciesNumber uses elsewhere. It stays mono and faint, so it reads as a
+     register mark beside the name rather than competing with it. */
+  ${SpeciesNumber} {
+    font-size: 1em;
+  }
+`;
+
+/**
+ * The individuals behind one species, newest first.
+ *
+ * A list and not a run of `Fact`s, because that is what it is: a species caught
+ * four times has four of these, and four stacked blocks with no marker read as
+ * four unrelated sentences. The marker is suppressed for the same reason the
+ * roster's cards carry none — a bullet beside a date is decoration — so what
+ * the list element buys here is the semantics a screen reader announces, "list,
+ * four items", which is exactly the fact the eye gets from the stack.
+ */
+export const CatchList = styled.ul`
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+`;
+
+/**
+ * One encounter: when, what it was like, and whether it shone.
+ *
+ * A three-column grid rather than the `date · nature · ✦` sentence this
+ * replaces. A log is read down a column — the question is "when did I catch
+ * these", not "what does row two say" — and dot-separated text gives the eye no
+ * column to run down. The date column is fixed so the natures line up under one
+ * another whatever length the dates render at in the reader's locale.
+ *
+ * A hairline between rows and none above the first, so the rule reads as a
+ * separator rather than as a header the list does not have.
+ */
+export const CatchRow = styled.li`
+  display: grid;
+  grid-template-columns: 11ch 1fr auto;
+  gap: ${SPACE.sm};
+  align-items: baseline;
+  padding: ${SPACE.sm} 0;
+  color: var(--ink-dim);
+  font-size: 11px;
+
+  & + & {
+    border-top: 1px solid var(--rule);
+  }
+`;
+
+/** The date column of an encounter: mono, so the rows align digit for digit. */
+export const CatchWhen = styled.span`
+  font-family: ${MONO};
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+`;
+
+/** The shiny mark, held to the right edge so a column of them is scannable. */
+export const CatchMark = styled.span`
+  color: var(--ink);
+  font-weight: 600;
 `;
 
 /**

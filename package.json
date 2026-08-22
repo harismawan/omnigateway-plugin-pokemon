@@ -1,6 +1,6 @@
 {
   "name": "@omnigateway/pokemon",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "A Pok\u00e9mon companion for OmniGateway. Each gateway key raises one that hatches, evolves, and graduates into a Pok\u00e9dex on the tokens that key spends.",
   "type": "module",
   "license": "MIT",

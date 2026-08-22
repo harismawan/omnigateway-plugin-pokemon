@@ -193,15 +193,27 @@ type CompanionState = {
 type ShopEntry = { kind: "item"; item: string } | { kind: "egg"; tier: Rarity | null };
 
 /** Mirrors what `GET /keys/:id` actually sends, field for field. */
-type DexEntry = {
+type DexCatch = {
   id: string;
-  baseId: number;
-  finalId: number;
+  /** The line this individual walked — on the catch, because Eevee branches. */
   chainOrder: number[];
-  rarity: Rarity;
   isShiny: boolean;
   nature: string | null;
+  /** When the whole line graduated. */
   caughtAt: number;
+  /** When this individual reached this species, or null for never recorded. */
+  enteredAt: number | null;
+};
+
+type DexSpecies = {
+  speciesId: number;
+  rarity: Rarity;
+  /** True when any individual of this species was shiny. */
+  isShiny: boolean;
+  firstCaughtAt: number;
+  /** False when `firstCaughtAt` is a graduation standing in for a stage instant. */
+  firstCaughtExact: boolean;
+  catches: DexCatch[];
   /** Resolved from the plugin's own cache, so null on a cold one. */
   name: string | null;
 };
@@ -213,7 +225,7 @@ type CompanionView = {
   lastCreditAt: number | null;
   /** What the current stage is called, or null when the cache cannot say. */
   name: string | null;
-  dex: DexEntry[];
+  dex: DexSpecies[];
   shop: Array<{ entry: ShopEntry; price: number }>;
   nextThreshold: number;
   progress: number;
@@ -235,18 +247,35 @@ function active(patch: Partial<Active> = {}): Active {
   };
 }
 
-function dexEntry(patch: Partial<DexEntry> = {}): DexEntry {
+function dexCatch(patch: Partial<DexCatch> = {}): DexCatch {
   return {
-    id: "d0",
-    baseId: 10,
-    finalId: 12,
+    id: "c0",
     chainOrder: [10, 11, 12],
-    rarity: "common",
     isShiny: false,
     nature: "timid",
-    // Distinct from every id and species number in the fixture, so a cell that
+    // Distinct from every id and species number in the fixture, so a row that
     // renders the wrong field is visible rather than coincidentally right.
     caughtAt: 1_700_000_000_777,
+    // Distinct again from `caughtAt`, so a row printing the graduation where
+    // the stage instant belongs is visible rather than coincidentally right.
+    enteredAt: 1_700_000_000_555,
+    ...patch,
+  };
+}
+
+function dexSpecies(patch: Partial<DexSpecies> = {}): DexSpecies {
+  return {
+    speciesId: 12,
+    rarity: "common",
+    isShiny: false,
+    // Distinct from every catch date below, so a cell printing the wrong one is
+    // visible. A species with two catches gets neither of these by default —
+    // the tests that care set all three.
+    firstCaughtAt: 1_700_000_000_111,
+    // Exact by default: the ordinary case once instants are being recorded. The
+    // tests about legacy graduations set it false.
+    firstCaughtExact: true,
+    catches: [dexCatch()],
     // Unnamed by default, which is the cold cache and the offline install. The
     // tests that care about names set one; every other assertion in this file
     // is about the species number and stays true either way.
@@ -1088,33 +1117,18 @@ describe("the Pokédex", () => {
     renderCompanion(serving(view({ dex: [] })));
     await openCompanion();
 
-    expect(await screen.findByText("Nothing graduated yet.")).toBeTruthy();
+    expect(await screen.findByText("Nothing caught yet.")).toBeTruthy();
     // The egg is the only image on the panel: no stray cells, no placeholders.
     expect(screen.getAllByRole("img")).toHaveLength(1);
   });
 
-  test("names each graduate by rarity, shininess and species", async () => {
+  test("names each species by rarity, shininess and species", async () => {
     renderCompanion(
       serving(
         view({
           dex: [
-            dexEntry({
-              id: "d1",
-              baseId: 133,
-              finalId: 134,
-              chainOrder: [133, 134],
-              rarity: "legendary",
-              isShiny: true,
-              nature: "modest",
-            }),
-            dexEntry({
-              id: "d2",
-              baseId: 1,
-              finalId: 3,
-              chainOrder: [1, 2, 3],
-              rarity: "common",
-              nature: "adamant",
-            }),
+            dexSpecies({ speciesId: 3, rarity: "common" }),
+            dexSpecies({ speciesId: 134, rarity: "legendary", isShiny: true }),
           ],
         }),
       ),
@@ -1123,101 +1137,66 @@ describe("the Pokédex", () => {
 
     expect(await screen.findByRole("img", { name: "legendary shiny species 134" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "common species 3" })).toBeTruthy();
-    expect(screen.queryByText("Nothing graduated yet.")).toBeNull();
+    expect(screen.queryByText("Nothing caught yet.")).toBeNull();
   });
 
-  test("draws the graduate itself, not the form it started as", async () => {
+  test("draws each cell's own species, at its own shininess", async () => {
     // `alt` and `src` are two separate expressions in the cell and only the alt
-    // was ever asserted — so every thumbnail could have been built from
-    // `entry.baseId` and the whole collection would have rendered its
-    // pre-evolutions, with 37 UI tests green and the alt text still naming the
-    // right species.
-    //
-    // `baseId` and `finalId` differ in both fixtures, which is the only reason
-    // the swap is visible at all: on a one-form line the two URLs are identical.
+    // was ever asserted, so a cell could have been drawing some other field
+    // entirely with every assertion still green. Two species, one shiny.
     renderCompanion(
       serving(
         view({
           dex: [
-            dexEntry({ id: "d1", baseId: 10, finalId: 12, chainOrder: [10, 11, 12] }),
-            dexEntry({
-              id: "d2",
-              baseId: 133,
-              finalId: 134,
-              chainOrder: [133, 134],
-              rarity: "legendary",
-              isShiny: true,
-              nature: "modest",
-            }),
+            dexSpecies({ speciesId: 12 }),
+            dexSpecies({ speciesId: 134, rarity: "legendary", isShiny: true }),
           ],
         }),
       ),
     );
     await openCompanion();
 
-    const graduate = await screen.findByRole("img", { name: "common species 12" });
-    expect(graduate.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/12");
+    const plain = await screen.findByRole("img", { name: "common species 12" });
+    expect(plain.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/12");
 
-    // And the shiny variant is asked for by the entry's own flag, on the final
-    // form as well.
     const shiny = screen.getByRole("img", { name: "legendary shiny species 134" });
     expect(shiny.getAttribute("src")).toBe("/api/plugins/pokemon/sprite/134?shiny=1");
   });
 
-  test("shows the nature the server records, which the sprite cannot say", async () => {
-    // Two different natures, because one would pass against a component that
-    // rendered the same entry twice.
+  test("collects a pre-evolution as its own cell", async () => {
+    // The whole feature, seen from the panel. A graduated Venusaur puts three
+    // species in the collection and the grid draws three cells, in number
+    // order — not one cell for the graduate with the rest folded away.
     renderCompanion(
       serving(
         view({
           dex: [
-            dexEntry({ id: "d1", finalId: 134, nature: "modest" }),
-            dexEntry({ id: "d2", finalId: 3, nature: "adamant" }),
+            dexSpecies({ speciesId: 1, name: "Bulbasaur" }),
+            dexSpecies({ speciesId: 2, name: "Ivysaur" }),
+            dexSpecies({ speciesId: 3, name: "Venusaur" }),
           ],
         }),
       ),
     );
     await openCompanion();
 
-    expect(await screen.findByText("modest")).toBeTruthy();
-    expect(screen.getByText("adamant")).toBeTruthy();
-  });
-
-  test("names a graduate the way an operator would, and captions it too", async () => {
-    // Two entries, only one named: the cold-cache fallback has to survive
-    // sitting next to a resolved one, which is the state a filling cache is
-    // actually in.
-    renderCompanion(
-      serving(
-        view({
-          dex: [
-            dexEntry({ id: "d1", finalId: 134, name: "Vaporeon", rarity: "legendary" }),
-            dexEntry({ id: "d2", finalId: 3, name: null }),
-          ],
-        }),
-      ),
-    );
-    await openCompanion();
-
-    expect(await screen.findByRole("img", { name: "legendary Vaporeon" })).toBeTruthy();
-    expect(screen.getByText("Vaporeon")).toBeTruthy();
-    // The unnamed one keeps the number, in the alt text and under the sprite.
-    expect(screen.getByRole("img", { name: "common species 3" })).toBeTruthy();
-    expect(screen.getByText("#3")).toBeTruthy();
+    expect(await screen.findByRole("img", { name: "common Bulbasaur" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "common Ivysaur" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "common Venusaur" })).toBeTruthy();
   });
 
   test("numbers every cell, whether or not the species has a name yet", async () => {
-    // The number is the one identifier a graduate always has: `name` is filled
-    // in by a species cache that starts cold, so a grid captioned by name alone
-    // is a grid of anonymous sprites on a fresh install. Two entries, only one
+    // The number is the one identifier a species always has: `name` is filled
+    // in by a cache that starts cold, so a grid captioned by name alone is a
+    // grid of anonymous sprites on a fresh install. Two species, only one
     // named, because the number has to survive sitting beside a resolved name
     // rather than only standing in for a missing one.
     renderCompanion(
       serving(
         view({
           dex: [
-            dexEntry({ id: "d1", finalId: 134, name: "Vaporeon", rarity: "legendary" }),
-            dexEntry({ id: "d2", finalId: 3, name: null }),
+            dexSpecies({ speciesId: 134, name: "Vaporeon", rarity: "legendary" }),
+            dexSpecies({ speciesId: 3, name: null }),
           ],
         }),
       ),
@@ -1226,31 +1205,423 @@ describe("the Pokédex", () => {
 
     expect(await screen.findByText("#134")).toBeTruthy();
     expect(screen.getByText("Vaporeon")).toBeTruthy();
-    // Exactly one `#3`: the number is its own line now, so an unnamed entry
-    // must not also print the number where its name would have gone.
+    // Exactly one `#3`: the number is its own line, so an unnamed cell must not
+    // also print the number where its name would have gone.
     expect(screen.getAllByText("#3")).toHaveLength(1);
   });
 
-  test("omits the nature of an entry recorded before natures were stored", async () => {
-    // Nullable in the store, so the cell has to survive it without printing
-    // "null" under a sprite.
-    renderCompanion(serving(view({ dex: [dexEntry({ id: "d1", finalId: 3, nature: null })] })));
+  test("counts a species caught more than once, and says nothing about one caught once", async () => {
+    // A count that is always there stops being information, which is why `× 1`
+    // is suppressed. Two species so the suppression is visible beside a count
+    // rather than only in isolation.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexSpecies({
+              speciesId: 3,
+              catches: [
+                dexCatch({ id: "c1", caughtAt: 1_700_000_008_000 }),
+                dexCatch({ id: "c2", caughtAt: 1_700_000_002_000 }),
+              ],
+            }),
+            dexSpecies({ speciesId: 26, catches: [dexCatch({ id: "c3" })] }),
+          ],
+        }),
+      ),
+    );
     await openCompanion();
 
-    expect(await screen.findByRole("img", { name: "common species 3" })).toBeTruthy();
-    expect(screen.queryByText("null")).toBeNull();
+    expect(await screen.findByText("× 2")).toBeTruthy();
+    expect(screen.queryByText("× 1")).toBeNull();
+  });
+
+  test("marks a species shiny with a glyph, alongside its count", async () => {
+    // A glyph and not a colour: the panel's rule reserves colour for provider
+    // identity and state, and shininess is neither.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexSpecies({
+              speciesId: 3,
+              isShiny: true,
+              catches: [
+                dexCatch({ id: "c1", isShiny: true, caughtAt: 1_700_000_008_000 }),
+                dexCatch({ id: "c2", isShiny: false, caughtAt: 1_700_000_002_000 }),
+              ],
+            }),
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+
+    expect(await screen.findByText("✦ × 2")).toBeTruthy();
+  });
+
+  test("keeps nature off the cell, because a cell is a species", async () => {
+    // Nature belongs to an individual. Two catches with different natures, and
+    // neither may appear until the record is opened — a cell that printed one
+    // would be claiming a species has a temperament.
+    renderCompanion(
+      serving(
+        view({
+          dex: [
+            dexSpecies({
+              speciesId: 3,
+              catches: [
+                dexCatch({ id: "c1", nature: "modest", caughtAt: 1_700_000_008_000 }),
+                dexCatch({ id: "c2", nature: "adamant", caughtAt: 1_700_000_002_000 }),
+              ],
+            }),
+          ],
+        }),
+      ),
+    );
+    await openCompanion();
+    await screen.findByRole("img", { name: "common species 3" });
+
+    expect(screen.queryByText("modest")).toBeNull();
+    expect(screen.queryByText("adamant")).toBeNull();
+  });
+});
+
+describe("a Pokédex record", () => {
+  /** The Venusaur line, all three stages named, one catch through it. */
+  const line = [
+    dexSpecies({
+      speciesId: 1,
+      name: "Bulbasaur",
+      catches: [dexCatch({ id: "c1", chainOrder: [1, 2, 3] })],
+    }),
+    dexSpecies({
+      speciesId: 2,
+      name: "Ivysaur",
+      catches: [dexCatch({ id: "c1", chainOrder: [1, 2, 3] })],
+    }),
+    dexSpecies({
+      speciesId: 3,
+      name: "Venusaur",
+      catches: [dexCatch({ id: "c1", chainOrder: [1, 2, 3], nature: "relaxed" })],
+    }),
+  ];
+
+  async function openRecord(dex: DexSpecies[], name: string) {
+    renderCompanion(serving(view({ dex })));
+    await openCompanion();
+    await userEvent.click(await screen.findByRole("button", { name: new RegExp(name) }));
+  }
+
+  test("captions every stage of the evolution line with both number and name", async () => {
+    // The bug this feature exists to fix. The detail used to caption the stage
+    // matching `final_id` with a name and every other stage with a bare number,
+    // so a Venusaur's line read `#1 → #2 → Venusaur`. That was not a cold cache
+    // — no name was ever resolved for a non-final stage — so it was permanent,
+    // and it read as a rendering fault rather than as missing data.
+    await openRecord(line, "Venusaur");
+
+    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
+    expect(screen.getByText("#2 Ivysaur")).toBeTruthy();
+    expect(screen.getByText("#3 Venusaur")).toBeTruthy();
+    // And the record's own title says both too, asserted through the heading's
+    // accessible name — which is the concatenation of its two slots, and so is
+    // a stronger claim than two `getByText` calls that would pass with the
+    // number rendered anywhere on the panel.
+    expect(screen.getByRole("heading", { name: "#3 Venusaur" })).toBeTruthy();
+  });
+
+  test("falls back to the number alone for a stage the cache cannot name yet", async () => {
+    // A cold cache is an ordinary state, not an error. The middle stage is
+    // unnamed and its neighbours are not, because a fallback has to survive
+    // sitting between two resolved names.
+    const partial = [
+      line[0] as DexSpecies,
+      dexSpecies({
+        speciesId: 2,
+        name: null,
+        catches: [dexCatch({ id: "c1", chainOrder: [1, 2, 3] })],
+      }),
+      line[2] as DexSpecies,
+    ];
+    await openRecord(partial, "Venusaur");
+
+    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
+    // Twice on the page and both are wanted: the unnamed species has a cell of
+    // its own on the grid, and the line has a caption for it. What matters is
+    // that both say the number and nothing else.
+    expect(screen.getAllByText("#2")).toHaveLength(2);
+    // Never the record's name borrowed onto a stage that is not it, and never
+    // the number standing in for a name it does not have.
+    expect(screen.queryByText("#2 Venusaur")).toBeNull();
+    expect(screen.queryByText("#2 #2")).toBeNull();
+  });
+
+  test("names a stage the current filter has hidden", async () => {
+    // The name index has to be built from the whole collection rather than
+    // from what is on screen. Eevee is common and Vaporeon is legendary, so
+    // filtering to legendary takes Eevee off the grid — and its name with it,
+    // if the index were built from the filtered list. The line would then read
+    // `#133 → #134 Vaporeon` for as long as the filter was on.
+    const eeveeLine = [
+      dexSpecies({
+        speciesId: 133,
+        name: "Eevee",
+        rarity: "common",
+        catches: [dexCatch({ id: "c1", chainOrder: [133, 134] })],
+      }),
+      dexSpecies({
+        speciesId: 134,
+        name: "Vaporeon",
+        rarity: "legendary",
+        catches: [dexCatch({ id: "c1", chainOrder: [133, 134] })],
+      }),
+    ];
+    renderCompanion(serving(view({ dex: eeveeLine })));
+    await openCompanion();
+    await userEvent.click(await screen.findByRole("button", { name: "legendary" }));
+    await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
+
+    expect(screen.getByText("#133 Eevee")).toBeTruthy();
+  });
+
+  test("marks which stage of the line this record is about", async () => {
+    // The chain exists to say where a Pokémon sits among its own forms, so the
+    // "you are here" is the point of drawing it. Asserted through
+    // `aria-current` rather than through the accent border, because the border
+    // is styling — and because a marker only a sighted reader gets is half a
+    // marker.
+    await openRecord(line, "Ivysaur");
+
+    const current = screen.getByRole("figure", { current: true });
+    expect(current.textContent).toContain("#2 Ivysaur");
+    // Exactly one, so the marker cannot be on every tile or on none.
+    expect(screen.getAllByRole("figure", { current: true })).toHaveLength(1);
+  });
+
+  test("draws one line per branch a species was caught through", async () => {
+    // Eevee. Its chain branches, so one Eevee record can hold a Vaporeon catch
+    // and a Jolteon catch. A single line on the record would have to pick a
+    // winner and would print "Eevee → Vaporeon" over a Jolteon the player owns.
+    const branched = [
+      dexSpecies({
+        speciesId: 133,
+        name: "Eevee",
+        catches: [
+          dexCatch({ id: "c1", chainOrder: [133, 134], caughtAt: 1_700_000_008_000 }),
+          dexCatch({ id: "c2", chainOrder: [133, 135], caughtAt: 1_700_000_002_000 }),
+        ],
+      }),
+      dexSpecies({
+        speciesId: 134,
+        name: "Vaporeon",
+        catches: [dexCatch({ id: "c1", chainOrder: [133, 134] })],
+      }),
+      dexSpecies({
+        speciesId: 135,
+        name: "Jolteon",
+        catches: [dexCatch({ id: "c2", chainOrder: [133, 135] })],
+      }),
+    ];
+    await openRecord(branched, "Eevee");
+
+    expect(screen.getByText("#134 Vaporeon")).toBeTruthy();
+    expect(screen.getByText("#135 Jolteon")).toBeTruthy();
+    // Eevee heads both lines, so its caption appears once per line.
+    expect(screen.getAllByText("#133 Eevee")).toHaveLength(2);
+  });
+
+  test("draws one line when two catches walked the same one", async () => {
+    // The common case, and the one a naive per-catch loop gets wrong: two
+    // Venusaur graduations are two catches through one line, and drawing it
+    // twice would read as a branch that does not exist.
+    const twice = [
+      dexSpecies({
+        speciesId: 3,
+        name: "Venusaur",
+        catches: [
+          dexCatch({ id: "c1", chainOrder: [1, 2, 3], caughtAt: 1_700_000_008_000 }),
+          dexCatch({ id: "c2", chainOrder: [1, 2, 3], caughtAt: 1_700_000_002_000 }),
+        ],
+      }),
+    ];
+    await openRecord(twice, "Venusaur");
+
+    // Once, in the single line — not once per catch.
+    expect(screen.getAllByText("#3 Venusaur")).toHaveLength(1);
+  });
+
+  test("lists every catch with its own nature", async () => {
+    // Distinct natures, because one would pass against a record that printed
+    // the first catch's nature on every row.
+    const twice = [
+      dexSpecies({
+        speciesId: 3,
+        name: "Venusaur",
+        catches: [
+          dexCatch({ id: "c1", nature: "modest", caughtAt: 1_700_000_008_000 }),
+          dexCatch({ id: "c2", nature: "adamant", caughtAt: 1_700_000_002_000 }),
+        ],
+      }),
+    ];
+    await openRecord(twice, "Venusaur");
+
+    expect(screen.getByText(/modest/)).toBeTruthy();
+    expect(screen.getByText(/adamant/)).toBeTruthy();
+  });
+
+  test("omits the nature of a catch recorded before natures were stored", async () => {
+    // Nullable in the store, so the record has to survive it without printing
+    // "null" in a history row.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 3,
+          name: "Venusaur",
+          catches: [dexCatch({ id: "c1", nature: null })],
+        }),
+      ],
+      "Venusaur",
+    );
+
+    expect(screen.queryByText(/null/)).toBeNull();
+  });
+
+  test("dates the species from its first catch, not its latest", async () => {
+    // "First caught" is the fact a Pokédex records, and the server sends it as
+    // its own field rather than leaving the panel to infer it from the list.
+    // The date here is deliberately earlier than either catch, so a record that
+    // derived it from `catches` instead of reading the field fails.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 3,
+          name: "Venusaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          catches: [
+            dexCatch({ id: "c1", caughtAt: Date.UTC(2026, 5, 1) }),
+            dexCatch({ id: "c2", caughtAt: Date.UTC(2025, 2, 9) }),
+          ],
+        }),
+      ],
+      "Venusaur",
+    );
+
+    // Label and value are separate elements now, so they are asserted
+    // separately — and the label is what says which *kind* of date this is.
+    expect(screen.getByText("first caught")).toBeTruthy();
+    expect(screen.getByText(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString())).toBeTruthy();
+  });
+
+  test("says a date is the graduation when the stage instant was never recorded", async () => {
+    // Every Pokémon caught before the instants were stored reads this way. The
+    // date is real but it is the wrong *kind* of date — the moment the line
+    // finished, not the moment this species was reached — and a record that
+    // printed "first caught" over it would be presenting a Venusaur's date as a
+    // Bulbasaur's. Saying which it is costs a word and buys the difference.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          firstCaughtExact: false,
+          catches: [dexCatch({ id: "c1", enteredAt: null, caughtAt: Date.UTC(2024, 0, 15) })],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    // The field label carries the distinction. Both dates on this fixture are
+    // the same instant, so the label is the *only* thing that says a graduation
+    // is standing in for a first sighting.
+    expect(screen.getByText("line graduated")).toBeTruthy();
+    expect(screen.queryByText("first caught")).toBeNull();
+  });
+
+  test("dates a catch from the stage it reached, not the line it finished", async () => {
+    // The per-catch half of the same rule, and the one a fixture can get wrong
+    // silently: `enteredAt` and `caughtAt` are different days here, so a row
+    // printing the graduation is visible.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          catches: [
+            dexCatch({
+              id: "c1",
+              nature: "modest",
+              enteredAt: Date.UTC(2024, 0, 15),
+              caughtAt: Date.UTC(2024, 6, 30),
+            }),
+          ],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    // The encounter row is a grid, so the date and the nature are their own
+    // cells. Asserted through the row's own text, which keeps this a claim
+    // about the row rather than about the page.
+    const row = screen.getByRole("listitem");
+    expect(row.textContent).toContain(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString());
+    expect(row.textContent).toContain("modest");
+    // Never the graduation, which is six months later on this fixture.
+    expect(row.textContent).not.toContain(new Date(Date.UTC(2024, 6, 30)).toLocaleDateString());
+  });
+
+  test("dates each catch from its own instant", async () => {
+    // The history rows carry a date each and nothing asserted them, so a record
+    // that printed `firstCaughtAt` on every row — or dropped the date from the
+    // row entirely — passed the whole suite. Three distinct days, none of them
+    // shared with the first-caught date, so a row showing the wrong one is
+    // visible rather than coincidentally right.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 3,
+          name: "Venusaur",
+          firstCaughtAt: Date.UTC(2024, 0, 15),
+          catches: [
+            dexCatch({
+              id: "c1",
+              nature: "modest",
+              enteredAt: Date.UTC(2026, 5, 1),
+              caughtAt: Date.UTC(2026, 5, 1),
+            }),
+            dexCatch({
+              id: "c2",
+              nature: "adamant",
+              enteredAt: Date.UTC(2025, 2, 9),
+              caughtAt: Date.UTC(2025, 2, 9),
+            }),
+          ],
+        }),
+      ],
+      "Venusaur",
+    );
+
+    const newest = new Date(Date.UTC(2026, 5, 1)).toLocaleDateString();
+    const oldest = new Date(Date.UTC(2025, 2, 9)).toLocaleDateString();
+    // Each date beside its own catch's nature, asserted per row — which is what
+    // makes this a claim about the pairing rather than about the page. Two rows
+    // with the dates swapped would pass a pair of bare `getByText` calls.
+    const rows = screen.getAllByRole("listitem").map((row) => row.textContent);
+    expect(rows).toEqual([`${newest}modest`, `${oldest}adamant`]);
   });
 });
 
 describe("the Dex rarity filter", () => {
   /** One of each rarity, each with a species number found nowhere else. */
   const mixed = [
-    dexEntry({ id: "d1", finalId: 3, rarity: "common", nature: "adamant" }),
-    dexEntry({ id: "d2", finalId: 26, rarity: "rare", nature: "brave" }),
-    dexEntry({ id: "d3", finalId: 134, rarity: "legendary", isShiny: true, nature: "modest" }),
+    dexSpecies({ speciesId: 3, rarity: "common" }),
+    dexSpecies({ speciesId: 26, rarity: "rare" }),
+    dexSpecies({ speciesId: 134, rarity: "legendary", isShiny: true }),
   ];
 
-  test("shows every graduate until a rarity is chosen", async () => {
+  test("shows every species until a rarity is chosen", async () => {
     renderCompanion(serving(view({ dex: mixed })));
     await openCompanion();
 
@@ -1269,8 +1640,8 @@ describe("the Dex rarity filter", () => {
     // Its own fixture rather than an entry appended to `mixed`, because the
     // filtered-empty test below depends on `uncommon` being absent from that one.
     const pair = [
-      dexEntry({ id: "p1", finalId: 3, rarity: "common", nature: "adamant" }),
-      dexEntry({ id: "p2", finalId: 12, rarity: "uncommon", nature: "timid" }),
+      dexSpecies({ speciesId: 3, rarity: "common" }),
+      dexSpecies({ speciesId: 12, rarity: "uncommon" }),
     ];
     renderCompanion(serving(view({ dex: pair })));
     await openCompanion();
@@ -1311,26 +1682,26 @@ describe("the Dex rarity filter", () => {
     expect(screen.getByRole("img", { name: "rare species 26" })).toBeTruthy();
   });
 
-  test("says the filter is empty rather than claiming nothing has graduated", async () => {
+  test("says the filter is empty rather than claiming nothing has been caught", async () => {
     // The two facts a shared empty state would merge. An operator who has 200
-    // graduates and filters to a rarity they have never caught must not be told
+    // species and filters to a rarity they have never caught must not be told
     // their collection is empty — that reads as a bug in the panel.
     renderCompanion(serving(view({ dex: mixed })));
     await openCompanion();
     await userEvent.click(await screen.findByRole("button", { name: "uncommon" }));
 
-    expect(screen.getByText("No uncommon graduates yet.")).toBeTruthy();
-    expect(screen.queryByText("Nothing graduated yet.")).toBeNull();
+    expect(screen.getByText("No uncommon species yet.")).toBeTruthy();
+    expect(screen.queryByText("Nothing caught yet.")).toBeNull();
     // The egg is the only image left: the grid is gone, not merely emptied of
     // matches while keeping placeholder cells.
     expect(screen.getAllByRole("img")).toHaveLength(1);
   });
 
-  test("offers no filter at all when nothing has graduated", async () => {
+  test("offers no filter at all when nothing has been caught", async () => {
     renderCompanion(serving(view({ dex: [] })));
     await openCompanion();
 
-    expect(await screen.findByText("Nothing graduated yet.")).toBeTruthy();
+    expect(await screen.findByText("Nothing caught yet.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "legendary" })).toBeNull();
   });
 });
@@ -1470,7 +1841,11 @@ describe("the folding sections", () => {
         inventory: { rareCandy: 3, mint: 7 },
       },
       shop: [{ entry: { kind: "item", item: "mint" }, price: 100 }],
-      dex: [dexEntry({ id: "d1" }), dexEntry({ id: "d2" }), dexEntry({ id: "d3" })],
+      dex: [
+        dexSpecies({ speciesId: 10 }),
+        dexSpecies({ speciesId: 11 }),
+        dexSpecies({ speciesId: 12 }),
+      ],
     });
   }
 
@@ -1482,7 +1857,8 @@ describe("the folding sections", () => {
 
     expect(await screen.findByText("1 offer")).toBeTruthy();
     expect(screen.getByText("2 held")).toBeTruthy();
-    expect(screen.getByText("3 graduates")).toBeTruthy();
+    // "species" and not "speciess": the one irregular noun on this panel.
+    expect(screen.getByText("3 species")).toBeTruthy();
   });
 
   test("folds a section away and says so", async () => {
@@ -1663,122 +2039,176 @@ describe("an incubating egg", () => {
   });
 });
 
-describe("a Dex entry opened", () => {
-  const graduate = dexEntry({
-    id: "d1",
-    finalId: 26,
-    chainOrder: [172, 25, 26],
+describe("a Dex record opened", () => {
+  /** Raichu, caught once through the Pichu line, with no stage before it named. */
+  const raichu = dexSpecies({
+    speciesId: 26,
     rarity: "rare",
-    nature: "brave",
     name: "Raichu",
+    catches: [dexCatch({ id: "c1", chainOrder: [172, 25, 26], nature: "brave" })],
   });
 
-  test("shows the record the grid has no room for", async () => {
-    renderCompanion(serving(view({ dex: [graduate] })));
+  test("shows the record the grid has no room for, in a modal dialog", async () => {
+    renderCompanion(serving(view({ dex: [raichu] })));
     await openCompanion();
 
     const cell = await screen.findByRole("button", { name: /Raichu/ });
-    expect(cell.getAttribute("aria-expanded")).toBe("false");
+    // A dialog is not a disclosure: the cell summons something that takes over
+    // the page rather than revealing a region that stays part of it. Nothing is
+    // expanded, so `aria-expanded` would be a lie about the relationship.
+    expect(cell.getAttribute("aria-expanded")).toBeNull();
+    expect(cell.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(screen.queryByRole("dialog")).toBeNull();
 
     await userEvent.click(cell);
 
-    expect(cell.getAttribute("aria-expanded")).toBe("true");
-    // The whole line, not only the form it graduated as. A stage the species
-    // cache has no name for shows its number, which is the same fallback the
-    // grid uses.
+    // Named by the species, so a screen reader announces which record opened
+    // rather than "dialog".
+    expect(screen.getByRole("dialog", { name: "#26 Raichu" })).toBeTruthy();
+    // The whole line, not only the form it graduated as. Neither earlier stage
+    // is in this fixture's collection, so neither has a name and both fall back
+    // to a bare number — the same fallback the grid uses.
     expect(screen.getByText("#172")).toBeTruthy();
     expect(screen.getByText("#25")).toBeTruthy();
-    // Both of these read twice on the page, and both duplicates are wanted. The
-    // nature is captioned on the cell so the grid says it at a glance and
-    // chipped in the detail as part of the whole record; "rare" is also the
-    // name of a filter button. Counting is the assertion that stays true when
-    // either of those is someone's deliberate choice.
-    expect(screen.getAllByText("brave")).toHaveLength(2);
+    // The nature reads once now rather than twice: it left the cell when a cell
+    // became a species, so the catch list is the only place it appears. "rare"
+    // still reads twice, because it is also the name of a filter button.
+    expect(screen.getAllByText(/brave/)).toHaveLength(1);
     expect(screen.getAllByText("rare")).toHaveLength(2);
   });
 
-  test("closes when the same entry is clicked again", async () => {
-    renderCompanion(serving(view({ dex: [graduate] })));
+  test("closes on its own close control", async () => {
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("closes when the backdrop is clicked", async () => {
+    // A click that lands on the dialog element itself rather than on its
+    // contents is a click on the backdrop — the top-layer box fills the
+    // viewport and the panel inside it is what the eye reads as "the dialog".
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    await userEvent.click(screen.getByRole("dialog"));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("a click inside the record does not close it", async () => {
+    // The other half of the backdrop rule, and the half that breaks: a handler
+    // on the dialog that does not check the target dismisses the record the
+    // moment somebody clicks its heading.
+    renderCompanion(serving(view({ dex: [raichu] })));
+    await openCompanion();
+
+    await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
+    await userEvent.click(screen.getByRole("heading", { name: "#26 Raichu" }));
+
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
+  test("gives focus back to the cell that opened it", async () => {
+    // Without this the keyboard lands back at the top of the document and an
+    // operator has to tab through the whole panel to reach the next cell. React
+    // re-renders the grid while the dialog is open, so the element has to be
+    // held by ref rather than found again afterwards.
+    renderCompanion(serving(view({ dex: [raichu] })));
     await openCompanion();
 
     const cell = await screen.findByRole("button", { name: /Raichu/ });
     await userEvent.click(cell);
-    expect(screen.getByText("#172")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
-    await userEvent.click(cell);
-    expect(cell.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("#172")).toBeNull();
+    expect(document.activeElement).toBe(cell);
   });
 
-  test("closes when a filter could take the open entry off the grid", async () => {
-    // A detail panel describing a sprite that is no longer on screen is the
-    // same class of lie as a bag listing something it does not hold — and worse
-    // here, because it would sit under a grid of unrelated Pokémon looking like
-    // one of theirs.
+  test("stays open when a filter would have taken its cell off the grid", async () => {
+    // The rule that expand-in-place needed and a dialog does not. A detail
+    // placed *in* the grid was orphaned when a filter removed the cell it sat
+    // under, so the selection had to be cleared; a modal has no grid position
+    // to be orphaned from, and closing it would discard what the operator was
+    // reading because they touched an unrelated control.
     renderCompanion(
-      serving(view({ dex: [graduate, dexEntry({ id: "d2", rarity: "common", name: "Rattata" })] })),
+      serving(
+        view({
+          dex: [raichu, dexSpecies({ speciesId: 19, rarity: "common", name: "Rattata" })],
+        }),
+      ),
     );
     await openCompanion();
 
     await userEvent.click(await screen.findByRole("button", { name: /Raichu/ }));
-    expect(screen.getByText("#172")).toBeTruthy();
-
     await userEvent.click(screen.getByRole("button", { name: "common" }));
 
-    expect(screen.queryByText("#172")).toBeNull();
-    expect(screen.queryByText("brave")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "#26 Raichu" })).toBeTruthy();
   });
 });
 
 describe("the Dex grid's identity", () => {
-  test("keeps a cell alive when the roster reorders underneath it", async () => {
-    // `readDex` orders by `caught_at DESC`, so one new graduation arriving on a
-    // poll shifts every index. The cells carry `key={entry.id}`, which reads as
-    // though that is handled — but each `.map` returned a bare ARRAY of
-    // [cell, detail], and React reconciles unkeyed nested arrays as implicit
-    // fragments matched by POSITION. The outer index became part of the
-    // identity, so every cell unmounted and remounted on any reorder: every
-    // sprite destroyed and refetched, and the focused cell losing focus
-    // mid-keyboard-navigation.
+  test("keeps a cell alive when the grid reorders underneath it", async () => {
+    // The cells carry a key, which reads as though reordering is handled — but
+    // each `.map` used to return a bare ARRAY of [cell, detail], and React
+    // reconciles unkeyed nested arrays as implicit fragments matched by
+    // POSITION. The outer index became part of the identity, so every cell
+    // unmounted and remounted on any reorder: every sprite destroyed and
+    // refetched, and the focused cell losing focus mid-keyboard-navigation.
+    //
+    // The collection arrives sorted by number, so a reorder is now a species
+    // appearing rather than the whole list resequencing — which is a smaller
+    // shift and exactly as capable of remounting a positionally-keyed grid.
     //
     // Rendered directly rather than through the panel: the panel would need a
     // poll to reorder anything, and focus identity is the assertion.
-    const a = dexEntry({ id: "a", finalId: 3, name: "Venusaur" });
-    const b = dexEntry({ id: "b", finalId: 6, name: "Charizard" });
-    const c = dexEntry({ id: "c", finalId: 9, name: "Blastoise" });
+    const a = dexSpecies({ speciesId: 3, name: "Venusaur" });
+    const b = dexSpecies({ speciesId: 6, name: "Charizard" });
+    const c = dexSpecies({ speciesId: 9, name: "Blastoise" });
 
-    const { rerender } = render(<Dex entries={[a, b, c]} pluginId="pokemon" />);
+    const { rerender } = render(<Dex entries={[b, c]} pluginId="pokemon" />);
     const before = screen.getByRole("button", { name: /Charizard/ });
     before.focus();
     expect(document.activeElement).toBe(before);
 
-    // A newer graduation lands at the front.
-    rerender(<Dex entries={[c, a, b]} pluginId="pokemon" />);
+    // A lower-numbered species is collected and takes the front of the grid.
+    rerender(<Dex entries={[a, b, c]} pluginId="pokemon" />);
 
     const after = screen.getByRole("button", { name: /Charizard/ });
     expect(after).toBe(before);
     expect(document.activeElement).toBe(after);
   });
 
-  test("names a stage in the line only when it really is the final form", async () => {
-    // `name` is the name of `finalId`, which is a separate column from
-    // `chain_order` — and `readDex` drops non-numeric chain members while
-    // leaving `final_id` untouched, so a corrupt row can leave the two
-    // disagreeing. Captioning by position then prints the graduate's name under
-    // whichever sprite happens to be last, which on an Eevee line means
-    // "Vaporeon" written under Eevee.
-    render(
-      <Dex
-        entries={[dexEntry({ id: "v", chainOrder: [133], finalId: 134, name: "Vaporeon" })]}
-        pluginId="pokemon"
-      />,
-    );
+  test("captions a stage from its own species, never from the record it is under", async () => {
+    // The bug this replaces went the other way: the detail named whichever
+    // stage matched `final_id` and numbered the rest, so it could print the
+    // graduate's name under a sprite that was not the graduate. Naming each
+    // stage from its own id cannot make that mistake — but only if the lookup
+    // is by species and not by position, which is what this pins.
+    //
+    // Vaporeon is the record; Eevee is the stage before it and has its own
+    // name. A caption resolved by position would put "Vaporeon" under Eevee.
+    const eevee = dexSpecies({
+      speciesId: 133,
+      name: "Eevee",
+      catches: [dexCatch({ id: "c1", chainOrder: [133, 134] })],
+    });
+    const vaporeon = dexSpecies({
+      speciesId: 134,
+      name: "Vaporeon",
+      catches: [dexCatch({ id: "c1", chainOrder: [133, 134] })],
+    });
+    render(<Dex entries={[eevee, vaporeon]} pluginId="pokemon" />);
 
     await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
 
-    // The surviving stage is 133, which is not 134, so it is not the graduate
-    // and must not wear its name.
-    expect(screen.getByText("#133")).toBeTruthy();
+    expect(screen.getByText("#133 Eevee")).toBeTruthy();
+    expect(screen.queryByText("#133 Vaporeon")).toBeNull();
   });
 });
 

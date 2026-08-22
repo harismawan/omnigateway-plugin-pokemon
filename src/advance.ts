@@ -31,6 +31,14 @@ export type CompanionEvent =
        * site lost every middle form and wrote `[50, 50]` for a one-form line.
        */
       chainOrder: readonly number[];
+      /**
+       * When each stage in `chainOrder` was entered, and the only way out.
+       *
+       * Graduating discards the companion, so the state that accumulated these
+       * is gone by the time the caller sees the result — carried here for the
+       * same reason `chainOrder` is.
+       */
+      stageTimes: readonly number[];
       rarity: Rarity;
       isShiny: boolean;
       nature: Nature;
@@ -60,8 +68,15 @@ const MAX_TRANSITIONS_PER_ADVANCE = 64;
  * Pure. No clock, no randomness, no I/O. The species a hatch produces was rolled
  * earlier and written to `pendingHatch`, which is what lets this run offline and
  * what makes every transition below reproducible in a test.
+ *
+ * `now` is a parameter for that reason and not an exception to it — the rule
+ * this plugin follows is that the clock is passed, never read. It is used for
+ * one thing: stamping the instant a stage was entered, which is a fact no
+ * amount of arithmetic over tokens can recover later. Every transition below
+ * still depends only on the stored total, so passing a different `now` changes
+ * the timestamps and nothing else.
  */
-export function advance(state: CompanionState, tokensTotal: number): AdvanceResult {
+export function advance(state: CompanionState, tokensTotal: number, now: number): AdvanceResult {
   const gained = Math.max(0, Math.trunc(tokensTotal) - state.consumedTotal);
 
   const events: CompanionEvent[] = [];
@@ -126,6 +141,10 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
         baseId: hatch.path[0] ?? hatch.speciesId,
         plannedPath: hatch.path,
         stageIndex: 0,
+        // Stage 0 begins here. Stamped at the transition rather than when the
+        // egg met its threshold, because those are different instants whenever
+        // a roll had not landed yet and the egg sat waiting for one.
+        stageTimes: [now],
         // Everything past the threshold carries into the hatchling rather than
         // being lost, so a burst that overshoots is not punished.
         usedAtStage: next.eggUsage - EGG_HATCH_THRESHOLD,
@@ -202,6 +221,11 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
           baseId: reveal.path[0] as number,
           plannedPath: reveal.path,
           stageIndex: 0,
+          // Started over, not carried across. `plannedPath` is a different line
+          // from here and `stageIndex` resets with it, so the disguise's
+          // instants would date the revealed base form to a stage it never
+          // occupied. The growth crosses over; the history does not.
+          stageTimes: [now],
           // The disguise's overflow is this individual's growth and follows it
           // across, exactly as it does through an evolution.
           usedAtStage: excess,
@@ -219,7 +243,18 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
         from: mon.plannedPath[mon.stageIndex] as number,
         to: mon.plannedPath[mon.stageIndex + 1] as number,
       });
-      next = { ...next, active: { ...mon, stageIndex: mon.stageIndex + 1, usedAtStage: excess } };
+      next = {
+        ...next,
+        active: {
+          ...mon,
+          stageIndex: mon.stageIndex + 1,
+          usedAtStage: excess,
+          // Appended, so the array stays parallel to `plannedPath`. Several
+          // evolutions in one `advance` all carry this call's `now` — see the
+          // note on `stageTimes` about observed rather than true instants.
+          stageTimes: [...mon.stageTimes, now],
+        },
+      };
       continue;
     }
 
@@ -228,6 +263,12 @@ export function advance(state: CompanionState, tokensTotal: number): AdvanceResu
       baseId: mon.baseId,
       finalId: mon.plannedPath[mon.plannedPath.length - 1] as number,
       chainOrder: mon.plannedPath,
+      // The last stage is entered and left in the same step — a graduation is
+      // the transition *out* of the final form — so its instant is this call's
+      // `now` and was never appended to the state that is about to be
+      // discarded. Padded here rather than in the caller, so the two arrays the
+      // Dex stores are the same length by construction.
+      stageTimes: [...mon.stageTimes, now].slice(0, mon.plannedPath.length),
       rarity: mon.rarity,
       isShiny: mon.isShiny,
       nature: mon.nature,

@@ -134,6 +134,27 @@ one corrupt entry must not take the save. PokeTokenBar needs a `Lossy<T>`
 decoding wrapper precisely because its Dex is a JSON array; rows give that
 isolation for free.
 
+**Amendment, 22 Aug 2026 — the table stays a graduation log; the Pokédex the
+panel shows is derived from it.** See
+`2026-08-22-pokedex-species-collection-design.md`. The schema below is
+unchanged and no migration was needed: `chain_order` already records the whole
+line an individual walked, and a row exists only because it walked all of it, so
+expanding that column yields every species the key has owned rather than only
+the finals. `readDex` still returns rows newest-first — `collectedFinals` and
+the `dex_by_key` index both want exactly that — and `src/collection.ts` does the
+expansion and the by-number sort on read.
+
+**Amendment, 22 Aug 2026 — migration 6 adds `stage_times` to the dex row, and
+this one *is* a schema change.** See
+`2026-08-22-stage-instants-and-dex-dialog-design.md`. A JSON array parallel to
+`chain_order`, recording when each stage was entered, nullable with no default
+on the same reasoning `last_credit_at` uses in migration 5. It cannot be derived:
+growth is counted in tokens, no arithmetic over tokens yields a date, and
+`request_logs` is pruned by retention and is forbidden as a source here by the
+rule two sections below. Rows written before it have SQL NULL, which means
+"never recorded" and is rendered as its own fact rather than backfilled from
+`caught_at` — that would invent a Bulbasaur date out of a Venusaur one.
+
 ### Failure directions are split on purpose
 
 - **Dex entries fail open.** An unknown `rarity` or `nature` on a historical row
@@ -188,6 +209,16 @@ Deliberately not derived from observed throughput: that makes two installs'
 numbers incomparable and introduces a feedback loop between playing and pacing.
 
 ## The pure core
+
+**Amendment, 22 Aug 2026 — `advance` takes `now`, and the rule is unchanged.**
+See `2026-08-22-stage-instants-and-dex-dialog-design.md`. The clock is *passed*,
+never read, which is what this section has always required; `advance` uses it for
+one thing, stamping the instant a stage was entered, and every transition still
+depends only on the stored total. A different `now` changes the timestamps and
+nothing else, so a retried settle is still the same settle. The stamp exists
+because that instant is unrecoverable afterwards: growth is counted in tokens, no
+arithmetic over tokens yields a date, and `request_logs` is pruned by retention
+and forbidden as a source here.
 
 Game rules live in the plugin's own pure module — no I/O, no clock, no ambient
 randomness:
@@ -305,6 +336,16 @@ long-running install's Dex has a row per graduation, and warming those unbounded
 would be a burst fired from a request path. One batch resolves through a single
 shared chain cache, because a Dex commonly holds several rows from one evolution
 line and `speciesDetail` builds its cache per call.
+
+**Amendment, 22 Aug 2026 — the queue is every un-named species in the
+collection, not every un-named final.** Up to three times as many ids for an
+install full of three-stage lines, and the bound is unchanged at eight per poll:
+that is what the bound is for. What did change is the order the queue is built
+in. It was `caught_at DESC`, which is what made a handful of permanently missing
+species at the front starve everything behind them; it is now ascending by
+species number, which is deterministic rather than merely different. The backoff
+described below is still the thing that actually fixes the starvation — order
+only decides who waits.
 
 **A failed warm is remembered, with backoff, and that is a deliberate departure
 from how `nameOf` treats a miss.** The first version of this reasoned that a
@@ -436,6 +477,11 @@ An ESM bundle built against `packages/dashboard-sdk`, rendered inline under a
   derived from recent traffic on that key.
 - Growth to next evolution, wallet, and current form.
 - Dex, filterable by rarity, showing shiny and nature.
+  **Amended 22 Aug 2026:** one cell per *species* rather than per graduation,
+  ordered by number, with pre-evolutions counted. Nature is per-individual and
+  so moved off the cell into the detail's catch list; shiny stayed, meaning "any
+  individual of this species was". See
+  `2026-08-22-pokedex-species-collection-design.md`.
 - Shop and bag.
 
 **Amended during implementation: `focus` is not built, and five states ship.**

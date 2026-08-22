@@ -12,17 +12,60 @@ export type Rarity = "common" | "uncommon" | "rare" | "legendary";
 
 export type ShopEntry = { kind: "item"; item: string } | { kind: "egg"; tier: Rarity | null };
 
-export type DexEntry = {
+/** One individual that passed through a species, as the record's history lists it. */
+export type DexCatch = {
+  /** The Dex row's id, so a catch list has stable keys. */
   id: string;
-  baseId: number;
-  finalId: number;
-  /** The full evolution line, as `readDex` returns it. */
+  /**
+   * The evolution line this individual walked.
+   *
+   * On the catch rather than on the species, because Eevee's chain branches: a
+   * Vaporeon catch walked `[133, 134]` and a Jolteon catch `[133, 135]`, and a
+   * single line on the Eevee record would have to pick one and print
+   * "Eevee → Vaporeon" over a Jolteon the player also owns.
+   */
   chainOrder: number[];
-  rarity: Rarity;
   isShiny: boolean;
   /** Null for a graduation recorded before natures were stored. */
   nature: string | null;
+  /** When the whole line graduated — the same instant for every species on it. */
   caughtAt: number;
+  /**
+   * When this individual reached *this* species, or null for never recorded.
+   *
+   * Null for a graduation from before the plugin stored stage instants, and for
+   * a stage that graduation had already passed when it started. The record
+   * falls back to `caughtAt` and says that is what it did.
+   */
+  enteredAt: number | null;
+};
+
+/**
+ * One species this key has owned, however many individuals it took.
+ *
+ * A species and not a graduation, which is the difference between a Pokédex and
+ * a log: graduating a Venusaur puts Bulbasaur, Ivysaur and Venusaur here,
+ * because a row is written only once an individual has walked its whole line.
+ * The server derives these from the stored graduations on read — see
+ * `src/collection.ts`.
+ */
+export type DexSpecies = {
+  speciesId: number;
+  rarity: Rarity;
+  /** True when **any** individual of this species was shiny. */
+  isShiny: boolean;
+  firstCaughtAt: number;
+  /**
+   * Whether `firstCaughtAt` is when this species was reached, or a stand-in.
+   *
+   * False when no catch recorded an instant for this stage, in which case the
+   * date is the earliest *graduation* instead. For a pre-evolution the two can
+   * be months apart, so the panel names which one it is showing rather than
+   * presenting a graduation as a first sighting.
+   */
+  firstCaughtExact: boolean;
+  /** Newest first by stage instant. */
+  catches: DexCatch[];
   /** Resolved from the plugin's own species cache, so null on a cold one. */
   name: string | null;
 };
@@ -59,7 +102,7 @@ export type CompanionView = {
   lastCreditAt: number | null;
   /** What the stage the companion is standing at is called, or null. */
   name: string | null;
-  dex: DexEntry[];
+  dex: DexSpecies[];
   shop: Array<{ entry: ShopEntry; price: number }>;
   /** What the current stage or incubation costs. */
   nextThreshold: number;
