@@ -16,6 +16,7 @@ import {
   RARE_CANDY_XP,
   rarityFromCaptureRate,
 } from "./balance.ts";
+import { collect } from "./collection.ts";
 import { decideGrant, windowKey } from "./grants.ts";
 import {
   cachedSpeciesName,
@@ -578,20 +579,35 @@ export default definePlugin({
 
           const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
           const stageName = await nameOf(stageId);
-          // The name of what each entry graduated into, added alongside the
-          // stored row rather than into it: the Dex table holds facts about a
-          // graduation, and a species' name is a fact about PokéAPI.
+          // The Dex read as a collection rather than as the log it is stored
+          // as: one record per species the key has owned, pre-evolutions
+          // included, ascending by number. See `src/collection.ts` for why
+          // expanding `chain_order` is a reading of the row and not a guess.
+          //
+          // The name is added alongside the record rather than into it: the Dex
+          // table holds facts about a graduation, and a species' name is a fact
+          // about PokéAPI.
           const named = await Promise.all(
-            dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
+            collect(dex).map(async (record) => ({
+              ...record,
+              name: await nameOf(record.speciesId),
+            })),
           );
 
           // Best effort and deliberately not awaited, like the prefetch above.
           // The companion first, so the heading fills in before the trophy case:
           // a poll's warming budget is small, and the name an operator is
           // looking at is worth more of it than one in a grid of sprites.
+          //
+          // Every un-named species in the collection, not only the finals it
+          // used to be — up to three times as many ids for an install full of
+          // three-stage lines, which is what the eight-per-poll bound is for.
+          // It is also what lets the panel caption an evolution line without a
+          // second lookup: every stage of every line it can draw is itself in
+          // this array, so its name is already in the payload.
           warmNames([
             ...(stageId !== null && stageName === null ? [stageId] : []),
-            ...named.filter((entry) => entry.name === null).map((entry) => entry.finalId),
+            ...named.filter((record) => record.name === null).map((record) => record.speciesId),
           ]);
 
           return {

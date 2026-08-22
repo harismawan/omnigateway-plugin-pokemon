@@ -123,6 +123,23 @@ Earliest, rather than rarest, because it is derived from stored facts alone and
 so is stable across reads: the same rule that makes a retried roll the same
 roll.
 
+**And "earliest" needs a tie-break, or it is not a rule.** Two graduations land
+in the same millisecond whenever a large credit carries a companion through
+several lines at once — the collision `dexId` mixes a counter in to survive —
+and `readDex` orders by `caught_at DESC` with no secondary key, so on a tie the
+row order is SQLite's to choose. A strict `<` would hand `rarity` to whichever
+it chose, which is exactly the arbitrary winner the paragraph above disclaims.
+The tie goes to the lower id, compared by code unit rather than through
+`localeCompare` — that one reads the runtime's default collation, which would
+make the tie-break a property of the host rather than of the data. The same
+comparison orders `catches`, for the same reason: not because it is
+chronological, which nothing can recover, but because it is the same on every
+read, so a detail does not reshuffle on a poll.
+
+`firstCaughtAt` and `rarity` are therefore decided together, from one row.
+Taking the timestamp from one catch and the rarity from another would describe
+an individual that never existed.
+
 **`catches` is newest first, and the output is sorted by `speciesId`
 ascending.** Two different orders for two different things. The grid is a
 collection and reads by number; a species' own history is a log and reads newest
@@ -222,6 +239,14 @@ suppressed because a count that is always there stops being information.
 a species. It moves into the detail's catch list, where each catch carries its
 own.
 
+The record's title is an `h4` rather than the `strong` it replaces, and the rank
+is not the point — the role is. `SectionHead` and `HeroName` are both `h3`, so a
+record opened inside a section nests correctly, and what the promotion buys is a
+`heading` role whose accessible name is the concatenation of both slots. That is
+what lets `#3 Venusaur` be asserted as one fact rather than as two `getByText`
+calls that would pass with the number rendered anywhere on the page. The hero
+heading is asserted the same way for the same reason.
+
 The detail gains a catch list and loses nothing:
 
 ```
@@ -268,6 +293,9 @@ Test-first, at the narrowest stable boundary, as everywhere else here.
 - `catches` comes back newest first
 - a branched Eevee keeps both lines, one per catch
 - `rarity` follows the earliest catch when two rows disagree
+- an exact `caughtAt` tie resolves the same way whichever order the rows arrive
+  in — asserted both ways round, because a rule that depends on input order
+  passes whichever direction the fixture happens to use
 - an empty input yields an empty collection
 
 Every quantity in every fixture gets a distinct value — a fixture that gives the
@@ -286,6 +314,7 @@ names and never a class name:
   the regression test for the third complaint, and the one that would have
   caught it
 - a species with two catches shows `× 2`; one with a single catch shows no count
+- each catch's history row carries **its own** date, not the species'
 - the section count reads in species
 
 ## Files

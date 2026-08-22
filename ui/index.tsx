@@ -341,7 +341,7 @@ function CompanionBody({
       {refusal === null ? null : <Notice role="alert">{refusal}</Notice>}
 
       <Section
-        count={countOf(view.dex.length, "graduate")}
+        count={countOf(view.dex.length, "species", "species")}
         onToggle={() => toggle("dex")}
         open={open.dex}
         title="Pokédex"
@@ -356,11 +356,13 @@ function CompanionBody({
  * What a folded heading says it contains.
  *
  * Plural by hand rather than through a formatter: three words need pluralising
- * on this panel and every one of them is regular, so a dependency or a helper
- * table would be more machinery than the problem has.
+ * on this panel and a dependency or a helper table would be more machinery than
+ * the problem has. Two of the three are regular and take the default; "species"
+ * is its own plural and passes itself, which is cheaper than the alternative —
+ * a rule that guesses — and impossible to get subtly wrong.
  */
-function countOf(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+function countOf(n: number, noun: string, plural = `${noun}s`): string {
+  return `${n} ${n === 1 ? noun : plural}`;
 }
 
 export default definePluginUI({ mount: Companion });

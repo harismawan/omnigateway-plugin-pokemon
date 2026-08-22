@@ -714,6 +714,54 @@ export const Caption = styled.figcaption`
 `;
 
 /**
+ * A Dex record's title: the species number, then its name.
+ *
+ * `HeroName`'s shape one rank down, and an `h4` rather than the `strong` this
+ * replaces. `SectionHead` and `HeroName` are both `h3`, so a record opened
+ * inside a section nests correctly here — and the rank is what buys the thing
+ * `strong` could not give: a `heading` role, whose accessible name is the
+ * concatenation of both slots. That is what lets a test assert "#3 Venusaur" as
+ * one fact rather than as two `getByText` calls that would pass with the number
+ * rendered anywhere on the panel. The hero heading is asserted the same way for
+ * the same reason.
+ *
+ * `baseline` for the reason `HeroName` gives: it is what keeps a smaller mono
+ * number sitting on the name's line rather than centred against its cap height.
+ * Margins zeroed because a heading's default ones are sized for prose, and this
+ * one sits in a `DexFacts` column that already spaces its children.
+ */
+export const DexHeading = styled.h4`
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: ${SPACE.sm};
+`;
+
+/**
+ * The individuals behind one species, newest first.
+ *
+ * A list and not a run of `Fact`s, because that is what it is: a species caught
+ * four times has four of these, and four stacked blocks with no marker read as
+ * four unrelated sentences. The marker is suppressed for the same reason the
+ * roster's cards carry none — a bullet beside a date is decoration — so what
+ * the list element buys here is the semantics a screen reader announces, "list,
+ * four items", which is exactly the fact the eye gets from the stack.
+ */
+export const CatchList = styled.ul`
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+`;
+
+export const CatchRow = styled.li`
+  color: var(--ink-dim);
+  font-size: 11px;
+`;
+
+/**
  * The roster's track minimum is derived from `COMPANION_SIZE`, not chosen.
  *
  * 192px of companion, plus `KeyCard`'s 12px padding and 1px border on each side,

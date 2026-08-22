@@ -421,6 +421,88 @@ test("a companion hatches, grows and graduates into the Dex", async () => {
   expect(logged.some((l) => l.event === "companion.graduated")).toBe(true);
 });
 
+test("the panel is sent a species collection, ascending by number", async () => {
+  // The wire shape, asserted from the server's side because `ui/types.ts` is
+  // hand-written and this is what keeps the two halves honest.
+  //
+  // Two lines graduated, the higher-numbered one first so a payload that merely
+  // preserved `readDex`'s `caught_at DESC` would fail here rather than pass by
+  // accident. Every stage of both lines is expected, not just the two finals.
+  await boot({}, cachedSpecies([{ id: 10, captureRate: 255, forms: 3, finalId: 12 }]));
+  spend(100);
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 20,
+      finalId: 22,
+      chainOrder: [20, 21, 22],
+      rarity: "uncommon",
+      isShiny: true,
+      nature: "sassy",
+      caughtAt: 1_700_000_009_000,
+    },
+    "dex_newer",
+  );
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 10,
+      finalId: 12,
+      chainOrder: [10, 11, 12],
+      rarity: "common",
+      isShiny: false,
+      nature: "jolly",
+      caughtAt: 1_700_000_002_000,
+    },
+    "dex_older",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as {
+    dex: Array<{
+      speciesId: number;
+      rarity: string;
+      isShiny: boolean;
+      firstCaughtAt: number;
+      name: string | null;
+      catches: Array<{
+        id: string;
+        chainOrder: number[];
+        isShiny: boolean;
+        nature: string | null;
+        caughtAt: number;
+      }>;
+    }>;
+  };
+
+  expect(dex.map((record) => record.speciesId)).toEqual([10, 11, 12, 20, 21, 22]);
+  expect(dex[0]).toMatchObject({
+    speciesId: 10,
+    rarity: "common",
+    isShiny: false,
+    firstCaughtAt: 1_700_000_002_000,
+  });
+  // A pre-evolution the player never saw a Dex row for is a full record, and it
+  // carries the line its individual walked rather than a line of its own.
+  expect(dex[1]).toMatchObject({ speciesId: 11, rarity: "common" });
+  expect(dex[1]?.catches).toEqual([
+    {
+      id: "dex_older",
+      chainOrder: [10, 11, 12],
+      isShiny: false,
+      nature: "jolly",
+      caughtAt: 1_700_000_002_000,
+    },
+  ]);
+  expect(dex[4]).toMatchObject({ speciesId: 21, rarity: "uncommon", isShiny: true });
+});
+
 test("a weekly ceiling pays at most weekly, and never on the install itself", async () => {
   // The clock has to move here, and that is the point rather than a nuisance.
   // `LimitReached` fires continuously while a key is at its ceiling and says
@@ -1916,11 +1998,62 @@ test("a dex entry the cache has never seen is warmed too", async () => {
 
   for (let attempt = 0; attempt < 100; attempt++) {
     const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
-    const { dex } = found.json as { dex: Array<{ name: string | null }> };
-    if (dex[0]?.name === "species-22") return;
+    const { dex } = found.json as { dex: Array<{ speciesId: number; name: string | null }> };
+    // By species and not by position. The collection is ordered by number, so
+    // #22 is last of its line rather than first — and looking it up by id is
+    // what makes this test say "the final got its name" rather than "whatever
+    // happened to be at the front did".
+    if (dex.find((record) => record.speciesId === 22)?.name === "species-22") return;
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error("the dex entry never got its name");
+});
+
+test("a pre-evolution nobody has a dex row for is warmed too", async () => {
+  // The warming queue used to be the finals alone, which was the whole set of
+  // names the panel could show. Now every stage of a graduated line is a cell
+  // and a caption, so a stage the cache has never seen has to be reachable —
+  // otherwise the evolution line reads `#20 → #21 → Species 22` permanently,
+  // which is the asymmetry this feature exists to remove.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  spend(1_000);
+  // Active rather than an egg, for the reason the test above gives: an egg sets
+  // `prefetchHatch` building the whole index and names everything for free.
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 20,
+      finalId: 22,
+      chainOrder: [20, 21, 22],
+      rarity: "common",
+      isShiny: false,
+      nature: "sassy",
+      caughtAt: 1_700_000_000_000,
+    },
+    "dex_1",
+  );
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+    const { dex } = found.json as { dex: Array<{ speciesId: number; name: string | null }> };
+    if (dex.find((record) => record.speciesId === 21)?.name === "species-21") return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the pre-evolution never got its name");
 });
 
 test("a species PokéAPI has forgotten is asked for once, not once per poll", async () => {
@@ -1960,9 +2093,14 @@ test("a species PokéAPI has forgotten is asked for once, not once per poll", as
 
 test("a forgotten species does not starve the entries behind it", async () => {
   // The other half of the same bug, and the worse half: the warm budget is
-  // eight per poll and `readDex` orders by `caught_at`, so eight permanently
-  // unnameable rows sat at the front of the queue and every entry behind them
-  // was unreachable for the life of the process.
+  // eight per poll, so eight permanently unnameable species at the front of the
+  // queue left everything behind them unreachable for the life of the process.
+  //
+  // The queue used to be ordered by `caught_at` and is now ordered by species
+  // number, so the fixture puts the dead species *below* the live one rather
+  // than *after* it. Same test, same bug, expressed in the order that now
+  // decides who is at the front — and it is the backoff, not the ordering, that
+  // is doing the work either way.
   const dead = [30, 31, 32, 33, 34, 35, 36, 37];
   const online = coldCacheOnline({ missing: dead });
   await boot({}, online);
@@ -1976,7 +2114,8 @@ test("a forgotten species does not starve the entries behind it", async () => {
     inventory: emptyInventory(),
   });
 
-  // The eight dead rows are the newest, so they are what a poll reaches first.
+  // The eight dead species are the lowest-numbered, so they are what a poll
+  // reaches first.
   dead.forEach((finalId, index) => {
     recordGraduation(
       storage,
@@ -1997,9 +2136,9 @@ test("a forgotten species does not starve the entries behind it", async () => {
     storage,
     KEY,
     {
-      baseId: 22,
-      finalId: 22,
-      chainOrder: [22],
+      baseId: 38,
+      finalId: 38,
+      chainOrder: [38],
       rarity: "common",
       isShiny: false,
       nature: "sassy",
@@ -2014,8 +2153,8 @@ test("a forgotten species does not starve the entries behind it", async () => {
 
   for (let attempt = 0; attempt < 100; attempt++) {
     const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
-    const { dex } = found.json as { dex: Array<{ finalId: number; name: string | null }> };
-    if (dex.find((entry) => entry.finalId === 22)?.name === "species-22") return;
+    const { dex } = found.json as { dex: Array<{ speciesId: number; name: string | null }> };
+    if (dex.find((record) => record.speciesId === 38)?.name === "species-38") return;
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error("the reachable entry was starved by the unreachable ones");
@@ -2172,7 +2311,15 @@ test("an egg has no species to name", async () => {
   expect(found?.json).toMatchObject({ name: null });
 });
 
-test("a dex entry carries the name of what it graduated into", async () => {
+test("every species in a graduated line carries its own name, and a cold one carries null", async () => {
+  // Only #12 is cached, so this pins both halves of the rule at once: the
+  // stages the cache can name get their own names rather than the final's, and
+  // the stages it cannot get `null` rather than being dropped or borrowing one.
+  //
+  // The panel needs exactly this. It captions an evolution line by looking each
+  // stage up in the collection it was handed, so a stage missing from the array
+  // would caption as a number forever, and a stage carrying the wrong name
+  // would print "Species 12" under a #10 sprite.
   await boot({}, cachedSpecies([{ id: 12, captureRate: 255, forms: 1, finalId: 12 }]));
   spend(1_000);
   recordGraduation(
@@ -2195,7 +2342,10 @@ test("a dex entry carries the name of what it graduated into", async () => {
   if (route === undefined) return;
 
   const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
-  const { dex } = found.json as { dex: Array<{ finalId: number; name: string | null }> };
-  expect(dex).toHaveLength(1);
-  expect(dex[0]).toMatchObject({ finalId: 12, name: "species-12" });
+  const { dex } = found.json as { dex: Array<{ speciesId: number; name: string | null }> };
+  expect(dex.map((record) => [record.speciesId, record.name])).toEqual([
+    [10, null],
+    [11, null],
+    [12, "species-12"],
+  ]);
 });
