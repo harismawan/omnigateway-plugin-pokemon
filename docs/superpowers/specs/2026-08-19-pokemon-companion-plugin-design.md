@@ -134,6 +134,16 @@ one corrupt entry must not take the save. PokeTokenBar needs a `Lossy<T>`
 decoding wrapper precisely because its Dex is a JSON array; rows give that
 isolation for free.
 
+**Amendment, 22 Aug 2026 — the table stays a graduation log; the Pokédex the
+panel shows is derived from it.** See
+`2026-08-22-pokedex-species-collection-design.md`. The schema below is
+unchanged and no migration was needed: `chain_order` already records the whole
+line an individual walked, and a row exists only because it walked all of it, so
+expanding that column yields every species the key has owned rather than only
+the finals. `readDex` still returns rows newest-first — `collectedFinals` and
+the `dex_by_key` index both want exactly that — and `src/collection.ts` does the
+expansion and the by-number sort on read.
+
 ### Failure directions are split on purpose
 
 - **Dex entries fail open.** An unknown `rarity` or `nature` on a historical row
@@ -306,6 +316,16 @@ would be a burst fired from a request path. One batch resolves through a single
 shared chain cache, because a Dex commonly holds several rows from one evolution
 line and `speciesDetail` builds its cache per call.
 
+**Amendment, 22 Aug 2026 — the queue is every un-named species in the
+collection, not every un-named final.** Up to three times as many ids for an
+install full of three-stage lines, and the bound is unchanged at eight per poll:
+that is what the bound is for. What did change is the order the queue is built
+in. It was `caught_at DESC`, which is what made a handful of permanently missing
+species at the front starve everything behind them; it is now ascending by
+species number, which is deterministic rather than merely different. The backoff
+described below is still the thing that actually fixes the starvation — order
+only decides who waits.
+
 **A failed warm is remembered, with backoff, and that is a deliberate departure
 from how `nameOf` treats a miss.** The first version of this reasoned that a
 failure means the network is down and so is a state that ends — the same
@@ -436,6 +456,11 @@ An ESM bundle built against `packages/dashboard-sdk`, rendered inline under a
   derived from recent traffic on that key.
 - Growth to next evolution, wallet, and current form.
 - Dex, filterable by rarity, showing shiny and nature.
+  **Amended 22 Aug 2026:** one cell per *species* rather than per graduation,
+  ordered by number, with pre-evolutions counted. Nature is per-individual and
+  so moved off the cell into the detail's catch list; shiny stayed, meaning "any
+  individual of this species was". See
+  `2026-08-22-pokedex-species-collection-design.md`.
 - Shop and bag.
 
 **Amended during implementation: `focus` is not built, and five states ship.**
