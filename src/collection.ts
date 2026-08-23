@@ -323,8 +323,9 @@ function contributionsOf(entry: DexEntry): Contribution[] {
  * `recordSightings` falls back to `now` for a stage entered before instants were
  * recorded, and `{{sightings}}` has no column saying which of the two a row
  * holds — so a guessed instant arrives here indistinguishable from an observed
- * one. The Dex therefore labels a sighting-only species "first recorded" rather
- * than reading this field. Fixing it properly means a `seen_exact` column; until
+ * one. The Dex therefore does not read this field for a sighting-only species —
+ * it dates the encounter without qualifying it, the same way the catch rows
+ * already print `enteredAt ?? caughtAt` unqualified. Fixing it properly means a `seen_exact` column; until
  * then this stays true so a species with *both* sources is not dated worse than
  * it was.
  *

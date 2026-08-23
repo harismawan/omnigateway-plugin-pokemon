@@ -491,24 +491,27 @@ function Record({
           )}
 
           {/*
-            The trailing slot for a species with no encounters to list.
+            The same slot, for a species whose companion is still walking its
+            line and so has no catches to list.
 
-            Here rather than at the top of the register because it is the same
-            *kind* of fact the encounters list is — what this key actually
-            observed, as opposed to what happened to the line — so it sits where
-            a reader skimming a graduated record has already learned to look.
+            The heading is `encounter` either way, because to a reader it is the
+            same fact at both scales: when this key met this species. The list
+            above happens to have an individual behind each row and this does
+            not, which is a distinction in the data rather than one worth a
+            second word on the panel.
 
-            "first recorded" and not "first seen": the instant is whenever the
-            sighting was written down, and for a stage entered before instants
-            were stored that is the first settle after the upgrade rather than
-            the evolution. The store keeps no flag distinguishing the two, so
-            this is the one phrasing true of both — a claim about the database
-            rather than about the world. See `contributionOf` in
+            The instant is when the sighting was written down, which for a stage
+            entered before instants were stored is the first settle after the
+            upgrade rather than the evolution. That imprecision is not called
+            out here — the catch rows above already print `enteredAt ?? caughtAt`
+            unqualified, so flagging it in one slot and not the other would be a
+            strictness the register does not keep. Telling the two apart needs a
+            `seen_exact` column; until then see `contributionOf` in
             `src/collection.ts`.
           */}
           {entry.catches.length === 0 ? (
             <DexField>
-              <DexFieldHead>first recorded</DexFieldHead>
+              <DexFieldHead>encounter</DexFieldHead>
               <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
             </DexField>
           ) : null}

@@ -1454,17 +1454,35 @@ describe("a Pokédex record", () => {
     expect(within(stageTile("#3")).getByText("Venusaur")).toBeTruthy();
   });
 
-  test("omits the encounters field for a species that has never graduated", async () => {
-    // An encounter is a completed line. A species reached by a companion still
-    // growing has none, and a heading over an empty list reads as a list that
-    // failed to load.
+  test("shows the encounter but no individuals for a species that never graduated", async () => {
+    // This reverses an earlier decision, deliberately. The field used to be
+    // omitted whole, on the grounds that an encounter is a completed line and a
+    // heading over an empty list reads as a list that failed to load. True of
+    // the *list*, and the list is still not drawn — but omitting the field with
+    // it left the record with no date anywhere, which was the worse of the two.
+    //
+    // So the heading stays and carries the sighting's own instant, and only the
+    // per-individual rows go: there is no individual to name, no nature and no
+    // shiny mark, because nothing graduated.
     await openRecord(
-      [dexSpecies({ speciesId: 1, name: "Bulbasaur", catches: [], lines: [[1, 2]] })],
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2026, 7, 20),
+          catches: [],
+          lines: [[1, 2]],
+        }),
+      ],
       "Bulbasaur",
     );
 
+    expect(screen.getByText("encounter")).toBeTruthy();
+    expect(screen.getByText(formatWhen(Date.UTC(2026, 7, 20)))).toBeTruthy();
+    // Singular only — the plural heading belongs to a list of individuals.
     expect(screen.queryByText("encounters")).toBeNull();
-    expect(screen.queryByText("encounter")).toBeNull();
+    // And no individual rows at all.
+    expect(screen.queryAllByRole("listitem")).toEqual([]);
     // The rest of the record is still there.
     expect(screen.getByRole("heading", { name: "#1 Bulbasaur" })).toBeTruthy();
   });
@@ -1670,13 +1688,14 @@ describe("a Pokédex record", () => {
     expect(screen.queryByText("first caught")).toBeNull();
   });
 
-  test("a species reached but never graduated is dated as a record, not a catch", async () => {
+  test("a species reached but never graduated is dated as an encounter, not a catch", async () => {
     // The companion is still walking this line, so nothing was ever *caught*.
     // The only instant the plugin has is the one it wrote the sighting down at,
     // and for every stage entered before instants were stored that is the first
     // settle after the upgrade rather than the evolution itself. "first caught"
-    // over that is a claim about the world; "first recorded" is a claim about
-    // the database, and only the second one is true.
+    // over that is a claim this record cannot support: nothing was caught.
+    // `encounter` is the same word the list of individuals carries, because to
+    // a reader it is the same fact — when this key met this species.
     await openRecord(
       [
         dexSpecies({
@@ -1690,7 +1709,7 @@ describe("a Pokédex record", () => {
       "Bulbasaur",
     );
 
-    expect(screen.getByText("first recorded")).toBeTruthy();
+    expect(screen.getByText("encounter")).toBeTruthy();
     expect(screen.queryByText("first caught")).toBeNull();
   });
 
@@ -1716,11 +1735,11 @@ describe("a Pokédex record", () => {
     expect(screen.getByText(DASH)).toBeTruthy();
   });
 
-  test("the graduation slot leads and the recorded date trails, in that order", async () => {
+  test("the graduation slot leads and the encounter trails, in that order", async () => {
     // Same order as a graduated record: what happened to the line on top, what
-    // this key observed at the bottom. `first recorded` sits where `encounters`
-    // sits because it is the same kind of fact, so a reader skimming two
-    // records finds it in the same place twice.
+    // this key observed at the bottom. The encounter sits where a graduated
+    // record's list of encounters sits, so a reader skimming two records finds
+    // the same fact in the same place twice.
     await openRecord(
       [
         dexSpecies({
@@ -1733,11 +1752,11 @@ describe("a Pokédex record", () => {
       "Bulbasaur",
     );
 
-    const heads = screen.getAllByText(/^(line graduated|evolution|first recorded)$/);
+    const heads = screen.getAllByText(/^(line graduated|evolution|encounter)$/);
     expect(heads.map((head) => head.textContent)).toEqual([
       "line graduated",
       "evolution",
-      "first recorded",
+      "encounter",
     ]);
   });
 

@@ -127,18 +127,34 @@ it, each with a test that dies without it:
   an array because one member is null would discard the instants that are real,
   and none of those is recoverable afterwards.
 
-**A third panel label.** `first recorded` when a species has no catches. Such a
-species was reached by a companion still walking its line, so nothing was ever
-caught, and the only instant anybody has is when the sighting was written down —
-which for a stage entered before instants existed is the first settle after the
-upgrade, not the evolution. The store keeps no flag distinguishing the two, so
-`first recorded` is the one phrasing true of both: it claims something about the
-database rather than about the world.
+**One register, both kinds of record.** The two used to hold different fields in
+different places: a graduated record led with its date and closed with its
+encounters, an ungraduated one led with its date and stopped, because the
+encounters field was omitted whole when there was nothing to list. Two shapes to
+learn, and the slot a reader had already found was the slot that moved.
 
-Recording that distinction properly needs a `seen_exact` column on
+The graduation slot now stays put and holds an em dash when the line has not
+finished — an absent fact stated, rather than a field that disappears and takes
+the layout with it. The species' own date moves to the trailing slot under the
+heading `encounter`, where a graduated record's list of encounters sits.
+
+`encounter` and not a fourth label, which **reverses an earlier decision here**.
+The omit-it-whole rule was right about the *list* — there is no individual to
+name, no nature, no shiny mark — and the list is still not drawn. It was wrong
+that the field should go with it, because that left the record with no date
+anywhere. And the word is the same at both scales: to a reader it is when this
+key met this species, whether or not something graduated afterwards.
+
+The instant is when the sighting was written down, which for a stage entered
+before instants existed is the first settle after the upgrade rather than the
+evolution. **That imprecision is not flagged**, because the catch rows above
+already print `enteredAt ?? caughtAt` unqualified — marking one slot and not the
+other would be a strictness the register does not keep.
+
+Telling a guessed instant from an observed one needs a `seen_exact` column on
 `{{sightings}}`, which is **deliberately not in this change**. Until it exists,
 `SpeciesRecord.firstCaughtExact` is unreliable for a sighting-only species — it
-is hardcoded true in `contributionOf` — and the panel must not consult it there.
+is hardcoded true in `contributionOf` — and the panel does not consult it there.
 Sightings already written keep whatever instant they were given; nothing
 recomputes them, because nothing can.
 
