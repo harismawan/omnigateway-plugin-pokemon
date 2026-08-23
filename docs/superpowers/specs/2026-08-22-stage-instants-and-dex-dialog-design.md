@@ -205,11 +205,29 @@ reader cannot see is half a marker — and `aria-current` is also the only part 
 it a test can assert without reaching into styled-components internals, which
 the panel's testing rule forbids.
 
+**Dates are written out in full, with the time.** `22 August 2026, at 15:00`
+rather than `22/08/2026`. A record is read one entry at a time, so a date has
+room to be a date rather than three numbers behind slashes — and `08/09/2026` is
+two different days depending on where the reader is.
+
+This means a **fixed locale**, which the `toLocaleDateString` it replaces did not
+have. That is a trade rather than an oversight: following the reader's locale
+produced "August 22, 2026" in one place and "22.8.2026" in another, so the
+format could not be guaranteed at all. It also follows a precedent the plugin
+already set — `cachedSpeciesName` is English-or-nothing, so every species on the
+panel is already named in English, and a localised date beside "Bulbasaur" would
+be the odd one out. The *time* is still the reader's: the instant is stored in
+UTC and rendered in the browser's zone, because "when did this happen" means "on
+my clock".
+
 **Encounters as a table.** A three-column grid — mono date, nature, shiny glyph
 — replacing `14 Aug 2026 · relaxed · ✦`. A log is read down a column, and
-dot-separated text gives the eye no column to run down. The date column is fixed
-in `ch` so the natures line up whatever length the dates render at in the
-reader's locale.
+dot-separated text gives the eye no column to run down. The date column is
+`max-content` rather than a fixed `ch` measure: a written-out date is not a fixed
+width, and a grid column is shared by every row, so it resolves to the widest
+date in the list once and every row aligns to it. Below 420px the date takes a
+row of its own, because a full date, a nature and a mark do not fit on one line
+of a phone.
 
 **One transition, on open.** 120ms of rise, so a record does not appear as a jump
 cut in the middle of the page. Nothing else animates: the chain and the log are

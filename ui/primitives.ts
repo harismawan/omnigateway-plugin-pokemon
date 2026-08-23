@@ -1026,7 +1026,13 @@ export const CatchList = styled.ul`
  */
 export const CatchRow = styled.li`
   display: grid;
-  grid-template-columns: 11ch 1fr auto;
+  /* max-content rather than a fixed ch measure, because a written-out date is
+     not a fixed width — "3 September 2026" and "22 May 2026" differ by four
+     characters. A grid column is shared by every row, so this resolves to the
+     widest date in the list once and every row aligns to it. A ch figure would
+     have to be guessed against the longest month and would be wrong in one
+     direction or the other. */
+  grid-template-columns: max-content 1fr auto;
   gap: ${SPACE.sm};
   align-items: baseline;
   padding: ${SPACE.sm} 0;
@@ -1035,6 +1041,18 @@ export const CatchRow = styled.li`
 
   & + & {
     border-top: 1px solid var(--rule);
+  }
+
+  /* A full date, a nature and a mark do not fit on one line of a phone. The
+     date takes its own row and the other two sit under it, which keeps the
+     column alignment where there is room for it and drops it where there is
+     not. */
+  @media (max-width: 420px) {
+    grid-template-columns: 1fr auto;
+
+    & > :first-child {
+      grid-column: 1 / -1;
+    }
   }
 `;
 

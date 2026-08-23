@@ -58,6 +58,48 @@ export function formatTokens(value: number): string {
 }
 
 /**
+ * The date and time an instant landed, written out.
+ *
+ * `22 August 2026, at 15:00`, and the long form is the point: a Dex record is
+ * read one entry at a time, so a date has room to be a date rather than three
+ * numbers behind slashes. It also removes a real ambiguity — `08/09/2026` is two
+ * different days depending on where the reader is, and this panel is read by
+ * operators wherever the gateway is deployed.
+ *
+ * **A fixed locale, unlike the `toLocaleDateString` this replaces**, and that is
+ * a deliberate trade rather than an oversight. Following the reader's locale
+ * gave "August 22, 2026" in one place and "22.8.2026" in another, so the format
+ * asked for here could not be guaranteed at all. It also follows a precedent the
+ * plugin already set: `cachedSpeciesName` is English-or-nothing, so every
+ * species on this panel is already named in English. A date in English beside a
+ * name in English is the consistent choice; a localised date beside "Bulbasaur"
+ * would be the odd one out.
+ *
+ * **The time is the reader's, though.** The instant is stored in UTC and
+ * rendered in whatever zone the browser is in, because "when did this happen"
+ * means "on my clock" to the person asking.
+ *
+ * The formatters are built once at module scope rather than per call.
+ * `Intl.DateTimeFormat` construction is the expensive part, and this renders
+ * once per encounter row on every poll.
+ */
+const WHEN_DAY = new Intl.DateTimeFormat("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+const WHEN_TIME = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+export function formatWhen(at: number): string {
+  const when = new Date(at);
+  return `${WHEN_DAY.format(when)}, at ${WHEN_TIME.format(when)}`;
+}
+
+/**
  * What to call a species: its name, or its number.
  *
  * `#25` rather than `Species 25` for the heading, because it sits where a name

@@ -29,7 +29,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Dex } from "../ui/Dex.tsx";
-import { eggSpriteUrl, itemSpriteUrl } from "../ui/format.ts";
+import { eggSpriteUrl, formatWhen, itemSpriteUrl } from "../ui/format.ts";
 import companionUi, { activityOf } from "../ui/index.tsx";
 
 const Companion = companionUi.mount;
@@ -1579,7 +1579,43 @@ describe("a Pokédex record", () => {
     // Label and value are separate elements now, so they are asserted
     // separately — and the label is what says which *kind* of date this is.
     expect(screen.getByText("first caught")).toBeTruthy();
-    expect(screen.getByText(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString())).toBeTruthy();
+    expect(screen.getByText(formatWhen(Date.UTC(2024, 0, 15)))).toBeTruthy();
+  });
+
+  test("writes a date out in full, with the time it happened", async () => {
+    // A record is read one entry at a time, so the date has room to be a date
+    // rather than three numbers behind slashes — and "14/08/2026" is a
+    // different day depending on where the reader is.
+    //
+    // Asserted as a literal rather than through `formatWhen`, which is the one
+    // place in this file that spells the format out: a test written against the
+    // helper it is testing passes whatever the helper does.
+    // Two different instants, so each assertion below lands on exactly one
+    // element — and so a record that printed the headline date on the encounter
+    // row, or the reverse, fails here rather than passing on a coincidence.
+    const headline = new Date(2026, 7, 22, 15, 0).getTime();
+    const encounter = new Date(2026, 8, 3, 9, 5).getTime();
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: headline,
+          catches: [
+            dexCatch({ id: "c1", nature: "modest", enteredAt: encounter, caughtAt: encounter }),
+          ],
+          lines: [[1, 2]],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    // Local time, deliberately: the instant is stored in UTC and an operator
+    // reads it on their own clock. Built from local-time `Date`s above so the
+    // expectation does not depend on which zone the suite runs in.
+    expect(screen.getByText("22 August 2026, at 15:00")).toBeTruthy();
+    // Zero-padded on both halves of the time, and the month not abbreviated.
+    expect(screen.getByRole("listitem").textContent).toContain("3 September 2026, at 09:05");
   });
 
   test("says a date is the graduation when the stage instant was never recorded", async () => {
@@ -1635,10 +1671,10 @@ describe("a Pokédex record", () => {
     // cells. Asserted through the row's own text, which keeps this a claim
     // about the row rather than about the page.
     const row = screen.getByRole("listitem");
-    expect(row.textContent).toContain(new Date(Date.UTC(2024, 0, 15)).toLocaleDateString());
+    expect(row.textContent).toContain(formatWhen(Date.UTC(2024, 0, 15)));
     expect(row.textContent).toContain("modest");
     // Never the graduation, which is six months later on this fixture.
-    expect(row.textContent).not.toContain(new Date(Date.UTC(2024, 6, 30)).toLocaleDateString());
+    expect(row.textContent).not.toContain(formatWhen(Date.UTC(2024, 6, 30)));
   });
 
   test("dates each catch from its own instant", async () => {
@@ -1672,8 +1708,8 @@ describe("a Pokédex record", () => {
       "Venusaur",
     );
 
-    const newest = new Date(Date.UTC(2026, 5, 1)).toLocaleDateString();
-    const oldest = new Date(Date.UTC(2025, 2, 9)).toLocaleDateString();
+    const newest = formatWhen(Date.UTC(2026, 5, 1));
+    const oldest = formatWhen(Date.UTC(2025, 2, 9));
     // Each date beside its own catch's nature, asserted per row — which is what
     // makes this a claim about the pairing rather than about the page. Two rows
     // with the dates swapped would pass a pair of bare `getByText` calls.

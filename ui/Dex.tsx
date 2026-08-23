@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { RARITY_FILTERS, spriteAlt, spriteUrl } from "./format.ts";
+import { formatWhen, RARITY_FILTERS, spriteAlt, spriteUrl } from "./format.ts";
 import {
   Button,
   Caption,
@@ -348,7 +348,7 @@ function Record({
             <DexFieldHead>
               {entry.firstCaughtExact ? "first caught" : "line graduated"}
             </DexFieldHead>
-            <DexWhen>{new Date(entry.firstCaughtAt).toLocaleDateString()}</DexWhen>
+            <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
           </DexField>
 
           {/*
@@ -457,9 +457,7 @@ function Record({
                     {/* The stage instant, falling back to the graduation for a row
                       that never recorded one. Same rule as the field label
                       above, per individual. */}
-                    <CatchWhen>
-                      {new Date(taken.enteredAt ?? taken.caughtAt).toLocaleDateString()}
-                    </CatchWhen>
+                    <CatchWhen>{formatWhen(taken.enteredAt ?? taken.caughtAt)}</CatchWhen>
                     {/* Null for a graduation recorded before natures were stored,
                       which is an absent fact rather than an unknown one — so an
                       empty cell, rather than the word "unknown". */}
