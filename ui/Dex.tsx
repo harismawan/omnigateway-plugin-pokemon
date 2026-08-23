@@ -31,6 +31,15 @@ import {
 } from "./primitives.ts";
 import type { DexSpecies, Rarity } from "./types.ts";
 
+/**
+ * The value of a field whose fact does not exist yet.
+ *
+ * An em dash rather than an empty node, because a blank slot reads as a value
+ * that failed to load. This one is a statement: the line has not graduated, so
+ * there is no date to print and there is not supposed to be.
+ */
+const DASH = "—";
+
 /** The mark for a shiny individual. A glyph, never a colour — see the panel's rule. */
 const SHINY = "✦";
 
@@ -335,20 +344,28 @@ function Record({
 
         <DexRegister>
           {/*
-            Which kind of date this is, said in the label rather than buried in
-            the value.
+            What happened to the *line*, and which kind of date that is — said
+            in the label rather than buried in the value.
 
             `firstCaughtExact` is false when no catch recorded an instant for
             this stage — every graduation from before the instants were stored —
             and `firstCaughtAt` is then the moment the *line* finished. For a
             pre-evolution those are months apart, so labelling a graduation
             "first caught" would date a Bulbasaur to its Venusaur.
+
+            With no catches the line has not finished, and the slot holds a dash
+            rather than vanishing. The register keeps the same fields in the
+            same order whichever kind of record this is, so a reader learns one
+            shape instead of two — and an absent fact stated is easier to read
+            than a field that silently takes the layout with it.
           */}
           <DexField>
             <DexFieldHead>
-              {entry.firstCaughtExact ? "first caught" : "line graduated"}
+              {entry.catches.length > 0 && entry.firstCaughtExact
+                ? "first caught"
+                : "line graduated"}
             </DexFieldHead>
-            <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
+            <DexWhen>{entry.catches.length === 0 ? DASH : formatWhen(entry.firstCaughtAt)}</DexWhen>
           </DexField>
 
           {/*
@@ -472,6 +489,32 @@ function Record({
               </CatchList>
             </DexField>
           )}
+
+          {/*
+            The same slot, for a species whose companion is still walking its
+            line and so has no catches to list.
+
+            The heading is `encounter` either way, because to a reader it is the
+            same fact at both scales: when this key met this species. The list
+            above happens to have an individual behind each row and this does
+            not, which is a distinction in the data rather than one worth a
+            second word on the panel.
+
+            The instant is when the sighting was written down, which for a stage
+            entered before instants were stored is the first settle after the
+            upgrade rather than the evolution. That imprecision is not called
+            out here — the catch rows above already print `enteredAt ?? caughtAt`
+            unqualified, so flagging it in one slot and not the other would be a
+            strictness the register does not keep. Telling the two apart needs a
+            `seen_exact` column; until then see `contributionOf` in
+            `src/collection.ts`.
+          */}
+          {entry.catches.length === 0 ? (
+            <DexField>
+              <DexFieldHead>encounter</DexFieldHead>
+              <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
+            </DexField>
+          ) : null}
         </DexRegister>
       </DexDetail>
     </DexDialog>

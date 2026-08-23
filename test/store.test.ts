@@ -773,3 +773,54 @@ test("an unreadable save keeps its place in the roster instead of hiding the key
 test("the roster is empty before any key has earned", () => {
   expect(listCompanions(storage)).toEqual([]);
 });
+
+test("a graduation with unrecorded stages keeps the instants it does have", () => {
+  // The legacy shape: a companion part-way up its line when instants started
+  // being recorded graduates with holes where nobody wrote anything down.
+  // Rejecting the whole array over them would throw away the dates that *are*
+  // real, and every one of those is unrecoverable.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [null, null, 17_000],
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 17_000,
+    },
+    "dex_holes",
+  );
+
+  expect(readDex(storage, KEY)[0]?.stageTimes).toEqual([null, null, 17_000]);
+});
+
+test("a hole dates its species from nothing rather than from a later stage", () => {
+  // The whole point of storing the hole. `enteredAtOf` reads positionally, so a
+  // compacted array would hand #1 the instant that belongs to #3 — and the
+  // record would state it as a first catch.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [null, null, 17_000],
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 99_000,
+    },
+    "dex_holes_2",
+  );
+
+  const collection = readCollection(storage, KEY);
+  // #1 was never dated, so it falls back to the graduation and says so.
+  expect(collection[0]).toMatchObject({ firstCaughtAt: 99_000, firstCaughtExact: false });
+  // #3 has its own instant and is exact.
+  expect(collection[2]).toMatchObject({ firstCaughtAt: 17_000, firstCaughtExact: true });
+});

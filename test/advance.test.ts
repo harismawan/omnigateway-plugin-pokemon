@@ -745,3 +745,74 @@ test("a companion saved before stage instants existed reads back with none", () 
   expect(read).not.toBeNull();
   expect(read?.active?.stageTimes).toEqual([]);
 });
+
+// ------------------------------------------- legacy saves and stage instants
+
+/**
+ * A companion part-way up its line whose instants were never recorded.
+ *
+ * The ordinary state of every companion alive when migration 6 shipped, and the
+ * one the stamping rules have to survive: `stageTimes` is shorter than
+ * `stageIndex` demands, so anything that appends rather than places lands the
+ * new instant on a stage the individual passed through long ago.
+ */
+function legacyMon(over: Partial<NonNullable<CompanionState["active"]>> = {}): CompanionState {
+  return {
+    ...freshState(),
+    active: {
+      baseId: 1,
+      plannedPath: [1, 2, 3],
+      stageIndex: 1,
+      // Never recorded. `parseState` hands back exactly this for a save written
+      // before the field existed.
+      stageTimes: [],
+      usedAtStage: 0,
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      dittoDisguise: null,
+      dittoRevealed: false,
+      everstone: false,
+      soothe: false,
+      soothedRaw: 0,
+      ...over,
+    },
+  };
+}
+
+test("an evolution stamps the stage it reached, not the first unrecorded one", () => {
+  // The bug this guards. `[...stageTimes, now]` on an empty array puts the
+  // instant at index 0 — so a companion evolving into its third form dates its
+  // *base* form to today, and says it is sure. The instant has to land on the
+  // stage the individual actually entered or every date after it is a lie.
+  const state = legacyMon();
+  const total = phaseThreshold("common", 3, 0) + phaseThreshold("common", 3, 1);
+
+  const result = advance(state, total, NOW);
+
+  expect(result.state.active?.stageIndex).toBe(2);
+  expect(result.state.active?.stageTimes).toEqual([null, null, NOW]);
+});
+
+test("a graduated legacy companion reports instants parallel to its chain", () => {
+  // The same rule carried into the Dex row. `chainOrder` and `stageTimes` are
+  // read positionally by `enteredAtOf`, so a short array does not merely lose
+  // dates — it shifts every surviving one onto the wrong species.
+  const state = legacyMon({ stageIndex: 2 });
+
+  const result = advance(state, graduationTotal("common") * 3, NOW);
+  const graduated = result.events.find((event) => event.kind === "graduated");
+
+  expect(graduated?.kind === "graduated" ? graduated.stageTimes : null).toEqual([null, null, NOW]);
+});
+
+test("an unrecorded stage survives a round trip through the stored save", () => {
+  // `parseState` used to `filter` this array, which compacts it — the hole
+  // closes up and every instant after it slides onto an earlier stage. The hole
+  // is the fact being stored, so it has to come back as one.
+  const state = legacyMon({ stageIndex: 2, stageTimes: [null, null, NOW] });
+
+  const round = parseState(serialiseState(state));
+
+  expect(round?.active?.stageTimes).toEqual([null, null, NOW]);
+});

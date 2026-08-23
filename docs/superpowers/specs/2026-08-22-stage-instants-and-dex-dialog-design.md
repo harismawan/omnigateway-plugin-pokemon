@@ -103,6 +103,61 @@ shows one catch's date beside another's rarity.
 when it is not. One word, and it buys the difference between a date and the wrong
 kind of date. Catch rows follow the same rule per individual.
 
+### Amended 23 Aug 2026: holes, and a third label
+
+**`stageTimes` is a sparse array, not a short one.** It was `readonly number[]`
+appended to at each transition, which silently assumed one entry per stage
+already walked. That holds only for a companion hatched after migration 6. Every
+older save carries `[]`, so the append put the *new* instant at index 0 — dating
+the base form from an evolution months later, and dating it confidently, because
+a present number is indistinguishable from an observed one. On graduation the
+same shift reached `{{dex}}.stage_times`, which `enteredAtOf` reads positionally.
+
+The type is now `readonly (number | null)[]` and `advance` places an instant at
+its own index (`stampedAt`), padding the gap with nulls. Three rules follow from
+it, each with a test that dies without it:
+
+- `stampedAt` **never overwrites**. The graduation site depends on it: a final
+  form entered by an earlier `advance` already holds the instant it was entered,
+  and a graduation is the transition *out* of it. This is what the old
+  `.slice(0, plannedPath.length)` was quietly protecting.
+- `parseState` **maps, never filters**. Filtering compacts the array and closes
+  the hole, which is the same shift by another route.
+- `parseStageTimes` **preserves holes rather than rejecting the row**. Refusing
+  an array because one member is null would discard the instants that are real,
+  and none of those is recoverable afterwards.
+
+**One register, both kinds of record.** The two used to hold different fields in
+different places: a graduated record led with its date and closed with its
+encounters, an ungraduated one led with its date and stopped, because the
+encounters field was omitted whole when there was nothing to list. Two shapes to
+learn, and the slot a reader had already found was the slot that moved.
+
+The graduation slot now stays put and holds an em dash when the line has not
+finished — an absent fact stated, rather than a field that disappears and takes
+the layout with it. The species' own date moves to the trailing slot under the
+heading `encounter`, where a graduated record's list of encounters sits.
+
+`encounter` and not a fourth label, which **reverses an earlier decision here**.
+The omit-it-whole rule was right about the *list* — there is no individual to
+name, no nature, no shiny mark — and the list is still not drawn. It was wrong
+that the field should go with it, because that left the record with no date
+anywhere. And the word is the same at both scales: to a reader it is when this
+key met this species, whether or not something graduated afterwards.
+
+The instant is when the sighting was written down, which for a stage entered
+before instants existed is the first settle after the upgrade rather than the
+evolution. **That imprecision is not flagged**, because the catch rows above
+already print `enteredAt ?? caughtAt` unqualified — marking one slot and not the
+other would be a strictness the register does not keep.
+
+Telling a guessed instant from an observed one needs a `seen_exact` column on
+`{{sightings}}`, which is **deliberately not in this change**. Until it exists,
+`SpeciesRecord.firstCaughtExact` is unreliable for a sighting-only species — it
+is hardcoded true in `contributionOf` — and the panel does not consult it there.
+Sightings already written keep whatever instant they were given; nothing
+recomputes them, because nothing can.
+
 ## Part two: the record is a modal dialog
 
 ### What this overturns
