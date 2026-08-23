@@ -16,6 +16,7 @@ import {
   RARE_CANDY_XP,
   rarityFromCaptureRate,
 } from "./balance.ts";
+import { readCollection } from "./collection.ts";
 import { decideGrant, windowKey } from "./grants.ts";
 import {
   cachedSpeciesName,
@@ -39,6 +40,7 @@ import {
   readCompanion,
   readDex,
   recordGraduation,
+  recordSightings,
   type ShopEntry,
   setGrantedAt,
   settle,
@@ -280,6 +282,39 @@ export default definePlugin({
     const settleAndRecord = (apiKeyId: string): void => {
       const result = settle(storage, apiKeyId, ctx.now());
       if (result === null) return;
+
+      /*
+        What the companion alive right now has been, recorded before its events
+        are read.
+
+        On every settle rather than on a `hatched` or `evolved` event, and the
+        idempotence is what makes that affordable — see `recordSightings`. The
+        case it buys is the one that matters most: a companion already half way
+        up its line when this shipped is registered on the next poll instead of
+        going unrecorded until its next evolution, which on a quiet key is
+        weeks.
+
+        Before the graduation loop below, so a settle that carries a companion
+        all the way to graduation still records the stages it passed through on
+        the way. After it the companion is gone and there is nothing to read.
+      */
+      const active = result.row.state?.active;
+      if (active !== null && active !== undefined) {
+        recordSightings(
+          storage,
+          apiKeyId,
+          {
+            plannedPath: active.plannedPath,
+            stageIndex: active.stageIndex,
+            stageTimes: active.stageTimes,
+            rarity: active.rarity,
+            isShiny: active.isShiny,
+            disguised: active.dittoDisguise !== null && !active.dittoRevealed,
+          },
+          ctx.now(),
+        );
+      }
+
       for (const event of result.events) {
         if (event.kind !== "graduated") continue;
         recordGraduation(
@@ -289,6 +324,11 @@ export default definePlugin({
             baseId: event.baseId,
             finalId: event.finalId,
             chainOrder: event.chainOrder,
+            // Straight from the event, because the state that accumulated these
+            // is discarded by the graduation that produced it. `ctx.now()` here
+            // would date every stage to the settle that finished the line,
+            // which is precisely the single-date behaviour this replaces.
+            stageTimes: event.stageTimes,
             rarity: event.rarity,
             isShiny: event.isShiny,
             nature: event.nature,
@@ -574,24 +614,40 @@ export default definePlugin({
           if (row.state !== null) void prefetchOnce(apiKeyId, row.state).catch(() => {});
 
           const active = row.state?.active ?? null;
-          const dex = readDex(storage, apiKeyId);
 
           const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
           const stageName = await nameOf(stageId);
-          // The name of what each entry graduated into, added alongside the
-          // stored row rather than into it: the Dex table holds facts about a
-          // graduation, and a species' name is a fact about PokéAPI.
+          // The two tables read as one collection rather than as the logs they
+          // are stored as: one record per species the key has owned,
+          // pre-evolutions included, ascending by number. See
+          // `src/collection.ts` for why expanding `chain_order` is a reading of
+          // the row and not a guess, and why both sources are assembled there
+          // rather than here.
+          //
+          // The name is added alongside the record rather than into it: the Dex
+          // table holds facts about a graduation, and a species' name is a fact
+          // about PokéAPI.
           const named = await Promise.all(
-            dex.map(async (entry) => ({ ...entry, name: await nameOf(entry.finalId) })),
+            readCollection(storage, apiKeyId).map(async (record) => ({
+              ...record,
+              name: await nameOf(record.speciesId),
+            })),
           );
 
           // Best effort and deliberately not awaited, like the prefetch above.
           // The companion first, so the heading fills in before the trophy case:
           // a poll's warming budget is small, and the name an operator is
           // looking at is worth more of it than one in a grid of sprites.
+          //
+          // Every un-named species in the collection, not only the finals it
+          // used to be — up to three times as many ids for an install full of
+          // three-stage lines, which is what the eight-per-poll bound is for.
+          // It is also what lets the panel caption an evolution line without a
+          // second lookup: every stage of every line it can draw is itself in
+          // this array, so its name is already in the payload.
           warmNames([
             ...(stageId !== null && stageName === null ? [stageId] : []),
-            ...named.filter((entry) => entry.name === null).map((entry) => entry.finalId),
+            ...named.filter((record) => record.name === null).map((record) => record.speciesId),
           ]);
 
           return {
@@ -876,8 +932,22 @@ function parseShopEntry(body: unknown): ShopEntry | null {
  * What owning the thing does.
  *
  * A fresh egg discards the current Pokémon outright — it is a reroll, and the
- * discarded one is not a graduation, so it never reaches the Dex. That is what
- * keeps rerolling from being a way to farm the collection.
+ * discarded one is not a graduation, so it never reaches `{{dex}}`.
+ *
+ * **Amended 23 Aug 2026: it does reach the *collection*, and rerolling is a bad
+ * way to farm rather than an impossible one.** Species are recorded as the
+ * companion reaches them (`recordSightings`), so a discarded Pokémon leaves its
+ * stages behind. The claim that used to sit here — that this "keeps rerolling
+ * from being a way to farm the collection" — is no longer true and is not worth
+ * pretending about.
+ *
+ * What holds instead is arithmetic. A reroll costs `FRESH_EGG_BASE_PRICE` (1B)
+ * of wallet plus `EGG_HATCH_THRESHOLD` (5M) of growth to hatch the replacement:
+ * roughly 1B of wallet per species. Graduating a common line costs 750M of
+ * growth for three species — 250M each — and spends no wallet at all. Farming
+ * is about four times worse per species, in a currency the natural path never
+ * touches. And it moves the panel only: `collectedFinals` is still built from
+ * `readDex`, so no reroll can shift the roll's odds or the lure.
  */
 function applyPurchase(state: CompanionState, entry: ShopEntry): ItemOutcome {
   if (entry.kind === "egg") {

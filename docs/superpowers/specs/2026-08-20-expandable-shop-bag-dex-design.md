@@ -296,6 +296,16 @@ Nothing about the filter's *behaviour* changes: it still clears the selection,
 and it still says "No <rarity> graduates yet." rather than claiming the case is
 empty.
 
+**Amendment, 22 Aug 2026 — the record moved to a modal dialog, and this section
+is superseded from here to the end of it.** See
+`2026-08-22-stage-instants-and-dex-dialog-design.md`. The reasoning below was
+sound and is kept because the trade it describes is the one that was reversed: it
+named the ragged row and the vertical reflow as costs and accepted them, and a
+top-layer dialog makes both stop existing rather than mitigating them. The clever
+`1 / -1` placement was solving a problem created by putting the record in the
+grid at all. `aria-expanded` becomes `aria-haspopup="dialog"` with it, and the
+filter stops clearing the selection.
+
 The detail is a grid item spanning `grid-column: 1 / -1`, placed in DOM order
 immediately after the selected cell. Auto-placement cannot start a full-width
 item mid-row, so it drops to the next row line by itself — no column count, no
@@ -335,6 +345,32 @@ closes it.
 Detail content: the evolution line from `chainOrder`, each stage a sprite from
 the existing route with its name falling back to `#id` on a cold cache; rarity,
 shininess and nature as the existing `Chip` and `ShinyChip`; and the catch date.
+
+**Amendment, 22 Aug 2026 — a cell is a species, not a graduation.** See
+`2026-08-22-pokedex-species-collection-design.md`. Everything above survives:
+the card treatment, the `sm` padding derived from the 84px track, the
+`SpeciesNumber` above the name, the two-slot rule that keeps `speciesLabel` out
+of a cell, the `1 / -1` detail placement, the ragged row, and the filter
+clearing the selection. What changes is what a cell counts.
+
+Pre-evolutions now count as collected and the grid orders by number ascending,
+so a case that showed one Venusaur shows Bulbasaur, Ivysaur and Venusaur in that
+order. Where a species was caught more than once the cell carries `✦ × 2` — the
+shiny glyph when *any* individual was, and the count only above one.
+
+Nature leaves the cell, because a cell is now a species and a nature belongs to
+an individual; it reappears in the detail, which gains a list of that species'
+catches, each with its own date and nature.
+
+The sentence above about a stage's name "falling back to `#id`" understated what
+shipped: only the stage matching `final_id` was ever *given* a name, so every
+other stage showed a number permanently rather than on a cold cache. The detail
+now captions every stage with both — `#1 Bulbasaur → #2 Ivysaur → #3 Venusaur` —
+which is the two-slot rule this section already argues for, applied where it was
+missed. It needs no new fetching: every stage of every drawn line is itself in
+the collection, so its name is already in the payload.
+
+The filter's empty state reads "No `<rarity>` species yet."
 
 ## Collapsible sections
 

@@ -74,7 +74,71 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     // an idle-looking companion is a smaller lie than a working-looking one.
     sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at INTEGER`,
   },
+  {
+    version: 6,
+    // When each stage in `chain_order` was entered, as a JSON array parallel to
+    // it. Stored because it cannot be derived: growth is counted in tokens, no
+    // arithmetic over tokens yields a date, and the one table that holds
+    // instants — `request_logs` — is pruned by retention and is forbidden as a
+    // source here for that exact reason.
+    //
+    // Nullable with no default, on the same reasoning as `last_credit_at` in
+    // migration 5. A graduation recorded before this column existed has no
+    // observed instants, and writing `caught_at` into every slot would invent a
+    // Bulbasaur date out of a Venusaur one. NULL says "never recorded", which
+    // the panel renders as its own fact rather than as a date.
+    sql: `ALTER TABLE {{dex}} ADD COLUMN stage_times TEXT`,
+  },
+  {
+    version: 7,
+    // Species this key has *been*, as opposed to lines it has finished.
+    //
+    // A fourth table rather than a nullable `caught_at` on `{{dex}}`, and the
+    // reason is blast radius. `readDex` and the `collectedFinals` set both
+    // assume every row they see is a graduation; a sighting row living there
+    // would need a guard at each, and a guard missed once feeds the roll's
+    // diversity weighting and the lure with species nobody graduated. A
+    // separate table cannot be read by accident.
+    //
+    // Keyed on the species rather than on the individual, because that is the
+    // question it answers — "has this key ever been a Bulbasaur" — and it is
+    // what makes the write an idempotent `INSERT OR IGNORE` instead of a
+    // read-modify-write. First sighting wins and is never updated, the same
+    // monotonic rule the growth counters follow.
+    sql: `
+      CREATE TABLE {{sightings}} (
+        api_key_id  TEXT NOT NULL,
+        species_id  INTEGER NOT NULL,
+        -- The line this individual was on, so a species seen but never
+        -- graduated still has a chain to draw. There is no Dex row to take one
+        -- from, and a record with no line is a sprite with nothing under it.
+        chain_order TEXT NOT NULL,
+        rarity      TEXT NOT NULL,
+        is_shiny    INTEGER NOT NULL DEFAULT 0,
+        seen_at     INTEGER NOT NULL,
+        PRIMARY KEY (api_key_id, species_id)
+      )
+    `,
+  },
 ];
+
+/**
+ * What a source of the collection says about a species at one moment.
+ *
+ * The three fields a graduation and a sighting genuinely share, named so
+ * `collect` can fold both through one path rather than two near-identical ones.
+ *
+ * Deliberately a shared base and not a merged type. A graduation is about an
+ * *individual* and carries its nature and its own instants; a sighting is about
+ * a *species*. Flattening the two together would give every sighting a nature
+ * column that is always null — which is the thing keeping them apart buys.
+ */
+export type Observed = {
+  /** The line the individual behind this was on, so a record has a chain to draw. */
+  chainOrder: readonly number[];
+  rarity: string;
+  isShiny: boolean;
+};
 
 /**
  * One graduated Pokémon.
@@ -84,13 +148,19 @@ export const MIGRATIONS: readonly PluginMigration[] = [
  * one corrupt entry must not take the save with it. As an array, a single bad
  * element would fail the parse of everything.
  */
-export type DexEntry = {
+export type DexEntry = Observed & {
   id: string;
   baseId: number;
   finalId: number;
-  chainOrder: readonly number[];
-  rarity: string;
-  isShiny: boolean;
+  /**
+   * When each stage in `chainOrder` was entered, or null for never recorded.
+   *
+   * Null rather than an empty array, because those are different facts: a
+   * graduation from before migration 6 has no observed instants, and one that
+   * somehow stored an empty list would be a bug worth seeing. The panel dates a
+   * null line from `caughtAt` and says that is what it did.
+   */
+  stageTimes: readonly number[] | null;
   nature: string | null;
   caughtAt: number;
 };
@@ -225,7 +295,7 @@ export function settle(
   if (row === null) return null;
   if (row.state === null) return { row, events: [] };
 
-  const result = advance(row.state, row.tokensTotal);
+  const result = advance(row.state, row.tokensTotal, now);
   if (result.events.length === 0 && result.state === row.state) return { row, events: [] };
 
   storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
@@ -243,14 +313,18 @@ export function recordGraduation(
   id: string,
 ): void {
   storage.run(
-    `INSERT INTO {{dex}} (id, api_key_id, base_id, final_id, chain_order, rarity, is_shiny, nature, caught_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO {{dex}} (id, api_key_id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       apiKeyId,
       entry.baseId,
       entry.finalId,
       JSON.stringify(entry.chainOrder),
+      // Null stays null on the way in as well as out. A caller with nothing to
+      // record must not write `[]`, or "never observed" becomes indistinguishable
+      // from "observed nothing" the moment it is read back.
+      entry.stageTimes === null ? null : JSON.stringify(entry.stageTimes),
       entry.rarity,
       entry.isShiny ? 1 : 0,
       entry.nature,
@@ -264,11 +338,68 @@ type StoredDex = {
   base_id: number;
   final_id: number;
   chain_order: string;
+  stage_times: string | null;
   rarity: string;
   is_shiny: number;
   nature: string | null;
   caught_at: number;
 };
+
+/**
+ * A stored `chain_order`, or null for a row that can contribute no line.
+ *
+ * Shared by both readers because both fail open the same way and for the same
+ * reason: a collection is history, so a row whose chain will not parse is a gap
+ * and hiding the rest because of it would be worse. Written once so the two
+ * cannot drift — a `readDex` that dropped a chain `listSightings` kept would put
+ * a species in the collection that its own detail dialog could not draw.
+ *
+ * Non-numeric members are filtered rather than rejecting the row outright, and
+ * an empty result collapses to null: a line with no species is nothing to draw,
+ * which is the same outcome as a chain that would not parse at all.
+ */
+function parseChain(raw: string): readonly number[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const chain = parsed.filter((id): id is number => typeof id === "number");
+  return chain.length === 0 ? null : chain;
+}
+
+/**
+ * Stored stage instants, or null for absent, unparseable, or not a list of
+ * numbers.
+ *
+ * All three collapse to null on purpose. The panel already has to render "we
+ * never recorded this" for every graduation predating migration 6, so a corrupt
+ * value has a correct rendering waiting for it — and distinguishing "corrupt"
+ * from "absent" on screen would be a distinction nobody can act on.
+ *
+ * Stricter than `parseChain` above, and the asymmetry is deliberate: a partly
+ * numeric array is filtered there and rejected here, because a missing species
+ * shortens a line while a missing instant *shifts* every date after it onto the
+ * wrong stage. A gap reads as a gap; a wrong date reads as a fact.
+ */
+function parseStageTimes(raw: string | null): readonly number[] | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  // Every element or none. A partly-numeric array would silently shift every
+  // instant after the bad one onto the wrong stage, which is worse than having
+  // no dates at all — a wrong date reads as a fact.
+  return parsed.every((at) => typeof at === "number" && Number.isFinite(at))
+    ? (parsed as number[])
+    : null;
+}
 
 /**
  * The Dex, newest first.
@@ -282,28 +413,28 @@ type StoredDex = {
  */
 export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
   const rows = storage.all<StoredDex>(
-    `SELECT id, base_id, final_id, chain_order, rarity, is_shiny, nature, caught_at
+    `SELECT id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at
      FROM {{dex}} WHERE api_key_id = ? ORDER BY caught_at DESC`,
     [apiKeyId],
   );
 
   const entries: DexEntry[] = [];
   for (const row of rows) {
-    let chainOrder: unknown;
-    try {
-      chainOrder = JSON.parse(row.chain_order);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(chainOrder)) continue;
-    const chain = chainOrder.filter((id): id is number => typeof id === "number");
-    if (chain.length === 0) continue;
+    const chain = parseChain(row.chain_order);
+    if (chain === null) continue;
 
     entries.push({
       id: row.id,
       baseId: row.base_id,
       finalId: row.final_id,
       chainOrder: chain,
+      // Fails open *within* the row, which is a softer failure than the chain
+      // above gets. A chain that will not parse leaves nothing to draw, so the
+      // row goes; instants that will not parse cost the dates and leave a
+      // graduation that is still worth showing. Both directions collapse to
+      // "never recorded", which the panel already has to render for every row
+      // written before migration 6.
+      stageTimes: parseStageTimes(row.stage_times),
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
       nature: row.nature,
@@ -311,6 +442,127 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * One species this key has been, whether or not it ever finished the line.
+ *
+ * The counterpart to a `DexEntry`. The two share `Observed` and nothing else:
+ * this carries only the first time the species was reached, where a graduation
+ * carries the individual that reached it.
+ */
+export type Sighting = Observed & {
+  speciesId: number;
+  seenAt: number;
+};
+
+/** What `recordSightings` needs from a live companion, and nothing more. */
+export type ReachedStages = {
+  plannedPath: readonly number[];
+  stageIndex: number;
+  stageTimes: readonly number[];
+  rarity: string;
+  isShiny: boolean;
+  /** A Ditto still wearing a disguise. Sights nothing — see below. */
+  disguised: boolean;
+};
+
+/**
+ * Records every stage a live companion has reached.
+ *
+ * **Called on every settle, not on transition events**, and the idempotence is
+ * what makes that affordable: `plannedPath.slice(0, stageIndex + 1)` is exactly
+ * "what this individual has been", and re-writing it is a no-op against the
+ * primary key. Driving it from `hatched` and `evolved` events instead would be
+ * fewer writes and would miss the case that matters most — a companion already
+ * half way up its line when this shipped would go unrecorded until its next
+ * evolution, which on a quiet key is weeks. Writing what is currently true
+ * self-heals on the next poll instead.
+ *
+ * **Only what has been reached.** The stages ahead are a plan rather than a
+ * history, and recording them would put a Venusaur in the collection of
+ * somebody holding an Ivysaur.
+ *
+ * **A disguised Ditto sights nothing.** The plugin knows it is a Ditto;
+ * recording the disguise would put a species in the collection that was never
+ * really there, and the reveal would then have to take it away again — and this
+ * table has no way to, by design.
+ *
+ * **Never feeds `collectedFinals`.** That set still means "lines this key has
+ * graduated" and is still built from `readDex` alone. Widening it here would
+ * let a reroll move the roll's diversity weighting and the lure, which is the
+ * economy rather than the panel.
+ */
+export function recordSightings(
+  storage: PluginStorage,
+  apiKeyId: string,
+  reached: ReachedStages,
+  now: number,
+): void {
+  if (reached.disguised) return;
+
+  const chain = JSON.stringify(reached.plannedPath);
+  const stages = reached.plannedPath.slice(0, reached.stageIndex + 1);
+  for (const [stage, speciesId] of stages.entries()) {
+    storage.run(
+      `INSERT INTO {{sightings}} (api_key_id, species_id, chain_order, rarity, is_shiny, seen_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(api_key_id, species_id) DO NOTHING`,
+      [
+        apiKeyId,
+        speciesId,
+        chain,
+        reached.rarity,
+        reached.isShiny ? 1 : 0,
+        // The instant the stage was *entered*, not the instant this ran. This
+        // is called on every settle, so `now` is whenever the panel last
+        // polled — taking it would date every stage of every companion alive
+        // today to the first poll after this shipped. `now` is the fallback for
+        // a companion that hatched before stage instants existed and so has a
+        // shorter `stageTimes` than `plannedPath`: late, but the only instant
+        // anybody has for it.
+        reached.stageTimes[stage] ?? now,
+      ],
+    );
+  }
+}
+
+type StoredSighting = {
+  species_id: number;
+  chain_order: string;
+  rarity: string;
+  is_shiny: number;
+  seen_at: number;
+};
+
+/**
+ * Every species this key has been, lowest number first.
+ *
+ * **Fails open, like `readDex`.** A row whose chain will not parse is dropped
+ * and the rest are returned: a collection is history, so losing one entry is a
+ * gap and hiding the other two hundred because of it would be worse.
+ */
+export function listSightings(storage: PluginStorage, apiKeyId: string): Sighting[] {
+  const rows = storage.all<StoredSighting>(
+    `SELECT species_id, chain_order, rarity, is_shiny, seen_at
+     FROM {{sightings}} WHERE api_key_id = ? ORDER BY species_id ASC`,
+    [apiKeyId],
+  );
+
+  const sightings: Sighting[] = [];
+  for (const row of rows) {
+    const chain = parseChain(row.chain_order);
+    if (chain === null) continue;
+
+    sightings.push({
+      speciesId: row.species_id,
+      chainOrder: chain,
+      rarity: row.rarity,
+      isShiny: row.is_shiny === 1,
+      seenAt: row.seen_at,
+    });
+  }
+  return sightings;
 }
 
 /** When this window last paid, or null for never. */
