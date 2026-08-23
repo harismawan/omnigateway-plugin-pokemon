@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { EGG_HATCH_THRESHOLD, ITEM_PRICES } from "../src/balance.ts";
+import { readCollection } from "../src/collection.ts";
 import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import {
   consume,
@@ -430,6 +431,44 @@ test("an unreadable sighting chain costs its row, not the listing", () => {
   storage.run("UPDATE {{sightings}} SET chain_order = ? WHERE species_id = ?", ["{{{", 1]);
 
   expect(listSightings(storage, KEY).map((s) => s.speciesId)).toEqual([2]);
+});
+
+test("the collection read takes both sources, so neither can be forgotten at a call site", () => {
+  // The seam `collect` used to be assembled at, once per caller. Both lists
+  // reach it or the collection is quietly short: a caller that read the Dex and
+  // forgot the sightings would render a panel missing every species whose
+  // individual has not graduated, with nothing to say it had.
+  recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: null,
+      rarity: "common",
+      isShiny: false,
+      nature: "hardy",
+      caughtAt: 1_000_000,
+    },
+    "dex_3",
+  );
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [25, 26],
+      stageIndex: 0,
+      stageTimes: [2_000_000],
+      rarity: "rare",
+      isShiny: false,
+      disguised: false,
+    },
+    9_000_000,
+  );
+
+  // Pikachu is on no graduation, so it can only have come from the sightings.
+  expect(readCollection(storage, KEY).map((record) => record.speciesId)).toEqual([1, 2, 3, 25]);
 });
 
 test("a graduation stores the instant each stage was entered", () => {

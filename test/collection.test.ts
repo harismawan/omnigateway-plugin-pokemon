@@ -451,3 +451,64 @@ test("the grid stays in species order across both sources", () => {
 test("an empty pair of sources collects nothing", () => {
   expect(collect([], [])).toEqual([]);
 });
+
+test("two catches through the same line give the species one line, not two", () => {
+  // Deduped by members-in-order, because that is a line's identity. Two
+  // Venusaurs caught through the same chain are one line on the Bulbasaur
+  // record, or the panel draws the same arrow twice.
+  const collection = collect([
+    row({ id: "first", chainOrder: [1, 2, 3], caughtAt: 100 }),
+    row({ id: "second", chainOrder: [1, 2, 3], caughtAt: 900 }),
+  ]);
+
+  expect(collection[0]?.lines).toEqual([[1, 2, 3]]);
+});
+
+test("a branching species keeps one line per branch it was caught through", () => {
+  // Eevee, the case `lines` exists for. A Vaporeon catch and a Jolteon catch
+  // are two different lines through #133 and the record has to show both.
+  const collection = collect([
+    row({ id: "vap", chainOrder: [133, 134], finalId: 134, caughtAt: 100 }),
+    row({ id: "jolt", chainOrder: [133, 135], finalId: 135, caughtAt: 900 }),
+  ]);
+
+  expect(collection[0]?.lines).toEqual([
+    [133, 134],
+    [133, 135],
+  ]);
+});
+
+test("a graduation and a sighting on the same line give one line, not two", () => {
+  // The species has both a finished line and a companion walking it right now.
+  // Same members in the same order is the same line, whichever source offered
+  // it.
+  const collection = collect(
+    [row({ id: "grad", chainOrder: [1, 2, 3], caughtAt: 100 })],
+    [seen({ speciesId: 1, chainOrder: [1, 2, 3], seenAt: 900 })],
+  );
+
+  expect(collection[0]?.lines).toEqual([[1, 2, 3]]);
+});
+
+test("a live companion on a different branch adds its line after the graduated one", () => {
+  // An Eevee that graduated as a Vaporeon and is being walked again toward
+  // Jolteon. Both lines, and the finished one first — the order the sources are
+  // folded in, which is the only thing that decides it.
+  const collection = collect(
+    [row({ id: "vap", chainOrder: [133, 134], finalId: 134, caughtAt: 100 })],
+    [seen({ speciesId: 133, chainOrder: [133, 135], seenAt: 900 })],
+  );
+
+  expect(collection[0]?.lines).toEqual([
+    [133, 134],
+    [133, 135],
+  ]);
+});
+
+test("a sighting-only species draws the line it was seen on", () => {
+  // There is no Dex row to take a chain from, and a record with no line is a
+  // sprite with nothing under it.
+  const collection = collect([], [seen({ speciesId: 4, chainOrder: [4, 5, 6] })]);
+
+  expect(collection[0]?.lines).toEqual([[4, 5, 6]]);
+});

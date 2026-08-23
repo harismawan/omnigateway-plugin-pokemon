@@ -123,6 +123,24 @@ export const MIGRATIONS: readonly PluginMigration[] = [
 ];
 
 /**
+ * What a source of the collection says about a species at one moment.
+ *
+ * The three fields a graduation and a sighting genuinely share, named so
+ * `collect` can fold both through one path rather than two near-identical ones.
+ *
+ * Deliberately a shared base and not a merged type. A graduation is about an
+ * *individual* and carries its nature and its own instants; a sighting is about
+ * a *species*. Flattening the two together would give every sighting a nature
+ * column that is always null — which is the thing keeping them apart buys.
+ */
+export type Observed = {
+  /** The line the individual behind this was on, so a record has a chain to draw. */
+  chainOrder: readonly number[];
+  rarity: string;
+  isShiny: boolean;
+};
+
+/**
  * One graduated Pokémon.
  *
  * Rows rather than a JSON array inside the companion, and the reason is the
@@ -130,11 +148,10 @@ export const MIGRATIONS: readonly PluginMigration[] = [
  * one corrupt entry must not take the save with it. As an array, a single bad
  * element would fail the parse of everything.
  */
-export type DexEntry = {
+export type DexEntry = Observed & {
   id: string;
   baseId: number;
   finalId: number;
-  chainOrder: readonly number[];
   /**
    * When each stage in `chainOrder` was entered, or null for never recorded.
    *
@@ -144,8 +161,6 @@ export type DexEntry = {
    * null line from `caughtAt` and says that is what it did.
    */
   stageTimes: readonly number[] | null;
-  rarity: string;
-  isShiny: boolean;
   nature: string | null;
   caughtAt: number;
 };
@@ -331,15 +346,30 @@ type StoredDex = {
 };
 
 /**
- * The Dex, newest first.
+ * A stored `chain_order`, or null for a row that can contribute no line.
  *
- * **Fails open, the opposite of the active companion.** An entry whose chain
- * will not parse is dropped from the listing and the rest are returned. A trophy
- * case is history: losing one row is a gap, and hiding the other two hundred
- * because of it would be the worse outcome. This is the `isRtkFilterId`
- * precedent, and the contrast with `parseState` is deliberate rather than
- * inconsistent.
+ * Shared by both readers because both fail open the same way and for the same
+ * reason: a collection is history, so a row whose chain will not parse is a gap
+ * and hiding the rest because of it would be worse. Written once so the two
+ * cannot drift — a `readDex` that dropped a chain `listSightings` kept would put
+ * a species in the collection that its own detail dialog could not draw.
+ *
+ * Non-numeric members are filtered rather than rejecting the row outright, and
+ * an empty result collapses to null: a line with no species is nothing to draw,
+ * which is the same outcome as a chain that would not parse at all.
  */
+function parseChain(raw: string): readonly number[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const chain = parsed.filter((id): id is number => typeof id === "number");
+  return chain.length === 0 ? null : chain;
+}
+
 /**
  * Stored stage instants, or null for absent, unparseable, or not a list of
  * numbers.
@@ -348,6 +378,11 @@ type StoredDex = {
  * never recorded this" for every graduation predating migration 6, so a corrupt
  * value has a correct rendering waiting for it — and distinguishing "corrupt"
  * from "absent" on screen would be a distinction nobody can act on.
+ *
+ * Stricter than `parseChain` above, and the asymmetry is deliberate: a partly
+ * numeric array is filtered there and rejected here, because a missing species
+ * shortens a line while a missing instant *shifts* every date after it onto the
+ * wrong stage. A gap reads as a gap; a wrong date reads as a fact.
  */
 function parseStageTimes(raw: string | null): readonly number[] | null {
   if (raw === null) return null;
@@ -366,6 +401,16 @@ function parseStageTimes(raw: string | null): readonly number[] | null {
     : null;
 }
 
+/**
+ * The Dex, newest first.
+ *
+ * **Fails open, the opposite of the active companion.** An entry whose chain
+ * will not parse is dropped from the listing and the rest are returned. A trophy
+ * case is history: losing one row is a gap, and hiding the other two hundred
+ * because of it would be the worse outcome. This is the `isRtkFilterId`
+ * precedent, and the contrast with `parseState` is deliberate rather than
+ * inconsistent.
+ */
 export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
   const rows = storage.all<StoredDex>(
     `SELECT id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at
@@ -375,15 +420,8 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
 
   const entries: DexEntry[] = [];
   for (const row of rows) {
-    let chainOrder: unknown;
-    try {
-      chainOrder = JSON.parse(row.chain_order);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(chainOrder)) continue;
-    const chain = chainOrder.filter((id): id is number => typeof id === "number");
-    if (chain.length === 0) continue;
+    const chain = parseChain(row.chain_order);
+    if (chain === null) continue;
 
     entries.push({
       id: row.id,
@@ -409,18 +447,12 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
 /**
  * One species this key has been, whether or not it ever finished the line.
  *
- * The counterpart to a `DexEntry`, and deliberately a different shape: a
- * graduation is about an *individual* and carries its nature and its own
- * instants, where this is about a *species* and carries only the first time one
- * was reached. Merging the two into one type would give every sighting a nature
- * column that is always null.
+ * The counterpart to a `DexEntry`. The two share `Observed` and nothing else:
+ * this carries only the first time the species was reached, where a graduation
+ * carries the individual that reached it.
  */
-export type Sighting = {
+export type Sighting = Observed & {
   speciesId: number;
-  /** The line this individual was on, so the record has a chain to draw. */
-  chainOrder: readonly number[];
-  rarity: string;
-  isShiny: boolean;
   seenAt: number;
 };
 
@@ -519,15 +551,8 @@ export function listSightings(storage: PluginStorage, apiKeyId: string): Sightin
 
   const sightings: Sighting[] = [];
   for (const row of rows) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(row.chain_order);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(parsed)) continue;
-    const chain = parsed.filter((id): id is number => typeof id === "number");
-    if (chain.length === 0) continue;
+    const chain = parseChain(row.chain_order);
+    if (chain === null) continue;
 
     sightings.push({
       speciesId: row.species_id,

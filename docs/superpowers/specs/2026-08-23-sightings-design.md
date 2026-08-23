@@ -108,8 +108,10 @@ to do, by design. On reveal the real line starts recording normally.
 `collect(dexRows, sightings)` merges the two. A species can arrive from either
 source or both, and the merge is a *comparison* rather than a preference for
 whichever list is read second — a graduation earlier than a sighting still dates
-the species. Order is therefore not load-bearing, which is what makes it safe to
-fold sightings in after the graduation pass.
+the species. Order is therefore not load-bearing *for dating a species*, which is
+what makes it safe to fold sightings in after the graduations. It is load-bearing
+for `lines`, which is offered in source order — see the amendment below, which
+corrects the flat "order is not load-bearing" this paragraph used to claim.
 
 A sighting adds **no catch**. An encounter is a completed line and this species
 has not been on one; inventing an entry would claim a graduation that has not
@@ -123,6 +125,48 @@ would draw that record with nothing under the sprite. The sighting's line is
 offered last and only lands if the catches did not already cover it, so a
 species with both a graduation and a live companion on the same chain draws one
 line rather than two identical ones.
+
+### Amended 23 Aug 2026: one fold, and one seam
+
+The two rules above are unchanged and the stored shape is untouched. What changed
+is that `collect` no longer walks the sources in two passes.
+
+Each source is reduced to a `Contribution` — the species, what dates it, whether
+that date is an observation or a stand-in, and the individual behind it or null —
+and one loop folds them. The first-wins comparison, the shininess OR and the
+rarity tie-break existed once per pass before this, and keeping two copies in
+step by hand is a correction applied to one of them being a bug waiting in the
+other.
+
+`lines` is deduped as the fold runs rather than by a `linesOf` helper afterwards.
+"The sighting's line is offered last" is now a property of the concatenation —
+graduations before sightings — rather than of a separate step, and the resulting
+array is the same in both order and members. `{{sightings}}` is keyed
+`(api_key_id, species_id)`, so a species contributes at most one sighting line
+and there is nothing for a second one to reorder.
+
+**`readCollection(storage, apiKeyId)` is now the only supported way to read a
+collection.** It reads both tables and hands their rows to `collect`. Assembling
+the pair at a call site is what it exists to prevent: a caller that read the Dex
+and forgot the sightings would render a panel short by every species whose
+individual has not graduated yet, with nothing on it to say so.
+
+It lives in `src/collection.ts` and not in `src/store.ts` because the dependency
+has to point one way — `store` importing `collect` back would be a cycle.
+`collect` stays exported and pure, so the rules are still tested against arrays
+rather than against a database.
+
+`DexEntry` and `Sighting` now share an `Observed` base — `chainOrder`, `rarity`,
+`isShiny`, the three fields both genuinely have. It is a shared base and **not**
+a merged type, for the reason the two tables were kept apart in the first place:
+flattening them would give every sighting a nature column that is always null.
+The reader-side `chain_order` parse is likewise one `parseChain` rather than two
+copies, so a `readDex` that dropped a chain `listSightings` kept can no longer
+put a species in the collection its own detail dialog cannot draw.
+
+None of this reaches `collectedFinals`, which is still built from `readDex`
+alone. That invariant is what the separate tables buy and the refactor does not
+spend it.
 
 ## Panel
 
@@ -161,10 +205,11 @@ That was a deliberate choice: a species is in the collection or it is not.
 
 ## Files
 
-- `src/store.ts` — migration 7, `Sighting`, `ReachedStages`, `recordSightings`,
-  `listSightings`
-- `src/collection.ts` — merges sightings, computes `lines`
-- `src/server.ts` — records on settle, lists on read
+- `src/store.ts` — migration 7, `Observed`, `Sighting`, `ReachedStages`,
+  `recordSightings`, `listSightings`, `parseChain`
+- `src/collection.ts` — merges sightings, computes `lines`, `readCollection`
+- `src/server.ts` — records on settle, reads the collection through
+  `readCollection`
 - `ui/types.ts`, `ui/Dex.tsx` — `lines`, hidden stages, omitted encounters
 
 ## Out of scope

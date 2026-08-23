@@ -16,7 +16,7 @@ import {
   RARE_CANDY_XP,
   rarityFromCaptureRate,
 } from "./balance.ts";
-import { collect } from "./collection.ts";
+import { readCollection } from "./collection.ts";
 import { decideGrant, windowKey } from "./grants.ts";
 import {
   cachedSpeciesName,
@@ -35,7 +35,6 @@ import {
   type ItemOutcome,
   lastGrantedAt,
   listCompanions,
-  listSightings,
   MIGRATIONS,
   purchase,
   readCompanion,
@@ -615,21 +614,21 @@ export default definePlugin({
           if (row.state !== null) void prefetchOnce(apiKeyId, row.state).catch(() => {});
 
           const active = row.state?.active ?? null;
-          const dex = readDex(storage, apiKeyId);
-          const sightings = listSightings(storage, apiKeyId);
 
           const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
           const stageName = await nameOf(stageId);
-          // The Dex read as a collection rather than as the log it is stored
-          // as: one record per species the key has owned, pre-evolutions
-          // included, ascending by number. See `src/collection.ts` for why
-          // expanding `chain_order` is a reading of the row and not a guess.
+          // The two tables read as one collection rather than as the logs they
+          // are stored as: one record per species the key has owned,
+          // pre-evolutions included, ascending by number. See
+          // `src/collection.ts` for why expanding `chain_order` is a reading of
+          // the row and not a guess, and why both sources are assembled there
+          // rather than here.
           //
           // The name is added alongside the record rather than into it: the Dex
           // table holds facts about a graduation, and a species' name is a fact
           // about PokéAPI.
           const named = await Promise.all(
-            collect(dex, sightings).map(async (record) => ({
+            readCollection(storage, apiKeyId).map(async (record) => ({
               ...record,
               name: await nameOf(record.speciesId),
             })),
