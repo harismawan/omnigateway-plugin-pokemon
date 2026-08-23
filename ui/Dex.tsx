@@ -404,25 +404,29 @@ function Record({
                           src={spriteUrl(pluginId, speciesId, false)}
                         />
                         {/*
-                  Both, on every stage. This used to name whichever stage
-                  matched `final_id` and number the rest, so a Venusaur's line
-                  read `#1 → #2 → Venusaur` — and permanently, because no name
-                  was ever resolved for a non-final stage at all.
+                          Number on its own line, name under it — the same two
+                          slots the grid cell uses, and now drawn the same way.
+                          A tile and a cell showing the same species should not
+                          disagree about how they say so.
 
-                  Each stage is now named from its own id through the
-                  collection's own index, which is also what makes the old
-                  hazard impossible: a caption resolved by position could print
-                  the graduate's name under whichever sprite happened to be
-                  last, which on an Eevee line is "Vaporeon" written under
-                  Eevee. Looked up by species, that cannot happen.
+                          Both, on every stage. This used to name whichever
+                          stage matched `final_id` and number the rest, so a
+                          Venusaur's line read `#1 → #2 → Venusaur` — and
+                          permanently, because no name was ever resolved for a
+                          non-final stage at all.
 
-                  Two slots again, so again not `speciesLabel`: it would render
-                  `#1 #1` on a species the cache has not named.
-                */}
-                        <Caption>
-                          #{speciesId}
-                          {names.has(speciesId) ? ` ${names.get(speciesId)}` : ""}
-                        </Caption>
+                          Each stage is named from its own id through the
+                          collection's own index, which is what makes the old
+                          hazard impossible: a caption resolved by position
+                          could print the graduate's name under whichever sprite
+                          happened to be last, which on an Eevee line is
+                          "Vaporeon" written under Eevee.
+
+                          Two slots, so not `speciesLabel`: it would render the
+                          number twice on a species the cache has not named.
+                        */}
+                        <SpeciesNumber>#{speciesId}</SpeciesNumber>
+                        {names.has(speciesId) ? <Caption>{names.get(speciesId)}</Caption> : null}
                       </DexLineStage>
                     </Fragment>
                   ))}

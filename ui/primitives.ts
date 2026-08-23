@@ -949,7 +949,11 @@ export const DexLineStage = styled.figure<{ $here: boolean }>`
     image-rendering: pixelated;
   }
 
-  figcaption {
+  /* Both slots, not just the caption. The number is its own element now — the
+     same shape the grid cell uses — so a rule naming figcaption alone would
+     leave the marked tile's number at the dimmer weight and half-state it. */
+  figcaption,
+  span {
     color: ${(p) => (p.$here ? "var(--ink)" : "var(--ink-dim)")};
   }
 `;

@@ -192,6 +192,12 @@ than a device invented here. It also gives the exact/approximate distinction a
 home: the label reads `LINE GRADUATED` instead of `FIRST CAUGHT`, so the
 qualifier sits in the structure rather than inside the sentence.
 
+**A tile says a species the way a cell does.** The number takes its own line and
+the name sits under it, which is the shape the grid cell already used. The tile
+had been joining them into one string, so two surfaces showing the same species
+disagreed about how to say so — and the joined form is also the one that pushes
+a long name into wrapping beside a number rather than under it.
+
 **The signature: the chain, with a you-are-here marker.** The stages were three
 sprites `sm` apart, which reads as three unrelated Pokémon that happen to be
 adjacent — the one thing a line is not. They are now sunk tiles joined by rules,

@@ -25,7 +25,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createPluginApi, LiveProvider, useLive } from "@omnigateway/dashboard-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Dex } from "../ui/Dex.tsx";
@@ -162,6 +162,29 @@ async function lookUp(keyId: string): Promise<void> {
  */
 async function openCompanion(): Promise<void> {
   await screen.findByRole("heading", { name: "Companion" });
+}
+
+/**
+ * The evolution-chain tile printing a given species number.
+ *
+ * The number and the name are separate elements on a tile — the same two slots
+ * the grid cell uses — so "is #1 labelled Bulbasaur" is a question about one
+ * tile rather than about the page. Two tiles with their names swapped would
+ * satisfy a pair of bare `getByText` calls; scoping to the tile is what makes
+ * the pairing the assertion.
+ */
+function stageTilesNamed(name: string): HTMLElement[] {
+  return screen
+    .getAllByRole("figure")
+    .filter((figure) => within(figure).queryByText(name) !== null);
+}
+
+function stageTile(number: string): HTMLElement {
+  const tile = screen
+    .getAllByRole("figure")
+    .find((figure) => within(figure).queryByText(number) !== null);
+  if (tile === undefined) throw new Error(`no chain tile prints ${number}`);
+  return tile;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1327,9 +1350,9 @@ describe("a Pokédex record", () => {
     // and it read as a rendering fault rather than as missing data.
     await openRecord(line, "Venusaur");
 
-    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
-    expect(screen.getByText("#2 Ivysaur")).toBeTruthy();
-    expect(screen.getByText("#3 Venusaur")).toBeTruthy();
+    expect(within(stageTile("#1")).getByText("Bulbasaur")).toBeTruthy();
+    expect(within(stageTile("#2")).getByText("Ivysaur")).toBeTruthy();
+    expect(within(stageTile("#3")).getByText("Venusaur")).toBeTruthy();
     // And the record's own title says both too, asserted through the heading's
     // accessible name — which is the concatenation of its two slots, and so is
     // a stronger claim than two `getByText` calls that would pass with the
@@ -1353,15 +1376,11 @@ describe("a Pokédex record", () => {
     ];
     await openRecord(partial, "Venusaur");
 
-    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
-    // Twice on the page and both are wanted: the unnamed species has a cell of
-    // its own on the grid, and the line has a caption for it. What matters is
-    // that both say the number and nothing else.
-    expect(screen.getAllByText("#2")).toHaveLength(2);
-    // Never the record's name borrowed onto a stage that is not it, and never
-    // the number standing in for a name it does not have.
-    expect(screen.queryByText("#2 Venusaur")).toBeNull();
-    expect(screen.queryByText("#2 #2")).toBeNull();
+    expect(within(stageTile("#1")).getByText("Bulbasaur")).toBeTruthy();
+    // The unnamed stage prints its number and nothing else — never the record's
+    // name borrowed onto a stage that is not it, and never the number standing
+    // in for the name it does not have.
+    expect(stageTile("#2").textContent).toBe("#2");
   });
 
   test("names a stage the current filter has hidden", async () => {
@@ -1391,7 +1410,7 @@ describe("a Pokédex record", () => {
     await userEvent.click(await screen.findByRole("button", { name: "legendary" }));
     await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
 
-    expect(screen.getByText("#133 Eevee")).toBeTruthy();
+    expect(within(stageTile("#133")).getByText("Eevee")).toBeTruthy();
   });
 
   test("hides a stage of the line this key has not reached", async () => {
@@ -1415,10 +1434,11 @@ describe("a Pokédex record", () => {
     ];
     await openRecord(growing, "Ivysaur");
 
-    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
-    expect(screen.getByText("#2 Ivysaur")).toBeTruthy();
+    expect(within(stageTile("#1")).getByText("Bulbasaur")).toBeTruthy();
+    expect(within(stageTile("#2")).getByText("Ivysaur")).toBeTruthy();
     // #3 is on the line and not in the collection, so it is not drawn at all.
-    expect(screen.queryByText(/#3/)).toBeNull();
+    expect(screen.queryByText("#3")).toBeNull();
+    expect(screen.queryByText("Venusaur")).toBeNull();
   });
 
   test("draws every stage once the whole line has been reached", async () => {
@@ -1427,9 +1447,9 @@ describe("a Pokédex record", () => {
     // collection, so nothing is hidden.
     await openRecord(line, "Venusaur");
 
-    expect(screen.getByText("#1 Bulbasaur")).toBeTruthy();
-    expect(screen.getByText("#2 Ivysaur")).toBeTruthy();
-    expect(screen.getByText("#3 Venusaur")).toBeTruthy();
+    expect(within(stageTile("#1")).getByText("Bulbasaur")).toBeTruthy();
+    expect(within(stageTile("#2")).getByText("Ivysaur")).toBeTruthy();
+    expect(within(stageTile("#3")).getByText("Venusaur")).toBeTruthy();
   });
 
   test("omits the encounters field for a species that has never graduated", async () => {
@@ -1456,7 +1476,8 @@ describe("a Pokédex record", () => {
     await openRecord(line, "Ivysaur");
 
     const current = screen.getByRole("figure", { current: true });
-    expect(current.textContent).toContain("#2 Ivysaur");
+    expect(within(current).getByText("#2")).toBeTruthy();
+    expect(within(current).getByText("Ivysaur")).toBeTruthy();
     // Exactly one, so the marker cannot be on every tile or on none.
     expect(screen.getAllByRole("figure", { current: true })).toHaveLength(1);
   });
@@ -1493,10 +1514,12 @@ describe("a Pokédex record", () => {
     ];
     await openRecord(branched, "Eevee");
 
-    expect(screen.getByText("#134 Vaporeon")).toBeTruthy();
-    expect(screen.getByText("#135 Jolteon")).toBeTruthy();
-    // Eevee heads both lines, so its caption appears once per line.
-    expect(screen.getAllByText("#133 Eevee")).toHaveLength(2);
+    expect(within(stageTile("#134")).getByText("Vaporeon")).toBeTruthy();
+    expect(within(stageTile("#135")).getByText("Jolteon")).toBeTruthy();
+    // Eevee heads both lines, so it has a tile in each. Counted as tiles rather
+    // than as text, because the record's heading and the grid cell behind it
+    // both print this name as well.
+    expect(stageTilesNamed("Eevee")).toHaveLength(2);
   });
 
   test("draws one line when two catches walked the same one", async () => {
@@ -1516,8 +1539,9 @@ describe("a Pokédex record", () => {
     ];
     await openRecord(twice, "Venusaur");
 
-    // Once, in the single line — not once per catch.
-    expect(screen.getAllByText("#3 Venusaur")).toHaveLength(1);
+    // One tile, in the single line — not one per catch. Counted as tiles for the
+    // reason above: the heading and the grid cell print this name too.
+    expect(stageTilesNamed("Venusaur")).toHaveLength(1);
   });
 
   test("lists every catch with its own nature", async () => {
@@ -2332,8 +2356,9 @@ describe("the Dex grid's identity", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Vaporeon/ }));
 
-    expect(screen.getByText("#133 Eevee")).toBeTruthy();
-    expect(screen.queryByText("#133 Vaporeon")).toBeNull();
+    // Eevee's own tile carries Eevee's name, not the record's.
+    expect(within(stageTile("#133")).getByText("Eevee")).toBeTruthy();
+    expect(within(stageTile("#133")).queryByText("Vaporeon")).toBeNull();
   });
 });
 
