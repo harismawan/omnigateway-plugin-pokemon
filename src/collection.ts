@@ -319,6 +319,15 @@ function contributionsOf(entry: DexEntry): Contribution[] {
  * Always exact: a sighting is an observation of the stage itself, so its instant
  * is the real thing rather than a graduation standing in for one.
  *
+ * **That claim is currently unreliable and the panel must not trust it.**
+ * `recordSightings` falls back to `now` for a stage entered before instants were
+ * recorded, and `{{sightings}}` has no column saying which of the two a row
+ * holds — so a guessed instant arrives here indistinguishable from an observed
+ * one. The Dex therefore labels a sighting-only species "first recorded" rather
+ * than reading this field. Fixing it properly means a `seen_exact` column; until
+ * then this stays true so a species with *both* sources is not dated worse than
+ * it was.
+ *
  * The line it carries is the one to draw when there is no Dex row to take one
  * from. The id is synthesised because a sighting row has none — its key is the
  * species — and all it has to be is the same on every read, which is what

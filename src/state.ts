@@ -37,7 +37,7 @@ export type MonState = {
    * Empty for a companion that hatched before this field existed — an absent
    * fact rather than a zero, and the Dex renders it as one.
    */
-  stageTimes: readonly number[];
+  stageTimes: readonly (number | null)[];
   /** Tokens accumulated into the current stage. */
   usedAtStage: number;
   rarity: Rarity;
@@ -277,8 +277,15 @@ export function parseState(raw: string): CompanionState | null {
       // growth over a decoration. The Dex draws an absent instant as its own
       // state rather than guessing one, so "we did not record this" survives
       // all the way to the panel instead of being papered over here.
+      // Mapped and never filtered. A hole is the fact being stored — "this
+      // stage was entered before anybody wrote instants down" — and compacting
+      // the array closes it, sliding every later instant onto an earlier stage.
+      // That reads as a Bulbasaur dated from its Venusaur, which is worse than
+      // no date at all: a wrong date reads as a fact.
       stageTimes: Array.isArray(storedActive.stageTimes)
-        ? storedActive.stageTimes.filter((at): at is number => typeof at === "number" && at >= 0)
+        ? storedActive.stageTimes.map((at) =>
+            typeof at === "number" && at >= 0 && Number.isFinite(at) ? at : null,
+          )
         : [],
       usedAtStage: Math.max(0, asInt(storedActive.usedAtStage, 0)),
       rarity,

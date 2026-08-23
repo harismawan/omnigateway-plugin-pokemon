@@ -103,6 +103,45 @@ shows one catch's date beside another's rarity.
 when it is not. One word, and it buys the difference between a date and the wrong
 kind of date. Catch rows follow the same rule per individual.
 
+### Amended 23 Aug 2026: holes, and a third label
+
+**`stageTimes` is a sparse array, not a short one.** It was `readonly number[]`
+appended to at each transition, which silently assumed one entry per stage
+already walked. That holds only for a companion hatched after migration 6. Every
+older save carries `[]`, so the append put the *new* instant at index 0 — dating
+the base form from an evolution months later, and dating it confidently, because
+a present number is indistinguishable from an observed one. On graduation the
+same shift reached `{{dex}}.stage_times`, which `enteredAtOf` reads positionally.
+
+The type is now `readonly (number | null)[]` and `advance` places an instant at
+its own index (`stampedAt`), padding the gap with nulls. Three rules follow from
+it, each with a test that dies without it:
+
+- `stampedAt` **never overwrites**. The graduation site depends on it: a final
+  form entered by an earlier `advance` already holds the instant it was entered,
+  and a graduation is the transition *out* of it. This is what the old
+  `.slice(0, plannedPath.length)` was quietly protecting.
+- `parseState` **maps, never filters**. Filtering compacts the array and closes
+  the hole, which is the same shift by another route.
+- `parseStageTimes` **preserves holes rather than rejecting the row**. Refusing
+  an array because one member is null would discard the instants that are real,
+  and none of those is recoverable afterwards.
+
+**A third panel label.** `first recorded` when a species has no catches. Such a
+species was reached by a companion still walking its line, so nothing was ever
+caught, and the only instant anybody has is when the sighting was written down —
+which for a stage entered before instants existed is the first settle after the
+upgrade, not the evolution. The store keeps no flag distinguishing the two, so
+`first recorded` is the one phrasing true of both: it claims something about the
+database rather than about the world.
+
+Recording that distinction properly needs a `seen_exact` column on
+`{{sightings}}`, which is **deliberately not in this change**. Until it exists,
+`SpeciesRecord.firstCaughtExact` is unreliable for a sighting-only species — it
+is hardcoded true in `contributionOf` — and the panel must not consult it there.
+Sightings already written keep whatever instant they were given; nothing
+recomputes them, because nothing can.
+
 ## Part two: the record is a modal dialog
 
 ### What this overturns

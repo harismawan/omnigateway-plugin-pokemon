@@ -160,7 +160,7 @@ export type DexEntry = Observed & {
    * somehow stored an empty list would be a bug worth seeing. The panel dates a
    * null line from `caughtAt` and says that is what it did.
    */
-  stageTimes: readonly number[] | null;
+  stageTimes: readonly (number | null)[] | null;
   nature: string | null;
   caughtAt: number;
 };
@@ -379,12 +379,19 @@ function parseChain(raw: string): readonly number[] | null {
  * value has a correct rendering waiting for it — and distinguishing "corrupt"
  * from "absent" on screen would be a distinction nobody can act on.
  *
- * Stricter than `parseChain` above, and the asymmetry is deliberate: a partly
- * numeric array is filtered there and rejected here, because a missing species
- * shortens a line while a missing instant *shifts* every date after it onto the
- * wrong stage. A gap reads as a gap; a wrong date reads as a fact.
+ * Different from `parseChain` above, and the asymmetry is deliberate: a
+ * non-numeric member is dropped there and becomes a hole here, because a missing
+ * species shortens a line while a missing instant would *shift* every date after
+ * it onto the wrong stage. A gap reads as a gap; a wrong date reads as a fact.
+ *
+ * **Holes are preserved, not rejected.** A companion part-way up its line when
+ * instants started being recorded graduates with `null` in the stages nobody
+ * wrote down — see `stampedAt` in `advance.ts`. Refusing the whole array over
+ * them would throw away the instants that *are* real, and none of those is
+ * recoverable afterwards. Mapping rather than filtering is what keeps the result
+ * parallel to `chainOrder`, which `enteredAtOf` reads positionally.
  */
-function parseStageTimes(raw: string | null): readonly number[] | null {
+function parseStageTimes(raw: string | null): readonly (number | null)[] | null {
   if (raw === null) return null;
   let parsed: unknown;
   try {
@@ -393,12 +400,7 @@ function parseStageTimes(raw: string | null): readonly number[] | null {
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  // Every element or none. A partly-numeric array would silently shift every
-  // instant after the bad one onto the wrong stage, which is worse than having
-  // no dates at all — a wrong date reads as a fact.
-  return parsed.every((at) => typeof at === "number" && Number.isFinite(at))
-    ? (parsed as number[])
-    : null;
+  return parsed.map((at) => (typeof at === "number" && Number.isFinite(at) ? at : null));
 }
 
 /**
@@ -460,7 +462,7 @@ export type Sighting = Observed & {
 export type ReachedStages = {
   plannedPath: readonly number[];
   stageIndex: number;
-  stageTimes: readonly number[];
+  stageTimes: readonly (number | null)[];
   rarity: string;
   isShiny: boolean;
   /** A Ditto still wearing a disguise. Sights nothing — see below. */

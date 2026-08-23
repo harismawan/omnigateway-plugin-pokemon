@@ -38,7 +38,7 @@ export type CompanionEvent =
        * is gone by the time the caller sees the result — carried here for the
        * same reason `chainOrder` is.
        */
-      stageTimes: readonly number[];
+      stageTimes: readonly (number | null)[];
       rarity: Rarity;
       isShiny: boolean;
       nature: Nature;
@@ -249,10 +249,10 @@ export function advance(state: CompanionState, tokensTotal: number, now: number)
           ...mon,
           stageIndex: mon.stageIndex + 1,
           usedAtStage: excess,
-          // Appended, so the array stays parallel to `plannedPath`. Several
+          // Placed at the stage it belongs to, never appended. Several
           // evolutions in one `advance` all carry this call's `now` — see the
           // note on `stageTimes` about observed rather than true instants.
-          stageTimes: [...mon.stageTimes, now],
+          stageTimes: stampedAt(mon.stageTimes, mon.stageIndex + 1, now),
         },
       };
       continue;
@@ -265,10 +265,10 @@ export function advance(state: CompanionState, tokensTotal: number, now: number)
       chainOrder: mon.plannedPath,
       // The last stage is entered and left in the same step — a graduation is
       // the transition *out* of the final form — so its instant is this call's
-      // `now` and was never appended to the state that is about to be
-      // discarded. Padded here rather than in the caller, so the two arrays the
+      // `now` and was never written into the state that is about to be
+      // discarded. Placed here rather than in the caller, so the two arrays the
       // Dex stores are the same length by construction.
-      stageTimes: [...mon.stageTimes, now].slice(0, mon.plannedPath.length),
+      stageTimes: stampedAt(mon.stageTimes, mon.plannedPath.length - 1, now),
       rarity: mon.rarity,
       isShiny: mon.isShiny,
       nature: mon.nature,
@@ -279,4 +279,42 @@ export function advance(state: CompanionState, tokensTotal: number, now: number)
   }
 
   return { state: next, events };
+}
+
+/**
+ * A stage's instant written at its own index, with unrecorded stages left as
+ * holes and an already-recorded one left alone.
+ *
+ * Placement rather than `[...stageTimes, now]`, and the difference is not
+ * cosmetic. Appending assumes the array already has one entry per stage the
+ * companion has walked, which is true only for a companion that hatched after
+ * instants were being recorded. Every save older than that carries an empty
+ * array, so appending put the *new* instant at index 0 — dating the base form
+ * from an evolution that happened months later, and dating it confidently,
+ * because a present number is indistinguishable from an observed one.
+ *
+ * The holes are the honest answer for those stages: nobody wrote them down, and
+ * no arithmetic over tokens can recover them. `enteredAtOf` already reads a hole
+ * as "never recorded", which the panel has always been able to draw.
+ *
+ * **Never overwrites.** The graduation site depends on it: a final form that was
+ * entered by an earlier `advance` already holds the instant it was *entered*,
+ * and a graduation is the transition out of it. Writing this call's `now` there
+ * would redate the last stage to the moment the line finished — which is what
+ * the old `slice` was quietly protecting, by throwing the appended value away
+ * whenever the array was already full length. Both callers want "fill the gap
+ * if there is one", so the rule lives here instead of at each of them.
+ *
+ * Growing rather than truncating, so a `stageIndex` that somehow ran past the
+ * array cannot silently drop instants that were recorded.
+ */
+function stampedAt(
+  stageTimes: readonly (number | null)[],
+  index: number,
+  now: number,
+): readonly (number | null)[] {
+  const placed = [...stageTimes];
+  while (placed.length <= index) placed.push(null);
+  placed[index] ??= now;
+  return placed;
 }
