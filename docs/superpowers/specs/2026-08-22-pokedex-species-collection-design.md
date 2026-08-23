@@ -103,6 +103,15 @@ writes a row, so a partially-walked line is never recorded at all. A companion
 abandoned at Ivysaur contributes nothing, which is correct — it has not
 finished, and the panel already shows it as the active companion.
 
+**Amendment, 23 Aug 2026 — a partially-walked line now does contribute.** See
+`2026-08-23-sightings-design.md`. The last two sentences above were the
+complaint rather than the design: a Pokémon part-way up its line has *been* its
+earlier forms, and saying nothing about them until the day it graduates loses
+months of what the collection is for. A second table records species as they are
+reached and `collect` takes both sources. Everything else here is unchanged —
+`chain_order` expansion is still how a graduation contributes, and
+`collectedFinals` still means graduations alone.
+
 **`isShiny` is true if any contributing catch was shiny.** Shininess is a
 property of an individual and does not change as it evolves, so a shiny Venusaur
 graduation is proof of a shiny Bulbasaur owned. The alternative — the newest

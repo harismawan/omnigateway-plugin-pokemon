@@ -12,6 +12,7 @@ import { WINDOW_MS } from "@omnigateway/plugin-api/events";
 import { DASHBOARD_SDK_VERSION, PLUGIN_API_VERSION } from "@omnigateway/plugin-api/version";
 import {
   EGG_HATCH_THRESHOLD,
+  FRESH_EGG_BASE_PRICE,
   freshEggPrice,
   graduationTotal,
   ITEM_KINDS,
@@ -557,6 +558,133 @@ test("a line grown over days dates each stage from the day it was reached", asyn
     [12, 1_700_000_400_000],
   ]);
   expect(dex.every((record) => record.firstCaughtExact)).toBe(true);
+});
+
+test("a companion still growing is in the Pokédex, without the stages ahead of it", async () => {
+  // The request, end to end. A Pokémon part-way up its line has *been* its
+  // earlier stages, and until now the Pokédex could only speak about lines that
+  // had finished.
+  await boot({}, cachedSpecies());
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  clock = 1_700_000_100_000;
+  spend(EGG_HATCH_THRESHOLD, "req_hatch");
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  clock = 1_700_000_200_000;
+  spend(1, "req_open");
+
+  // One evolution, so the companion sits at stage 1 of a three-stage line and
+  // has never graduated anything.
+  clock = 1_700_000_300_000;
+  spend(phaseThreshold("common", 3, 0), "req_eleven");
+
+  expect(readDex(storage, KEY)).toEqual([]);
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as {
+    dex: Array<{
+      speciesId: number;
+      firstCaughtAt: number;
+      lines: number[][];
+      catches: unknown[];
+    }>;
+  };
+
+  // #10 and #11 reached, #12 planned but not yet lived — so two entries, not
+  // three. The third is the stage the panel has to hide.
+  expect(dex.map((record) => record.speciesId)).toEqual([10, 11]);
+  // Each dated from when its own stage was entered, not from when it was
+  // written: this route has been polled since, and `now` has moved.
+  expect(dex.map((record) => record.firstCaughtAt)).toEqual([1_700_000_200_000, 1_700_000_300_000]);
+  // No encounters, because nothing has graduated — but a line to draw, taken
+  // from the sighting since there is no Dex row to take one from.
+  expect(dex[0]?.catches).toEqual([]);
+  expect(dex[0]?.lines).toEqual([[10, 11, 12]]);
+});
+
+test("a disguised Ditto stays out of the Pokédex until it reveals", async () => {
+  // Recording the disguise would put a species in the collection that was never
+  // really there, and this table has no way to take one back out.
+  await boot({}, cachedSpecies());
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      stageTimes: [1_700_000_100_000],
+      dittoDisguise: 10,
+      dittoRevealed: false,
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as { dex: Array<{ speciesId: number }> };
+  expect(dex).toEqual([]);
+});
+
+test("a species seen on a companion survives that companion being rerolled away", async () => {
+  // The trade this feature made. A fresh egg discards the companion outright,
+  // so a collection derived from the live state alone would lose the species
+  // the moment somebody rerolled. Recorded, it stays.
+  await boot({}, cachedSpecies());
+  const route = routes.find((r) => r.path === "/keys/:id");
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  expect(route).toBeDefined();
+  expect(buy).toBeDefined();
+  if (route === undefined || buy === undefined) return;
+
+  // A wallet that can afford a 1B egg means 1B credited — which is more growth
+  // than a common line needs to graduate, so the companion has to be planted
+  // with that growth already absorbed rather than grown into place. Otherwise
+  // the fixture graduates it before it can be rerolled, and the test stops
+  // being about rerolling at all.
+  clock = 1_700_000_100_000;
+  spend(FRESH_EGG_BASE_PRICE, "req_rich");
+  plant({
+    consumedTotal: FRESH_EGG_BASE_PRICE,
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11, 12],
+      stageIndex: 0,
+      stageTimes: [1_700_000_100_000],
+      usedAtStage: 0,
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    inventory: emptyInventory(),
+  });
+
+  // The poll that records the sighting.
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+
+  // Reroll: the companion is discarded and never graduated.
+  const bought = await buy.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "egg", tier: null },
+  });
+  expect(bought.status ?? 200).toBe(200);
+  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
+  expect(readDex(storage, KEY)).toEqual([]);
+
+  const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
+  const { dex } = found.json as { dex: Array<{ speciesId: number }> };
+  expect(dex.map((record) => record.speciesId)).toEqual([10]);
 });
 
 test("a weekly ceiling pays at most weekly, and never on the install itself", async () => {

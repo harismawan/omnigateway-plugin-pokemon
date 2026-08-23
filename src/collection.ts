@@ -14,9 +14,12 @@
  * is why this feature needed no migration and no backfill: a graduation
  * recorded months ago lights up its whole line the first time this runs.
  *
- * The converse is worth stating too, because it is what makes the rule safe: a
- * companion abandoned half way up its line contributes nothing, since
- * graduation is the only event that writes a row at all.
+ * The converse used to be worth stating too — that a companion abandoned half
+ * way up its line contributed nothing, since graduation was the only event that
+ * wrote a row at all. **That is no longer true, and it was the complaint.** A
+ * Pokémon part-way up its line *has been* its earlier forms, and `{{sightings}}`
+ * records them as it reaches them; `collect` takes both sources. See
+ * `docs/superpowers/specs/2026-08-23-sightings-design.md`.
  *
  * What this deliberately does **not** feed is `collectedFinals`. That set still
  * means "lines this key has graduated" and is still built from `final_id`
@@ -26,7 +29,7 @@
  * useless. Collection is a display fact; rolling is not.
  */
 
-import type { DexEntry } from "./store.ts";
+import type { DexEntry, Sighting } from "./store.ts";
 
 /** One individual that passed through a species, as the detail's history shows it. */
 export type Catch = {
@@ -77,6 +80,19 @@ export type SpeciesRecord = {
   firstCaughtExact: boolean;
   /** Newest first by stage instant, the order the log this replaces was read in. */
   catches: readonly Catch[];
+  /**
+   * The distinct evolution lines this species has been on.
+   *
+   * Almost always one. Eevee's chain branches, so an Eevee caught as a Vaporeon
+   * and again as a Jolteon has two — and two Venusaur catches through the same
+   * line have one, which is why these are deduped rather than one per catch.
+   *
+   * Computed here rather than in the panel because it is a fact about the data:
+   * a species seen but never graduated has no catch to take a line from, and a
+   * panel deriving lines from `catches` alone would draw that record with
+   * nothing under the sprite.
+   */
+  lines: ReadonlyArray<readonly number[]>;
 };
 
 /**
@@ -97,7 +113,10 @@ export type SpeciesRecord = {
  * species that survives in no row is simply absent, which is the same gap
  * `readDex` already leaves.
  */
-export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
+export function collect(
+  entries: readonly DexEntry[],
+  sightings: readonly Sighting[] = [],
+): SpeciesRecord[] {
   /**
    * The running answer per species.
    *
@@ -114,6 +133,11 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
     /** True while `first.caughtAt` is a real stage instant rather than a graduation. */
     firstExact: boolean;
     catches: Catch[];
+    /**
+     * The line a sighting was on, for a species with no graduation to take one
+     * from. Unset once any catch exists, because a catch carries its own.
+     */
+    seenOn?: readonly number[];
   };
   const bySpecies = new Map<number, Accumulating>();
 
@@ -177,6 +201,51 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
     }
   }
 
+  /*
+    Sightings, folded in after the graduations.
+
+    A species can arrive from either source or both, and the merge is a
+    comparison rather than a preference for whichever list is read second: a
+    graduation earlier than a sighting still dates the species. Order here is
+    therefore not load-bearing, which is the property that makes this safe to
+    read second.
+
+    A sighting adds no catch. An encounter is a completed line and this species
+    has not been on one — a record with an invented entry would be claiming a
+    graduation that has not happened.
+  */
+  for (const sighting of sightings) {
+    const stamp: Stamped = { id: `seen-${sighting.speciesId}`, caughtAt: sighting.seenAt };
+    const found = bySpecies.get(sighting.speciesId);
+    if (found === undefined) {
+      bySpecies.set(sighting.speciesId, {
+        rarity: sighting.rarity,
+        isShiny: sighting.isShiny,
+        first: stamp,
+        // A sighting is an observation of the stage itself, so its instant is
+        // the real thing rather than a graduation standing in for one.
+        firstExact: true,
+        catches: [],
+        // The line to draw when there is no Dex row to take one from.
+        seenOn: sighting.chainOrder,
+      });
+      continue;
+    }
+
+    // Any individual, from either source. A shiny sighted and rerolled away was
+    // still a shiny this key owned.
+    found.isShiny = found.isShiny || sighting.isShiny;
+    if (earlier(stamp, found.first)) {
+      found.rarity = sighting.rarity;
+      found.first = stamp;
+      found.firstExact = true;
+    }
+    // Kept even when the species already has catches: the companion alive now
+    // may be walking a different branch from the one that graduated, and an
+    // Eevee record should show both.
+    found.seenOn ??= sighting.chainOrder;
+  }
+
   return [...bySpecies]
     .map(([speciesId, found]) => ({
       speciesId,
@@ -184,6 +253,7 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
       isShiny: found.isShiny,
       firstCaughtAt: found.first.caughtAt,
       firstCaughtExact: found.firstExact,
+      lines: linesOf(found.catches, found.seenOn),
       // Sorted here rather than trusted from the caller. `readDex` returns
       // `caught_at DESC` today, and a history that silently depended on that
       // would be wrong the day the query changes. Keyed on the stage instant
@@ -194,6 +264,31 @@ export function collect(entries: readonly DexEntry[]): SpeciesRecord[] {
       ),
     }))
     .sort((a, b) => a.speciesId - b.speciesId);
+}
+
+/**
+ * The distinct lines behind a set of catches, plus the one a sighting was on.
+ *
+ * Deduped by the members in order, because that *is* a line's identity: two
+ * lines with the same species in the same order are the same line. The
+ * sighting's line is offered last and only lands if the catches did not already
+ * cover it — a species that has both a graduation and a live companion on the
+ * same chain draws one line, not two identical ones.
+ */
+function linesOf(
+  catches: readonly Catch[],
+  seenOn: readonly number[] | undefined,
+): ReadonlyArray<readonly number[]> {
+  const lines = new Map<string, readonly number[]>();
+  for (const taken of catches) {
+    const key = taken.chainOrder.join("-");
+    if (!lines.has(key)) lines.set(key, taken.chainOrder);
+  }
+  if (seenOn !== undefined) {
+    const key = seenOn.join("-");
+    if (!lines.has(key)) lines.set(key, seenOn);
+  }
+  return [...lines.values()];
 }
 
 /**

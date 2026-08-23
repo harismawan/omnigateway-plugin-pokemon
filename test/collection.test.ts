@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { collect } from "../src/collection.ts";
-import type { DexEntry } from "../src/store.ts";
+import type { DexEntry, Sighting } from "../src/store.ts";
 
 /**
  * Every quantity distinct, deliberately.
@@ -351,4 +351,103 @@ test("rarity follows the catch that reached the stage first, not the one that gr
 
   expect(collect([slow, quick])[0]?.rarity).toBe("uncommon");
   expect(collect([quick, slow])[0]?.rarity).toBe("uncommon");
+});
+
+/* -------------------------------------------------------------------------- */
+/* sightings                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function seen(patch: Partial<Sighting> = {}): Sighting {
+  return {
+    speciesId: 1,
+    chainOrder: [1, 2, 3],
+    rarity: "common",
+    isShiny: false,
+    seenAt: 500_000,
+    ...patch,
+  };
+}
+
+test("a species seen but never graduated is in the collection", () => {
+  // The request. A companion growing right now has been its earlier stages, and
+  // a Pokédex that only lists finished lines cannot say so.
+  const collection = collect([], [seen({ speciesId: 1 }), seen({ speciesId: 2 })]);
+
+  expect(collection.map((record) => record.speciesId)).toEqual([1, 2]);
+});
+
+test("a sighting-only species has no encounters", () => {
+  // An encounter is a completed line, and this species has not been on one. The
+  // record shows no history rather than inventing an entry for a graduation
+  // that has not happened.
+  expect(collect([], [seen()])[0]?.catches).toEqual([]);
+});
+
+test("a sighting carries its own date, rarity, shininess and line", () => {
+  // Everything the record needs, since there is no Dex row to fall back on.
+  const collection = collect(
+    [],
+    [seen({ speciesId: 4, chainOrder: [4, 5, 6], rarity: "rare", isShiny: true, seenAt: 700_000 })],
+  );
+
+  expect(collection[0]).toMatchObject({
+    speciesId: 4,
+    rarity: "rare",
+    isShiny: true,
+    firstCaughtAt: 700_000,
+    firstCaughtExact: true,
+  });
+  expect(collection[0]?.catches).toEqual([]);
+});
+
+test("sightings and graduations merge into one record per species", () => {
+  // The ordinary steady state: a line graduated once and walked again by the
+  // companion alive now. One cell, not two.
+  const collection = collect(
+    [row({ id: "grad", chainOrder: [1, 2, 3], stageTimes: [900, 950, 990], caughtAt: 990 })],
+    [seen({ speciesId: 1, seenAt: 100 })],
+  );
+
+  expect(collection.map((record) => record.speciesId)).toEqual([1, 2, 3]);
+  // The sighting is earlier, so it dates the species — and the graduation is
+  // still there as an encounter.
+  expect(collection[0]?.firstCaughtAt).toBe(100);
+  expect(collection[0]?.catches).toHaveLength(1);
+});
+
+test("a graduation earlier than a sighting keeps the graduation's date", () => {
+  // The other direction, so the merge is a comparison rather than a preference
+  // for whichever list is read second.
+  const collection = collect(
+    [row({ id: "grad", chainOrder: [1], finalId: 1, stageTimes: [100], caughtAt: 100 })],
+    [seen({ speciesId: 1, chainOrder: [1], seenAt: 900 })],
+  );
+
+  expect(collection[0]?.firstCaughtAt).toBe(100);
+});
+
+test("a sighting makes a species shiny when the graduation was not", () => {
+  // Shininess is "any individual of this species was", and a sighting is an
+  // individual. The rule does not care which list it came from.
+  const collection = collect(
+    [row({ id: "plain", chainOrder: [1], finalId: 1, isShiny: false, caughtAt: 100 })],
+    [seen({ speciesId: 1, chainOrder: [1], isShiny: true, seenAt: 900 })],
+  );
+
+  expect(collection[0]?.isShiny).toBe(true);
+});
+
+test("the grid stays in species order across both sources", () => {
+  // A sighting of #2 and a graduation of #4 have to interleave by number, not
+  // sit in two blocks.
+  const collection = collect(
+    [row({ id: "grad", chainOrder: [4, 5], finalId: 5, caughtAt: 100 })],
+    [seen({ speciesId: 2, chainOrder: [2, 3] })],
+  );
+
+  expect(collection.map((record) => record.speciesId)).toEqual([2, 4, 5]);
+});
+
+test("an empty pair of sources collects nothing", () => {
+  expect(collect([], [])).toEqual([]);
 });

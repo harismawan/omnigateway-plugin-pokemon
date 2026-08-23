@@ -89,6 +89,37 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     // the panel renders as its own fact rather than as a date.
     sql: `ALTER TABLE {{dex}} ADD COLUMN stage_times TEXT`,
   },
+  {
+    version: 7,
+    // Species this key has *been*, as opposed to lines it has finished.
+    //
+    // A fourth table rather than a nullable `caught_at` on `{{dex}}`, and the
+    // reason is blast radius. `readDex` and the `collectedFinals` set both
+    // assume every row they see is a graduation; a sighting row living there
+    // would need a guard at each, and a guard missed once feeds the roll's
+    // diversity weighting and the lure with species nobody graduated. A
+    // separate table cannot be read by accident.
+    //
+    // Keyed on the species rather than on the individual, because that is the
+    // question it answers — "has this key ever been a Bulbasaur" — and it is
+    // what makes the write an idempotent `INSERT OR IGNORE` instead of a
+    // read-modify-write. First sighting wins and is never updated, the same
+    // monotonic rule the growth counters follow.
+    sql: `
+      CREATE TABLE {{sightings}} (
+        api_key_id  TEXT NOT NULL,
+        species_id  INTEGER NOT NULL,
+        -- The line this individual was on, so a species seen but never
+        -- graduated still has a chain to draw. There is no Dex row to take one
+        -- from, and a record with no line is a sprite with nothing under it.
+        chain_order TEXT NOT NULL,
+        rarity      TEXT NOT NULL,
+        is_shiny    INTEGER NOT NULL DEFAULT 0,
+        seen_at     INTEGER NOT NULL,
+        PRIMARY KEY (api_key_id, species_id)
+      )
+    `,
+  },
 ];
 
 /**
@@ -373,6 +404,140 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * One species this key has been, whether or not it ever finished the line.
+ *
+ * The counterpart to a `DexEntry`, and deliberately a different shape: a
+ * graduation is about an *individual* and carries its nature and its own
+ * instants, where this is about a *species* and carries only the first time one
+ * was reached. Merging the two into one type would give every sighting a nature
+ * column that is always null.
+ */
+export type Sighting = {
+  speciesId: number;
+  /** The line this individual was on, so the record has a chain to draw. */
+  chainOrder: readonly number[];
+  rarity: string;
+  isShiny: boolean;
+  seenAt: number;
+};
+
+/** What `recordSightings` needs from a live companion, and nothing more. */
+export type ReachedStages = {
+  plannedPath: readonly number[];
+  stageIndex: number;
+  stageTimes: readonly number[];
+  rarity: string;
+  isShiny: boolean;
+  /** A Ditto still wearing a disguise. Sights nothing — see below. */
+  disguised: boolean;
+};
+
+/**
+ * Records every stage a live companion has reached.
+ *
+ * **Called on every settle, not on transition events**, and the idempotence is
+ * what makes that affordable: `plannedPath.slice(0, stageIndex + 1)` is exactly
+ * "what this individual has been", and re-writing it is a no-op against the
+ * primary key. Driving it from `hatched` and `evolved` events instead would be
+ * fewer writes and would miss the case that matters most — a companion already
+ * half way up its line when this shipped would go unrecorded until its next
+ * evolution, which on a quiet key is weeks. Writing what is currently true
+ * self-heals on the next poll instead.
+ *
+ * **Only what has been reached.** The stages ahead are a plan rather than a
+ * history, and recording them would put a Venusaur in the collection of
+ * somebody holding an Ivysaur.
+ *
+ * **A disguised Ditto sights nothing.** The plugin knows it is a Ditto;
+ * recording the disguise would put a species in the collection that was never
+ * really there, and the reveal would then have to take it away again — and this
+ * table has no way to, by design.
+ *
+ * **Never feeds `collectedFinals`.** That set still means "lines this key has
+ * graduated" and is still built from `readDex` alone. Widening it here would
+ * let a reroll move the roll's diversity weighting and the lure, which is the
+ * economy rather than the panel.
+ */
+export function recordSightings(
+  storage: PluginStorage,
+  apiKeyId: string,
+  reached: ReachedStages,
+  now: number,
+): void {
+  if (reached.disguised) return;
+
+  const chain = JSON.stringify(reached.plannedPath);
+  const stages = reached.plannedPath.slice(0, reached.stageIndex + 1);
+  for (const [stage, speciesId] of stages.entries()) {
+    storage.run(
+      `INSERT INTO {{sightings}} (api_key_id, species_id, chain_order, rarity, is_shiny, seen_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(api_key_id, species_id) DO NOTHING`,
+      [
+        apiKeyId,
+        speciesId,
+        chain,
+        reached.rarity,
+        reached.isShiny ? 1 : 0,
+        // The instant the stage was *entered*, not the instant this ran. This
+        // is called on every settle, so `now` is whenever the panel last
+        // polled — taking it would date every stage of every companion alive
+        // today to the first poll after this shipped. `now` is the fallback for
+        // a companion that hatched before stage instants existed and so has a
+        // shorter `stageTimes` than `plannedPath`: late, but the only instant
+        // anybody has for it.
+        reached.stageTimes[stage] ?? now,
+      ],
+    );
+  }
+}
+
+type StoredSighting = {
+  species_id: number;
+  chain_order: string;
+  rarity: string;
+  is_shiny: number;
+  seen_at: number;
+};
+
+/**
+ * Every species this key has been, lowest number first.
+ *
+ * **Fails open, like `readDex`.** A row whose chain will not parse is dropped
+ * and the rest are returned: a collection is history, so losing one entry is a
+ * gap and hiding the other two hundred because of it would be worse.
+ */
+export function listSightings(storage: PluginStorage, apiKeyId: string): Sighting[] {
+  const rows = storage.all<StoredSighting>(
+    `SELECT species_id, chain_order, rarity, is_shiny, seen_at
+     FROM {{sightings}} WHERE api_key_id = ? ORDER BY species_id ASC`,
+    [apiKeyId],
+  );
+
+  const sightings: Sighting[] = [];
+  for (const row of rows) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.chain_order);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) continue;
+    const chain = parsed.filter((id): id is number => typeof id === "number");
+    if (chain.length === 0) continue;
+
+    sightings.push({
+      speciesId: row.species_id,
+      chainOrder: chain,
+      rarity: row.rarity,
+      isShiny: row.is_shiny === 1,
+      seenAt: row.seen_at,
+    });
+  }
+  return sightings;
 }
 
 /** When this window last paid, or null for never. */

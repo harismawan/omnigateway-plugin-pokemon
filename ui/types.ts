@@ -64,8 +64,17 @@ export type DexSpecies = {
    * presenting a graduation as a first sighting.
    */
   firstCaughtExact: boolean;
-  /** Newest first by stage instant. */
+  /** Newest first by stage instant. Empty for a species reached but never graduated. */
   catches: DexCatch[];
+  /**
+   * The distinct evolution lines this species has been on, deduped server-side.
+   *
+   * Not derived from `catches`, because a species a companion has *reached* but
+   * never graduated has no catch to take a line from — and its record would
+   * then be a sprite with nothing under it. The server merges the lines behind
+   * the graduations with the one the live companion is walking.
+   */
+  lines: number[][];
   /** Resolved from the plugin's own species cache, so null on a cold one. */
   name: string | null;
 };

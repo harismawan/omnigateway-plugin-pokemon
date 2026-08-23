@@ -6,11 +6,13 @@ import {
   creditTokens,
   lastGrantedAt,
   listCompanions,
+  listSightings,
   MIGRATIONS,
   purchase,
   readCompanion,
   readDex,
   recordGraduation,
+  recordSightings,
   setGrantedAt,
   settle,
   wallet,
@@ -41,6 +43,7 @@ test("the plugin's own migrations apply and name the tables the host will name",
     "plugin_pokemon_companion",
     "plugin_pokemon_dex",
     "plugin_pokemon_grants",
+    "plugin_pokemon_sightings",
   ]);
 });
 
@@ -256,6 +259,177 @@ test("the dex fails open: one corrupt row costs its row and nothing else", () =>
 
   const entries = readDex(storage, KEY);
   expect(entries.map((e) => e.finalId)).toEqual([9, 3]);
+});
+
+test("sighting records every stage the live companion has reached, and no more", () => {
+  // `plannedPath.slice(0, stageIndex + 1)` is exactly "what this individual has
+  // been". The stages ahead of it are a plan rather than a history, and writing
+  // them would put a Venusaur in the collection of somebody holding an Ivysaur.
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [1, 2, 3],
+      stageIndex: 1,
+      stageTimes: [111, 222],
+      rarity: "common",
+      isShiny: false,
+      disguised: false,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY).map((s) => s.speciesId)).toEqual([1, 2]);
+});
+
+test("a sighting keeps the instant the stage was entered, not the instant it was written", () => {
+  // Written on every settle, so `now` is whenever the panel last polled — which
+  // is not when the companion evolved. Taking it would date every stage to the
+  // first poll after this feature shipped.
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [1, 2],
+      stageIndex: 1,
+      stageTimes: [111, 222],
+      rarity: "common",
+      isShiny: false,
+      disguised: false,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY).map((s) => s.seenAt)).toEqual([111, 222]);
+});
+
+test("a stage with no recorded instant falls back to the write time", () => {
+  // A companion that hatched before stage instants existed has a shorter
+  // `stageTimes` than `plannedPath`. Its stages are still real sightings, so
+  // they are recorded — dated from now, which is late but is the only instant
+  // anyone has.
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [1, 2],
+      stageIndex: 1,
+      stageTimes: [],
+      rarity: "common",
+      isShiny: false,
+      disguised: false,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY).map((s) => s.seenAt)).toEqual([999, 999]);
+});
+
+test("sighting the same stage twice keeps the first instant", () => {
+  // Written on every settle, so the second call is the normal case rather than
+  // the exception. First sighting wins and is never updated — the same
+  // monotonic rule the growth counters follow.
+  const seen = {
+    plannedPath: [1, 2],
+    stageIndex: 1,
+    stageTimes: [111, 222],
+    rarity: "common",
+    isShiny: false,
+    disguised: false,
+  };
+  recordSightings(storage, KEY, seen, 999);
+  recordSightings(storage, KEY, { ...seen, stageTimes: [777, 888] }, 5_000);
+
+  expect(listSightings(storage, KEY).map((s) => s.seenAt)).toEqual([111, 222]);
+});
+
+test("a disguised Ditto sights nothing until it reveals", () => {
+  // The plugin knows it is a Ditto. Recording the disguise would put a species
+  // in the collection that was never really there, and the reveal would then
+  // have to take it away again.
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      stageTimes: [111],
+      rarity: "common",
+      isShiny: false,
+      disguised: true,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY)).toEqual([]);
+});
+
+test("a sighting carries the line it was on, so the record can draw a chain", () => {
+  // Without this a species seen but never graduated has no evolution line at
+  // all — there is no Dex row to take one from — and its record would be a
+  // sprite with nothing under it.
+  recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [1, 2, 3],
+      stageIndex: 0,
+      stageTimes: [111],
+      rarity: "uncommon",
+      isShiny: true,
+      disguised: false,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY)[0]).toMatchObject({
+    speciesId: 1,
+    chainOrder: [1, 2, 3],
+    rarity: "uncommon",
+    isShiny: true,
+  });
+});
+
+test("one key cannot see another key's sightings", () => {
+  recordSightings(
+    storage,
+    "key_other",
+    {
+      plannedPath: [1],
+      stageIndex: 0,
+      stageTimes: [111],
+      rarity: "common",
+      isShiny: false,
+      disguised: false,
+    },
+    999,
+  );
+
+  expect(listSightings(storage, KEY)).toEqual([]);
+  expect(listSightings(storage, "key_other")).toHaveLength(1);
+});
+
+test("an unreadable sighting chain costs its row, not the listing", () => {
+  // Fails open like `readDex`, and for the same reason: a collection is
+  // history, so losing one entry is a gap and hiding the rest is worse.
+  for (const id of [1, 2]) {
+    recordSightings(
+      storage,
+      KEY,
+      {
+        plannedPath: [id],
+        stageIndex: 0,
+        stageTimes: [100 + id],
+        rarity: "common",
+        isShiny: false,
+        disguised: false,
+      },
+      999,
+    );
+  }
+  storage.run("UPDATE {{sightings}} SET chain_order = ? WHERE species_id = ?", ["{{{", 1]);
+
+  expect(listSightings(storage, KEY).map((s) => s.speciesId)).toEqual([2]);
 });
 
 test("a graduation stores the instant each stage was entered", () => {

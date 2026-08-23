@@ -35,11 +35,13 @@ import {
   type ItemOutcome,
   lastGrantedAt,
   listCompanions,
+  listSightings,
   MIGRATIONS,
   purchase,
   readCompanion,
   readDex,
   recordGraduation,
+  recordSightings,
   type ShopEntry,
   setGrantedAt,
   settle,
@@ -281,6 +283,39 @@ export default definePlugin({
     const settleAndRecord = (apiKeyId: string): void => {
       const result = settle(storage, apiKeyId, ctx.now());
       if (result === null) return;
+
+      /*
+        What the companion alive right now has been, recorded before its events
+        are read.
+
+        On every settle rather than on a `hatched` or `evolved` event, and the
+        idempotence is what makes that affordable — see `recordSightings`. The
+        case it buys is the one that matters most: a companion already half way
+        up its line when this shipped is registered on the next poll instead of
+        going unrecorded until its next evolution, which on a quiet key is
+        weeks.
+
+        Before the graduation loop below, so a settle that carries a companion
+        all the way to graduation still records the stages it passed through on
+        the way. After it the companion is gone and there is nothing to read.
+      */
+      const active = result.row.state?.active;
+      if (active !== null && active !== undefined) {
+        recordSightings(
+          storage,
+          apiKeyId,
+          {
+            plannedPath: active.plannedPath,
+            stageIndex: active.stageIndex,
+            stageTimes: active.stageTimes,
+            rarity: active.rarity,
+            isShiny: active.isShiny,
+            disguised: active.dittoDisguise !== null && !active.dittoRevealed,
+          },
+          ctx.now(),
+        );
+      }
+
       for (const event of result.events) {
         if (event.kind !== "graduated") continue;
         recordGraduation(
@@ -581,6 +616,7 @@ export default definePlugin({
 
           const active = row.state?.active ?? null;
           const dex = readDex(storage, apiKeyId);
+          const sightings = listSightings(storage, apiKeyId);
 
           const stageId = active === null ? null : (active.plannedPath[active.stageIndex] ?? null);
           const stageName = await nameOf(stageId);
@@ -593,7 +629,7 @@ export default definePlugin({
           // table holds facts about a graduation, and a species' name is a fact
           // about PokéAPI.
           const named = await Promise.all(
-            collect(dex).map(async (record) => ({
+            collect(dex, sightings).map(async (record) => ({
               ...record,
               name: await nameOf(record.speciesId),
             })),
@@ -897,8 +933,22 @@ function parseShopEntry(body: unknown): ShopEntry | null {
  * What owning the thing does.
  *
  * A fresh egg discards the current Pokémon outright — it is a reroll, and the
- * discarded one is not a graduation, so it never reaches the Dex. That is what
- * keeps rerolling from being a way to farm the collection.
+ * discarded one is not a graduation, so it never reaches `{{dex}}`.
+ *
+ * **Amended 23 Aug 2026: it does reach the *collection*, and rerolling is a bad
+ * way to farm rather than an impossible one.** Species are recorded as the
+ * companion reaches them (`recordSightings`), so a discarded Pokémon leaves its
+ * stages behind. The claim that used to sit here — that this "keeps rerolling
+ * from being a way to farm the collection" — is no longer true and is not worth
+ * pretending about.
+ *
+ * What holds instead is arithmetic. A reroll costs `FRESH_EGG_BASE_PRICE` (1B)
+ * of wallet plus `EGG_HATCH_THRESHOLD` (5M) of growth to hatch the replacement:
+ * roughly 1B of wallet per species. Graduating a common line costs 750M of
+ * growth for three species — 250M each — and spends no wallet at all. Farming
+ * is about four times worse per species, in a currency the natural path never
+ * touches. And it moves the panel only: `collectedFinals` is still built from
+ * `readDex`, so no reroll can shift the roll's odds or the lure.
  */
 function applyPurchase(state: CompanionState, entry: ShopEntry): ItemOutcome {
   if (entry.kind === "egg") {

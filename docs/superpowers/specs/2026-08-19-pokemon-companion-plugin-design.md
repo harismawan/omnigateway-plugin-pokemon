@@ -155,6 +155,14 @@ rule two sections below. Rows written before it have SQL NULL, which means
 "never recorded" and is rendered as its own fact rather than backfilled from
 `caught_at` — that would invent a Bulbasaur date out of a Venusaur one.
 
+**Amendment, 23 Aug 2026 — migration 7 adds a fourth table, `{{sightings}}`.**
+See `2026-08-23-sightings-design.md`. One row per species this key has *been*,
+as opposed to lines it has finished, so a companion still growing appears in the
+Pokédex. Keyed on `(api_key_id, species_id)` and written `ON CONFLICT DO
+NOTHING`, so the first sighting wins and is never updated. Deliberately not a
+nullable column on `dex`: `readDex` and `collectedFinals` both assume every row
+they see is a graduation, and a sighting row there would need a guard at each.
+
 ### Failure directions are split on purpose
 
 - **Dex entries fail open.** An unknown `rarity` or `nature` on a historical row
