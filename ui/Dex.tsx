@@ -336,17 +336,30 @@ function Record({
         <DexRegister>
           {/*
             Which kind of date this is, said in the label rather than buried in
-            the value.
+            the value. Three kinds, because there are three ways to arrive here.
 
-            `firstCaughtExact` is false when no catch recorded an instant for
-            this stage — every graduation from before the instants were stored —
-            and `firstCaughtAt` is then the moment the *line* finished. For a
-            pre-evolution those are months apart, so labelling a graduation
-            "first caught" would date a Bulbasaur to its Venusaur.
+            With no catches this species was reached by a companion still
+            walking its line, so nothing was ever *caught* — the instant is
+            whenever the sighting was written down. For a stage entered before
+            instants were recorded that is the first settle after the upgrade
+            and not the evolution at all, and the store keeps no flag saying
+            which. "first recorded" is the one phrasing true of both: it claims
+            something about the database rather than about the world.
+
+            With catches, `firstCaughtExact` is false when none of them recorded
+            an instant for this stage — every graduation from before the
+            instants were stored — and `firstCaughtAt` is then the moment the
+            *line* finished. For a pre-evolution those are months apart, so
+            labelling a graduation "first caught" would date a Bulbasaur to its
+            Venusaur.
           */}
           <DexField>
             <DexFieldHead>
-              {entry.firstCaughtExact ? "first caught" : "line graduated"}
+              {entry.catches.length === 0
+                ? "first recorded"
+                : entry.firstCaughtExact
+                  ? "first caught"
+                  : "line graduated"}
             </DexFieldHead>
             <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
           </DexField>

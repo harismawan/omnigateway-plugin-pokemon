@@ -1668,6 +1668,50 @@ describe("a Pokédex record", () => {
     expect(screen.queryByText("first caught")).toBeNull();
   });
 
+  test("a species reached but never graduated is dated as a record, not a catch", async () => {
+    // The companion is still walking this line, so nothing was ever *caught*.
+    // The only instant the plugin has is the one it wrote the sighting down at,
+    // and for every stage entered before instants were stored that is the first
+    // settle after the upgrade rather than the evolution itself. "first caught"
+    // over that is a claim about the world; "first recorded" is a claim about
+    // the database, and only the second one is true.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2026, 7, 20),
+          firstCaughtExact: true,
+          catches: [],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    expect(screen.getByText("first recorded")).toBeTruthy();
+    expect(screen.queryByText("first caught")).toBeNull();
+    expect(screen.queryByText("line graduated")).toBeNull();
+  });
+
+  test("an ungraduated record still shows the date it was recorded", async () => {
+    // The complaint this fixes. With no catches the encounters list is omitted,
+    // which was correct — but it left the record with a sprite, a name and no
+    // date at all unless the reader knew the field above was carrying one.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2026, 7, 20),
+          catches: [],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    expect(screen.getByText(formatWhen(Date.UTC(2026, 7, 20)))).toBeTruthy();
+  });
+
   test("dates a catch from the stage it reached, not the line it finished", async () => {
     // The per-catch half of the same rule, and the one a fixture can get wrong
     // silently: `enteredAt` and `caughtAt` are different days here, so a row
