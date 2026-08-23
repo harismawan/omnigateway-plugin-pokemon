@@ -1313,6 +1313,8 @@ describe("the Pokédex", () => {
   });
 });
 
+const DASH = "—";
+
 describe("a Pokédex record", () => {
   /** The Venusaur line, all three stages named, one catch through it. */
   const line = [
@@ -1690,7 +1692,53 @@ describe("a Pokédex record", () => {
 
     expect(screen.getByText("first recorded")).toBeTruthy();
     expect(screen.queryByText("first caught")).toBeNull();
-    expect(screen.queryByText("line graduated")).toBeNull();
+  });
+
+  test("an ungraduated record keeps the graduation slot, with a dash for the date", async () => {
+    // The register holds the same fields in the same order whichever kind of
+    // record it is, so a reader learns one shape rather than two. The line has
+    // not finished, so the slot that would hold that date holds a dash — an
+    // absent fact stated, rather than a field that silently disappears and
+    // takes the layout with it.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2026, 7, 20),
+          catches: [],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    expect(screen.getByText("line graduated")).toBeTruthy();
+    expect(screen.getByText(DASH)).toBeTruthy();
+  });
+
+  test("the graduation slot leads and the recorded date trails, in that order", async () => {
+    // Same order as a graduated record: what happened to the line on top, what
+    // this key observed at the bottom. `first recorded` sits where `encounters`
+    // sits because it is the same kind of fact, so a reader skimming two
+    // records finds it in the same place twice.
+    await openRecord(
+      [
+        dexSpecies({
+          speciesId: 1,
+          name: "Bulbasaur",
+          firstCaughtAt: Date.UTC(2026, 7, 20),
+          catches: [],
+        }),
+      ],
+      "Bulbasaur",
+    );
+
+    const heads = screen.getAllByText(/^(line graduated|evolution|first recorded)$/);
+    expect(heads.map((head) => head.textContent)).toEqual([
+      "line graduated",
+      "evolution",
+      "first recorded",
+    ]);
   });
 
   test("an ungraduated record still shows the date it was recorded", async () => {

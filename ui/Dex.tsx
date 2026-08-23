@@ -31,6 +31,15 @@ import {
 } from "./primitives.ts";
 import type { DexSpecies, Rarity } from "./types.ts";
 
+/**
+ * The value of a field whose fact does not exist yet.
+ *
+ * An em dash rather than an empty node, because a blank slot reads as a value
+ * that failed to load. This one is a statement: the line has not graduated, so
+ * there is no date to print and there is not supposed to be.
+ */
+const DASH = "—";
+
 /** The mark for a shiny individual. A glyph, never a colour — see the panel's rule. */
 const SHINY = "✦";
 
@@ -335,33 +344,28 @@ function Record({
 
         <DexRegister>
           {/*
-            Which kind of date this is, said in the label rather than buried in
-            the value. Three kinds, because there are three ways to arrive here.
+            What happened to the *line*, and which kind of date that is — said
+            in the label rather than buried in the value.
 
-            With no catches this species was reached by a companion still
-            walking its line, so nothing was ever *caught* — the instant is
-            whenever the sighting was written down. For a stage entered before
-            instants were recorded that is the first settle after the upgrade
-            and not the evolution at all, and the store keeps no flag saying
-            which. "first recorded" is the one phrasing true of both: it claims
-            something about the database rather than about the world.
+            `firstCaughtExact` is false when no catch recorded an instant for
+            this stage — every graduation from before the instants were stored —
+            and `firstCaughtAt` is then the moment the *line* finished. For a
+            pre-evolution those are months apart, so labelling a graduation
+            "first caught" would date a Bulbasaur to its Venusaur.
 
-            With catches, `firstCaughtExact` is false when none of them recorded
-            an instant for this stage — every graduation from before the
-            instants were stored — and `firstCaughtAt` is then the moment the
-            *line* finished. For a pre-evolution those are months apart, so
-            labelling a graduation "first caught" would date a Bulbasaur to its
-            Venusaur.
+            With no catches the line has not finished, and the slot holds a dash
+            rather than vanishing. The register keeps the same fields in the
+            same order whichever kind of record this is, so a reader learns one
+            shape instead of two — and an absent fact stated is easier to read
+            than a field that silently takes the layout with it.
           */}
           <DexField>
             <DexFieldHead>
-              {entry.catches.length === 0
-                ? "first recorded"
-                : entry.firstCaughtExact
-                  ? "first caught"
-                  : "line graduated"}
+              {entry.catches.length > 0 && entry.firstCaughtExact
+                ? "first caught"
+                : "line graduated"}
             </DexFieldHead>
-            <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
+            <DexWhen>{entry.catches.length === 0 ? DASH : formatWhen(entry.firstCaughtAt)}</DexWhen>
           </DexField>
 
           {/*
@@ -485,6 +489,29 @@ function Record({
               </CatchList>
             </DexField>
           )}
+
+          {/*
+            The trailing slot for a species with no encounters to list.
+
+            Here rather than at the top of the register because it is the same
+            *kind* of fact the encounters list is — what this key actually
+            observed, as opposed to what happened to the line — so it sits where
+            a reader skimming a graduated record has already learned to look.
+
+            "first recorded" and not "first seen": the instant is whenever the
+            sighting was written down, and for a stage entered before instants
+            were stored that is the first settle after the upgrade rather than
+            the evolution. The store keeps no flag distinguishing the two, so
+            this is the one phrasing true of both — a claim about the database
+            rather than about the world. See `contributionOf` in
+            `src/collection.ts`.
+          */}
+          {entry.catches.length === 0 ? (
+            <DexField>
+              <DexFieldHead>first recorded</DexFieldHead>
+              <DexWhen>{formatWhen(entry.firstCaughtAt)}</DexWhen>
+            </DexField>
+          ) : null}
         </DexRegister>
       </DexDetail>
     </DexDialog>
