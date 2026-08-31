@@ -98,6 +98,29 @@ test("settling twice does not grow twice", () => {
   expect(second?.events).toEqual([]);
 });
 
+test("a settle reports whether it wrote, so a caller need not infer it", () => {
+  // The push channel's invariant is "a frame on every write and on no read", and
+  // `GET /keys/:id` settles on the way in — so the caller has to be able to tell
+  // the two apart. Inferring it from `events` would be wrong in the direction
+  // that costs a frame: `advance` can move a companion without emitting one,
+  // which is a state change the panel still has to hear about.
+  creditTokens(storage, KEY, EGG_HATCH_THRESHOLD, 1);
+
+  expect(settle(storage, KEY, 2)?.wrote).toBe(true);
+  // Idempotent, and the second call is the read-shaped one: nothing changed, so
+  // nothing was written and nothing should be pushed.
+  expect(settle(storage, KEY, 3)?.wrote).toBe(false);
+});
+
+test("a settle against an unreadable save reports no write", () => {
+  // It returns a row rather than null — "unreadable" and "has not started" are
+  // different facts — but it must never claim to have written one.
+  creditTokens(storage, KEY, 1_000, 1);
+  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
+
+  expect(settle(storage, KEY, 2)?.wrote).toBe(false);
+});
+
 test("an unreadable save is left alone rather than replaced", () => {
   // The one irreversible thing this plugin could do to months of growth, and
   // it would do it silently.

@@ -19,6 +19,7 @@ import {
   ITEM_PRICES,
   phaseThreshold,
 } from "../src/balance.ts";
+import { PUSH_FLOOR_MS } from "../src/push.ts";
 import companion from "../src/server.ts";
 import { emptyInventory, freshState, serialiseState } from "../src/state.ts";
 import { readCompanion, readDex, recordGraduation } from "../src/store.ts";
@@ -58,6 +59,30 @@ let onLimit: ((event: LimitReached) => void) | null = null;
 let routes: readonly PluginRoute[] = [];
 let logged: Array<{ message: string; event?: string | undefined }> = [];
 let clock = 1_700_000_000_000;
+
+/**
+ * The push channel as the host would drive it.
+ *
+ * `opened` is a list rather than a flag so "the plugin opens exactly one
+ * channel, and it is called activity" is one assertion rather than two.
+ */
+let opened: string[] = [];
+let onAnnounce: ((message: { connectionId: string; payload: unknown }) => void) | null = null;
+let onGone: ((connectionId: string) => void) | null = null;
+let pushed: Array<{ connectionId: string; payload: unknown }> = [];
+
+/**
+ * A panel announcing itself, which is what the server needs before it may send:
+ * `PluginChannel` has no broadcast, only `send(connectionId, …)`.
+ */
+function watch(connectionId = "conn_1"): void {
+  onAnnounce?.({ connectionId, payload: { hello: true } });
+}
+
+/** The keys named by the frames sent so far, in order. */
+function pushedKeys(): string[] {
+  return pushed.map((frame) => (frame.payload as { apiKeyId: string }).apiKeyId);
+}
 
 function completed(over: Partial<RequestCompleted> = {}): RequestCompleted {
   return {
@@ -271,6 +296,10 @@ async function boot(
   // the plugin has to degrade rather than throw — and the two halves degrade
   // differently, so a test needs to be able to withhold exactly one.
   capabilities: Partial<Capabilities> | null = null,
+  // Withheld the same way and for the same reason. `channels` is declared in the
+  // manifest, so its absence is a broken install — but the plugin degrades to
+  // the poll rather than refusing to load, and that is a claim worth a test.
+  options: { channels?: boolean } = {},
 ): Promise<void> {
   storage.migrate(companion.migrations ?? []);
 
@@ -298,6 +327,28 @@ async function boot(
         onLimit = handler;
       },
     },
+    ...(options.channels === false
+      ? {}
+      : {
+          channels: {
+            open: (name: string) => {
+              opened.push(name);
+              return {
+                onMessage: (
+                  handler: (message: { connectionId: string; payload: unknown }) => void,
+                ) => {
+                  onAnnounce = handler;
+                },
+                onClose: (handler: (connectionId: string) => void) => {
+                  onGone = handler;
+                },
+                send: (connectionId: string, payload: unknown) => {
+                  pushed.push({ connectionId, payload });
+                },
+              };
+            },
+          },
+        }),
     config,
   };
 
@@ -311,9 +362,18 @@ beforeEach(() => {
   onLimit = null;
   logged = [];
   clock = 1_700_000_000_000;
+  opened = [];
+  onAnnounce = null;
+  onGone = null;
+  pushed = [];
 });
 
 afterEach(() => {
+  // The tab closing, which is what the host reports on an unmount. It matters
+  // here beyond tidiness: the last connection leaving cancels any trailing frame
+  // the pusher had armed, so a test that pushed twice inside the floor does not
+  // leave a live one-second timer behind for the rest of the run.
+  onGone?.("conn_1");
   storage.close();
 });
 
@@ -1914,6 +1974,13 @@ test("the shipped manifest is compatible with the SDK and API the host ships", (
   // dies inside the error boundary on its first render. The panel gained that
   // call in 1.1.0; the floor has to move with it.
   expect(Bun.semver.satisfies("0.1.0", manifest.sdk)).toBe(false);
+
+  // The same rule one release on. `usePluginChannel` arrived in SDK 0.1.4, and
+  // the panel calls it unconditionally — so a console shipping 0.1.3 is the
+  // 0.1.0 case again, exactly: an import that resolves to nothing and a panel
+  // that dies in the error boundary rather than falling back to the poll it
+  // still has. The floor moves with the call, every time.
+  expect(Bun.semver.satisfies("0.1.3", manifest.sdk)).toBe(false);
 });
 
 test("the tier a guaranteed egg was paid for reaches the roll, not just the save", async () => {
@@ -2541,4 +2608,234 @@ test("every species in a graduated line carries its own name, and a cold one car
     [11, null],
     [12, "species-12"],
   ]);
+});
+
+/*
+  The push channel.
+
+  Every test below rests on one invariant, stated in
+  `docs/superpowers/specs/2026-08-31-live-companion-channel-design.md`: a frame
+  goes out on every write to {{companion}} and on no read. It is what makes it
+  safe for the panel to stop polling, so each write site gets its own case — a
+  site that stops emitting is a screen that stops updating, silently.
+*/
+
+test("the plugin opens one channel, and the panel can find it by name", async () => {
+  // The name is half of the wire topic `plugin:pokemon:activity`, and the panel
+  // composes the same string through `usePluginChannel(pluginId, "activity")`.
+  // A rename on one side and not the other is a channel nobody subscribes to,
+  // which looks exactly like a quiet one.
+  await boot();
+  expect(opened).toEqual(["activity"]);
+});
+
+test("nothing is pushed until a panel has announced itself", async () => {
+  // `PluginChannel` has no broadcast — only `send(connectionId, …)` — so a
+  // connection the plugin has not heard from is one it cannot address. This is
+  // also the property that keeps a closed panel free: no audience, no work.
+  await boot();
+  spend(1_000);
+  expect(pushed).toEqual([]);
+});
+
+test("a credited request pushes the key it credited", async () => {
+  // The write the panel could never hear about, and the reason this feature
+  // exists. It carries the key and nothing else: a frame is a claim that
+  // something changed, never a second copy of what it changed to.
+  await boot();
+  watch();
+  spend(1_000);
+
+  expect(pushed).toEqual([{ connectionId: "conn_1", payload: { apiKeyId: KEY } }]);
+});
+
+test("a first credit pushes the key that has just joined the roster", async () => {
+  // The roster is exactly the set of companion rows, and `creditTokens` creates
+  // one on first sight — so a key appearing on the roster *is* this frame. It is
+  // what lets the roster stop polling: without it a new key would be invisible
+  // until something else happened to push.
+  await boot();
+  watch();
+  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+
+  spend(1);
+
+  expect(pushedKeys()).toEqual([KEY]);
+});
+
+test("a rate-limit grant pushes, because it changes the bag", async () => {
+  await boot();
+  watch();
+  spend(1_000);
+
+  const limit: LimitReached = { apiKeyId: KEY, dimension: "tokens", window: "1w", at: 2_000 };
+  // First sighting seeds the window and pays nothing, so it writes nothing to
+  // the companion and must push nothing either.
+  onLimit?.(limit);
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
+  pushed = [];
+
+  // Well past the floor, which a week plainly is. Without moving the clock this
+  // would assert the coalescer's behaviour by accident rather than the grant's.
+  clock += WINDOW_MS["1w"];
+  onLimit?.(limit);
+
+  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(5);
+  expect(pushedKeys()).toEqual([KEY]);
+});
+
+test("two changes inside the floor are one frame now and one after it", async () => {
+  // The coalescer, wired up rather than in isolation — `test/push.test.ts` owns
+  // its behaviour, and this owns the claim that the server actually goes through
+  // it. Without a floor a busy key would push a frame per request, which is a
+  // panel refetch per request: strictly worse than the poll it replaces.
+  await boot();
+  watch();
+
+  spend(1_000);
+  spend(1_000);
+
+  // The leading frame only. The second credit is inside the floor, so its frame
+  // is armed rather than sent — and `afterEach` closes the connection, which
+  // cancels it.
+  expect(pushedKeys()).toEqual([KEY]);
+});
+
+test("a purchase pushes, so a second tab does not show a wallet already spent", async () => {
+  // The panel that bought invalidates its own queries, so this frame is
+  // redundant for it and load-bearing for every other tab. A money surface
+  // showing tokens that are gone is the failure this plugin is least allowed.
+  await boot();
+  watch();
+  spend(ITEM_PRICES.mint * 3);
+  pushed = [];
+  // A purchase is an operator clicking a button, which is never inside the floor
+  // of the request that paid for it.
+  clock += PUSH_FLOOR_MS;
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  expect(buy).toBeDefined();
+  if (buy === undefined) return;
+  await buy.handler({ params: { id: KEY }, query: {}, body: { kind: "item", item: "mint" } });
+
+  expect(pushedKeys()).toEqual([KEY]);
+});
+
+test("a refused purchase pushes nothing, because it wrote nothing", async () => {
+  // The invariant is about writes. A 409 leaves the save exactly as it was, and
+  // a frame for it would be the panel refetching to render the same screen.
+  await boot();
+  watch();
+  spend(10);
+  pushed = [];
+
+  const buy = routes.find((r) => r.path === "/keys/:id/purchase");
+  expect(buy).toBeDefined();
+  if (buy === undefined) return;
+  const refused = await buy.handler({
+    params: { id: KEY },
+    query: {},
+    body: { kind: "item", item: "mint" },
+  });
+
+  expect(refused.status).toBe(409);
+  expect(pushed).toEqual([]);
+});
+
+test("reading a companion that has not changed pushes nothing", async () => {
+  // The other half of "on every write, and on no read". `GET /keys/:id` settles
+  // on the way in, so a frame per call would have the panel refetch, settle,
+  // push and refetch again. `settle` writing nothing the second time is what
+  // makes that loop terminate — and not emitting from the route is what stops it
+  // from ever starting.
+  await boot();
+  watch();
+  spend(1_000);
+  pushed = [];
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(pushed).toEqual([]);
+});
+
+test("the roll behind the next hatch pushes when it lands, not when it was asked for", async () => {
+  // The write nobody enumerating the obvious ones would have found. The prefetch
+  // is fired unawaited from the panel's own route and writes `pendingHatch` when
+  // it finishes — minutes later on a cold species cache. With the poll off and
+  // no frame here, the egg would simply never open.
+  await boot({}, cachedSpecies());
+  watch();
+  spend(EGG_HATCH_THRESHOLD);
+  pushed = [];
+  clock += PUSH_FLOOR_MS;
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  expect(pushedKeys()).toContain(KEY);
+});
+
+test("a departed panel is not sent to", async () => {
+  await boot();
+  watch();
+  onGone?.("conn_1");
+  spend(1_000);
+
+  expect(pushed).toEqual([]);
+});
+
+test("without the channels capability the plugin loads and simply does not push", async () => {
+  // Boundary rule 3: a capability the manifest declares can still be absent, and
+  // the plugin degrades rather than throwing. Here degradation is the panel's
+  // ten-second poll, which is exactly what 1.2.2 shipped.
+  await boot({}, null, { channels: false });
+  expect(opened).toEqual([]);
+
+  spend(1_000);
+
+  expect(pushed).toEqual([]);
+  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_000);
+});
+
+test("a hatch that settles on read pushes, because that read wrote", async () => {
+  // The same route as "reading a companion that has not changed" and the
+  // opposite outcome, which is the distinction the invariant is drawn on.
+  // Growth credited while the panel was shut is applied by the settle on the way
+  // in, and applying it is a write.
+  await boot({}, cachedSpecies());
+  watch();
+  spend(EGG_HATCH_THRESHOLD);
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+  /*
+    The clock moves past the floor before each step, and that is a statement
+    about this harness rather than about the feature.
+
+    `ctx.now` is the fixture's clock and the coalescer's timer is a real
+    `setTimeout`, so the two agree only while nothing is pending. Leave a
+    trailing frame armed and the next push joins it instead of sending — the
+    coalescer working, but it would read here as the settle failing to push.
+    `test/push.test.ts` drives both clocks and owns that behaviour; this file
+    stays out of the floor so it can ask its own question.
+  */
+  clock += PUSH_FLOOR_MS;
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+  await prefetched(KEY);
+
+  pushed = [];
+  clock += PUSH_FLOOR_MS;
+  // The roll has landed; this read is the one that opens the egg.
+  await route.handler({ params: { id: KEY }, query: {}, body: null });
+
+  expect(readCompanion(storage, KEY)?.state?.active).not.toBeNull();
+  expect(pushedKeys()).toEqual([KEY]);
 });

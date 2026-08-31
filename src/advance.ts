@@ -80,7 +80,24 @@ export function advance(state: CompanionState, tokensTotal: number, now: number)
   const gained = Math.max(0, Math.trunc(tokensTotal) - state.consumedTotal);
 
   const events: CompanionEvent[] = [];
-  let next: CompanionState = { ...state, consumedTotal: Math.trunc(tokensTotal) };
+  /*
+    Starts as the state itself, and is replaced only where something actually
+    changes — so an advance that does nothing returns the object it was handed.
+
+    Identity is the contract `settle` reads: it skips its write when
+    `result.state === row.state`. This line used to be
+    `{ ...state, consumedTotal: Math.trunc(tokensTotal) }`, which allocated
+    unconditionally, so that guard could never be true and the plugin wrote a row
+    on every read. The console polls every open companion, so it was a write per
+    poll that changed nothing.
+
+    It is also what lets the push channel say "a frame on every write and on no
+    read" at all. Were an unchanged settle still a write, a read would push, the
+    panel would refetch, and the refetch would push again.
+  */
+  let next: CompanionState = state;
+  const consumed = Math.trunc(tokensTotal);
+  if (next.consumedTotal !== consumed) next = { ...next, consumedTotal: consumed };
 
   // Credit first, then look for transitions the new total makes possible. The
   // two are separate on purpose: an earlier version gated the whole function on

@@ -285,25 +285,33 @@ export function creditTokens(
  * A save that cannot be read is left exactly as it is. Overwriting it with a
  * fresh companion would be the one irreversible thing this plugin could do to
  * somebody's months of growth, and it would do it silently.
+ *
+ * `wrote` reports whether the row actually moved, because the push channel's
+ * invariant is a frame on every write and on no read — and this is called on
+ * both paths. A caller cannot infer it from `events`: `advance` can return a
+ * changed state with none, so an inference would go wrong in the direction that
+ * silently costs the panel a frame.
  */
 export function settle(
   storage: PluginStorage,
   apiKeyId: string,
   now: number,
-): { row: CompanionRow; events: readonly CompanionEvent[] } | null {
+): { row: CompanionRow; events: readonly CompanionEvent[]; wrote: boolean } | null {
   const row = readCompanion(storage, apiKeyId);
   if (row === null) return null;
-  if (row.state === null) return { row, events: [] };
+  if (row.state === null) return { row, events: [], wrote: false };
 
   const result = advance(row.state, row.tokensTotal, now);
-  if (result.events.length === 0 && result.state === row.state) return { row, events: [] };
+  if (result.events.length === 0 && result.state === row.state) {
+    return { row, events: [], wrote: false };
+  }
 
   storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
     serialiseState(result.state),
     now,
     apiKeyId,
   ]);
-  return { row: { ...row, state: result.state }, events: result.events };
+  return { row: { ...row, state: result.state }, events: result.events, wrote: true };
 }
 
 export function recordGraduation(

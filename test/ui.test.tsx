@@ -23,9 +23,16 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { createPluginApi, LiveProvider, useLive } from "@omnigateway/dashboard-sdk";
+import {
+  type ChannelMessage,
+  type ChannelTransport,
+  createPluginApi,
+  type LiveConnection,
+  LiveProvider,
+  useLive,
+} from "@omnigateway/dashboard-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Dex } from "../ui/Dex.tsx";
@@ -96,9 +103,63 @@ function stubFetch(routes: Record<string, StubHandler>): FetchStub {
  * two that are about polling; the provider comes from the SDK, which a plugin
  * may import, unlike the console's own `session/live.tsx`.
  */
+/**
+ * The console's push transport, as `LiveProvider` takes it.
+ *
+ * A stub rather than a socket, and the SDK is explicit that this is the right
+ * shape: `ChannelTransport` is "exported so a panel can name it — not so it can
+ * build one". The console owns the real one; this owns the frames.
+ */
+type ChannelStub = {
+  transport: ChannelTransport;
+  /** Every topic subscribed to, in order, so a wrong topic is visible. */
+  subscribed: string[];
+  /** What the panel published, which is how its hello is observed. */
+  sent: Array<{ topic: string; payload: unknown }>;
+  /** Pushes one message to every live subscriber of `topic`. */
+  deliver(topic: string, message: ChannelMessage): void;
+};
+
+function channelStub(): ChannelStub {
+  const listeners = new Map<string, Set<(message: ChannelMessage) => void>>();
+  const subscribed: string[] = [];
+  const sent: Array<{ topic: string; payload: unknown }> = [];
+
+  return {
+    subscribed,
+    sent,
+    transport: {
+      subscribe(topic, listener) {
+        subscribed.push(topic);
+        const set = listeners.get(topic) ?? new Set();
+        set.add(listener);
+        listeners.set(topic, set);
+        return () => set.delete(listener);
+      },
+      send(topic, payload) {
+        sent.push({ topic, payload });
+        return true;
+      },
+    },
+    deliver(topic, message) {
+      for (const listener of listeners.get(topic) ?? []) listener(message);
+    },
+  };
+}
+
+/** A transport that is pushing exactly the topics named. */
+function pushing(...topics: string[]): LiveConnection {
+  return { status: "push", pushed: (topic) => topics.includes(topic) };
+}
+
 function renderCompanion(
   routes: Record<string, StubHandler>,
-  options: { live?: boolean; chassis?: boolean } = {},
+  options: {
+    live?: boolean;
+    chassis?: boolean;
+    channels?: ChannelTransport;
+    connection?: LiveConnection;
+  } = {},
 ): Mounted {
   const stub = stubFetch(routes);
   const client = new QueryClient({
@@ -112,8 +173,13 @@ function renderCompanion(
   const wrapped =
     options.chassis === true ? (
       <Chassis>{panel}</Chassis>
-    ) : options.live === true ? (
-      <LiveProvider>{panel}</LiveProvider>
+    ) : options.live === true || options.channels !== undefined ? (
+      <LiveProvider
+        {...(options.channels === undefined ? {} : { channels: options.channels })}
+        {...(options.connection === undefined ? {} : { connection: options.connection })}
+      >
+        {panel}
+      </LiveProvider>
     ) : (
       panel
     );
@@ -2684,5 +2750,130 @@ describe("the console's LIVE switch", () => {
     // And the panel still worked: paused means not refetching, never not
     // fetching. An operator who pauses still sees the companion they opened.
     expect(calls.filter((call) => call.url.endsWith(`/keys/${KEY}`))).toHaveLength(1);
+  });
+});
+
+describe("the plugin's push channel", () => {
+  const TOPIC = "plugin:pokemon:activity";
+
+  test("the panel holds its own plugin's topic and no other", async () => {
+    // The topic is composed by the SDK from the id the host handed this mount,
+    // so the only thing that can be wrong here is the channel *name* — and a
+    // name that disagrees with `ctx.channels.open("activity")` on the server is
+    // a channel nobody subscribes to, which looks exactly like a quiet one.
+    const channels = channelStub();
+    renderCompanion(serving(view({ state: null })), { channels: channels.transport });
+    await openCompanion();
+
+    expect(channels.subscribed).toEqual([TOPIC]);
+  });
+
+  test("the panel announces itself once the host has opened the channel", async () => {
+    // `PluginChannel` has no broadcast — the server can only `send` to a
+    // connection it has heard from — so without this hello the panel subscribes
+    // successfully and then receives nothing, forever.
+    const channels = channelStub();
+    renderCompanion(serving(view({ state: null })), { channels: channels.transport });
+    await openCompanion();
+
+    // Nothing before the host says the subscription is live: the gateway refuses
+    // a send from a connection it has not acked, so an early hello would turn
+    // the panel's own timing into a permission failure.
+    expect(channels.sent).toEqual([]);
+
+    await act(async () => channels.deliver(TOPIC, { kind: "open" }));
+
+    expect(channels.sent).toHaveLength(1);
+    expect(channels.sent[0]?.topic).toBe(TOPIC);
+  });
+
+  test("a frame for the open companion refetches it", async () => {
+    const channels = channelStub();
+    const { calls } = renderCompanion(serving(view({ state: null })), {
+      channels: channels.transport,
+    });
+    await openCompanion();
+    const before = calls.filter((call) => call.url.endsWith(`/keys/${KEY}`)).length;
+
+    await act(async () => channels.deliver(TOPIC, { kind: "frame", payload: { apiKeyId: KEY } }));
+
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url.endsWith(`/keys/${KEY}`)).length).toBe(before + 1),
+    );
+  });
+
+  test("a frame for another key refreshes the roster and not the open companion", async () => {
+    // The roster always, because a card it draws has moved; the companion only
+    // when the frame names the one on screen. Invalidating the open companion on
+    // every key's frame would make a busy install refetch the expensive route
+    // once per key per second — the hammer the floor exists to prevent.
+    const channels = channelStub();
+    const { calls } = renderCompanion(serving(view({ state: null })), {
+      channels: channels.transport,
+    });
+    await openCompanion();
+    const companionBefore = calls.filter((call) => call.url.endsWith(`/keys/${KEY}`)).length;
+    const rosterBefore = calls.filter((call) => call.url.endsWith("/keys")).length;
+
+    await act(async () =>
+      channels.deliver(TOPIC, { kind: "frame", payload: { apiKeyId: "key_somebody_else" } }),
+    );
+
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url.endsWith("/keys")).length).toBe(rosterBefore + 1),
+    );
+    expect(calls.filter((call) => call.url.endsWith(`/keys/${KEY}`)).length).toBe(companionBefore);
+  });
+
+  test("a frame that does not name a key is ignored rather than acted on", async () => {
+    // The payload is `unknown` at the SDK boundary and stays that way until it is
+    // narrowed. A panel that trusted it would refetch on a frame it could not
+    // read — or throw inside the console's error boundary, taking the whole
+    // panel down over one malformed message.
+    const channels = channelStub();
+    const { calls } = renderCompanion(serving(view({ state: null })), {
+      channels: channels.transport,
+    });
+    await openCompanion();
+    const before = calls.length;
+
+    await act(async () => {
+      channels.deliver(TOPIC, { kind: "frame", payload: { nothing: "useful" } });
+      channels.deliver(TOPIC, { kind: "frame", payload: null });
+      channels.deliver(TOPIC, { kind: "frame", payload: "key_7f3a" });
+    });
+
+    expect(calls.length).toBe(before);
+    expect(screen.getByRole("heading", { name: "Companion" })).toBeDefined();
+  });
+
+  test("neither query polls while the channel is being pushed", async () => {
+    // The console's own fallback shape: `cadence(ms, topic)` is `false` while the
+    // topic is acked, so push replaces the poll rather than running beside it.
+    const channels = channelStub();
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing(TOPIC) },
+    );
+    await openCompanion();
+
+    expect(intervalOf(client, ["roster"])).toBe(false);
+    expect(intervalOf(client, ["companion", KEY])).toBe(false);
+  });
+
+  test("both queries poll again when the topic is not being pushed", async () => {
+    // The case that makes the channel allowed to fail. A proxy that strips
+    // `Upgrade`, a socket that dropped, a console that never acked the topic —
+    // all of them land here, and all of them get the ten seconds this panel
+    // shipped with.
+    const channels = channelStub();
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing() },
+    );
+    await openCompanion();
+
+    expect(intervalOf(client, ["roster"])).toBe(10_000);
+    expect(intervalOf(client, ["companion", KEY])).toBe(10_000);
   });
 });

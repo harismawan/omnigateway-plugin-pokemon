@@ -26,6 +26,7 @@ import {
   speciesIndex,
   spriteBytes,
 } from "./pokeapi.ts";
+import { createPusher } from "./push.ts";
 import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
@@ -131,6 +132,53 @@ export default definePlugin({
     if (storage === undefined) throw new Error("the companion needs the storage capability");
 
     const multiplier = multiplierFrom(ctx.config);
+
+    /**
+     * The channel the panel watches, and the frames that let it stop polling.
+     *
+     * `activity` is half of the wire topic `plugin:pokemon:activity` — the host
+     * supplies the `plugin:pokemon:` half from the validated manifest, so this
+     * cannot name another plugin's channel any more than `{{companion}}` can name
+     * another plugin's table.
+     *
+     * Absent when the capability is: the manifest declares `channels`, but a
+     * capability a manifest declares can still be missing, and the plugin has to
+     * degrade rather than throw. Degradation here is the panel's ten-second poll,
+     * which is exactly what it shipped with before this existed.
+     *
+     * A plugin cannot broadcast — `PluginChannel` offers `send(connectionId, …)`
+     * and nothing else — so a panel is reachable only once it has announced
+     * itself, which is what `onMessage` is doing here. That is the other side of
+     * the host's rule that a client must subscribe before it sends.
+     */
+    const activity = ctx.channels?.open("activity");
+    const pusher =
+      activity === undefined
+        ? null
+        : createPusher({
+            send: (connectionId, payload) => activity.send(connectionId, payload),
+            now: ctx.now,
+          });
+
+    if (activity !== undefined && pusher !== null) {
+      // The payload is ignored on purpose. A panel's hello says "I am here and I
+      // can be sent to", and there is nothing a panel could put in it that this
+      // plugin would act on — every route it wants is admin-gated HTTP.
+      activity.onMessage(({ connectionId }) => pusher.join(connectionId));
+      activity.onClose((connectionId) => pusher.leave(connectionId));
+    }
+
+    /**
+     * Reports that a key's companion was written.
+     *
+     * Called from every write site and from no read, which is the invariant that
+     * lets the panel turn its poll off — see
+     * `docs/superpowers/specs/2026-08-31-live-companion-channel-design.md`. A
+     * frame names the key and never carries the companion: push and poll must
+     * end in the same fetch and the same serialiser, or they are two answers to
+     * one question.
+     */
+    const push = (apiKeyId: string): void => pusher?.push(apiKeyId);
 
     /**
      * One prefetch at a time, per key.
@@ -278,10 +326,15 @@ export default definePlugin({
      *
      * Called on read as well as after a credit. `settle` is idempotent, so the
      * repetition costs a comparison rather than a second helping of growth.
+     *
+     * Reports whether anything was written rather than pushing a frame itself.
+     * The event path credits *and* settles for one request, and a frame from
+     * each would be two claims about one change — so the decision belongs to the
+     * call site, which knows how many changes it just made.
      */
-    const settleAndRecord = (apiKeyId: string): void => {
+    const settleAndRecord = (apiKeyId: string): boolean => {
       const result = settle(storage, apiKeyId, ctx.now());
-      if (result === null) return;
+      if (result === null) return false;
 
       /*
         What the companion alive right now has been, recorded before its events
@@ -338,6 +391,8 @@ export default definePlugin({
         );
         ctx.logger.info("companion graduated", { event: "companion.graduated", count: 1 });
       }
+
+      return result.wrote;
     };
 
     /**
@@ -500,6 +555,12 @@ export default definePlugin({
         ctx.now(),
         apiKeyId,
       ]);
+
+      // The write the poll used to collect. This runs unawaited from the panel's
+      // own route and lands long after that response went out — on a cold
+      // species cache, ~649 fetches later — so without a frame here an egg with
+      // the poll switched off would never open.
+      push(apiKeyId);
     };
 
     if (events?.onRequestCompleted !== undefined) {
@@ -511,6 +572,11 @@ export default definePlugin({
           event.tokens.cacheWrite;
         creditTokens(storage, event.apiKeyId, Math.round(tokens * multiplier), ctx.now());
         settleAndRecord(event.apiKeyId);
+        // Unconditional, unlike every other site: `creditTokens` always writes,
+        // and on a key's first request the row it writes is the key arriving on
+        // the roster. One frame covers the credit and whatever the settle made
+        // of it, which is one change as an operator experiences it.
+        push(event.apiKeyId);
       });
     }
 
@@ -547,6 +613,7 @@ export default definePlugin({
           ctx.now(),
           event.apiKeyId,
         ]);
+        push(event.apiKeyId);
         ctx.logger.info("companion candy granted", {
           event: "companion.candy",
           count: decision.count,
@@ -605,7 +672,10 @@ export default definePlugin({
         path: "/keys/:id",
         handler: async (request) => {
           const apiKeyId = request.params.id ?? "";
-          settleAndRecord(apiKeyId);
+          // Conditional, and that is the whole of "on every write and on no
+          // read". This route settles on the way in, so an unconditional frame
+          // here would have the panel refetch, settle, push and refetch again.
+          if (settleAndRecord(apiKeyId)) push(apiKeyId);
           const row = readCompanion(storage, apiKeyId);
           if (row === null) return { status: 404, json: { error: "no companion for that key" } };
 
@@ -784,6 +854,11 @@ export default definePlugin({
           );
           if (!result.ok) return { status: 409, json: { error: result.reason } };
           settleAndRecord(apiKeyId);
+          // Unconditional: reaching here means `consume` wrote. The panel that
+          // acted already invalidates its own queries, so this frame is for
+          // every *other* tab — a bag or a wallet that still shows what was
+          // spent two minutes ago.
+          push(apiKeyId);
           return { json: { ok: true } };
         },
       },
@@ -824,6 +899,7 @@ export default definePlugin({
           // the moment it spends itself — possibly through several stages at
           // once, which `advance`'s transition cap already handles.
           settleAndRecord(apiKeyId);
+          push(apiKeyId);
           return { json: { ok: true } };
         },
       },
@@ -843,6 +919,9 @@ export default definePlugin({
             ctx.now(),
           );
           if (!result.ok) return { status: 409, json: { error: result.reason } };
+          // A refusal is the one path here that wrote nothing, and it returned
+          // above. The wallet has moved, so every other tab needs to know.
+          push(apiKeyId);
           return { json: { ok: true, wallet: wallet(result.row) } };
         },
       },

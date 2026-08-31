@@ -1,6 +1,11 @@
-import { definePluginUI, type PluginUiProps, useLive } from "@omnigateway/dashboard-sdk";
+import {
+  definePluginUI,
+  type PluginUiProps,
+  useLive,
+  usePluginChannel,
+} from "@omnigateway/dashboard-sdk";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bag } from "./Bag.tsx";
 import { Dex } from "./Dex.tsx";
 import { activityOf } from "./format.ts";
@@ -27,12 +32,20 @@ import type { CompanionView, Roster, ShopEntry } from "./types.ts";
 export { activityOf } from "./format.ts";
 
 /**
- * How often the panel refetches, when the console is polling at all.
+ * How often the panel refetches when it has fallen back to polling.
  *
- * Growth arrives from requests this panel has no way to hear about, so without
- * a poll an operator watching a companion evolve is watching a screenshot. The
- * interval is loose on purpose: the numbers move in tokens per request and
- * nothing here is worth a socket.
+ * **The fallback rather than the mechanism, since 1.3.0.** Growth arrives from
+ * requests this panel cannot observe, and it used to learn about them only by
+ * asking every ten seconds. It now holds a channel the plugin pushes on, and
+ * `cadence(ms, topic)` is `false` while that topic is being pushed — so this
+ * interval governs exactly the cases where the channel is not there: a host
+ * without the `channels` capability, a console below SDK 0.1.4, a proxy that
+ * strips `Upgrade`, or a socket that dropped.
+ *
+ * It is kept rather than deleted, and that is what makes the channel allowed to
+ * fail. Channel delivery is best-effort and drops rather than queues; a panel
+ * with no poll underneath it would be one whose freshness depended on a frame
+ * the transport never promised to deliver.
  *
  * Ten seconds rather than the fifteen this started at, matching what the
  * console's own credential-health boards use. Nothing about a companion demands
@@ -44,6 +57,24 @@ export { activityOf } from "./format.ts";
  * see the note on `useLive` in the panel body.
  */
 const REFETCH_MS = 10_000;
+
+/**
+ * The key a frame names, or null for a frame this panel cannot read.
+ *
+ * The payload crosses the SDK boundary as `unknown` and is narrowed here rather
+ * than asserted, because the alternative is a panel that refetches on a message
+ * it did not understand — or throws inside the console's error boundary and
+ * takes itself down over one malformed frame.
+ *
+ * A frame carries a key and never a companion. Push and poll have to end in the
+ * same fetch and the same serialiser, or they are two answers to one question:
+ * the console's own `res:*` topics are built on that rule and this follows it.
+ */
+function keyOf(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const named = (payload as { apiKeyId?: unknown }).apiKeyId;
+  return typeof named === "string" && named !== "" ? named : null;
+}
 
 /**
  * Which screen the panel is on.
@@ -101,6 +132,68 @@ function Companion({ pluginId, api }: PluginUiProps) {
    */
   const { cadence } = useLive();
 
+  /**
+   * Which companion is on screen, read by the frame handler below.
+   *
+   * Derived here rather than after the roster because the handler needs it, and
+   * deriving it twice would be two answers to one question. The auto-open below
+   * adjusts `screen` during render and React re-runs this component
+   * immediately, so a frame arriving between the two passes is judged against
+   * the same value either way.
+   */
+  const openKey = screen.at === "key" ? screen.apiKeyId : null;
+
+  /**
+   * The plugin's own push channel, and the reason the poll above is a fallback.
+   *
+   * The wire topic is `plugin:pokemon:activity`; the SDK composes it from the
+   * `pluginId` this mount was handed, so the panel cannot reach another plugin's
+   * channel by mistake and keeps working if the plugin is renamed on disk.
+   *
+   * A frame says a key changed and never what it changed to, so both halves of
+   * this panel refresh the way they always have — through the same routes, the
+   * same react-query cache and the same serialiser the poll uses.
+   *
+   * Outside the console there is no transport and the channel stays `idle`,
+   * which is the same posture `useLive` takes when it cannot find the switch: a
+   * panel rendered by its own harness has no socket, and nothing here should
+   * pretend otherwise.
+   */
+  const {
+    status: channelStatus,
+    topic,
+    send,
+  } = usePluginChannel(pluginId, "activity", (payload) => {
+    const apiKeyId = keyOf(payload);
+    if (apiKeyId === null) return;
+    // Always: a frame means some card on the roster has moved, whichever key
+    // it named.
+    void client.invalidateQueries({ queryKey: ["roster"] });
+    // The companion only when the frame is about the one on screen. Refetching
+    // it for every key's frame would make a busy install poll the expensive
+    // route once per key per floor, which is the hammer the floor exists to
+    // prevent.
+    if (apiKeyId === openKey) {
+      void client.invalidateQueries({ queryKey: ["companion", apiKeyId] });
+    }
+  });
+
+  /**
+   * The hello that makes this panel reachable.
+   *
+   * A plugin cannot broadcast — `PluginChannel` offers `send(connectionId, …)`
+   * and nothing else — so it can only push to a connection it has already heard
+   * from. Without this the subscription succeeds and no frame ever arrives.
+   *
+   * Gated on `open` because the gateway refuses a send from a connection whose
+   * subscription it has not acked, which would turn this panel's own timing into
+   * a permission failure it then reported to its operator.
+   */
+  useEffect(() => {
+    if (channelStatus !== "open") return;
+    send({ watching: true });
+  }, [channelStatus, send]);
+
   const roster = useQuery({
     queryKey: ["roster"],
     queryFn: () => api.get<Roster>("keys"),
@@ -108,7 +201,12 @@ function Companion({ pluginId, api }: PluginUiProps) {
     // it was fresh for whoever was buying — and stale for anyone watching a
     // second key earn its first tokens, which is the one thing the roster
     // screen is for.
-    refetchInterval: cadence(REFETCH_MS),
+    //
+    // The topic switches this off entirely while the channel is live. It is safe
+    // for the roster specifically because the roster is exactly the set of
+    // companion rows, and a row is created by the same credit that pushes — so a
+    // key joining the roster is a frame, not something only a poll would find.
+    refetchInterval: cadence(REFETCH_MS, topic),
   });
 
   const keys = roster.data?.keys ?? [];
@@ -132,13 +230,15 @@ function Companion({ pluginId, api }: PluginUiProps) {
     setScreen(only === undefined ? { at: "roster" } : { at: "key", apiKeyId: only.apiKeyId });
   }
 
-  const showing = screen.at === "key" ? screen.apiKeyId : null;
+  // The same value as `openKey` above, kept under the name the rest of this
+  // component already uses.
+  const showing = openKey;
 
   const companion = useQuery({
     queryKey: ["companion", showing],
     queryFn: () => api.get<CompanionView>(`keys/${showing}`),
     enabled: showing !== null,
-    refetchInterval: cadence(REFETCH_MS),
+    refetchInterval: cadence(REFETCH_MS, topic),
   });
 
   // A money surface that fails silently is worse than one that fails loudly.

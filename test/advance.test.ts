@@ -816,3 +816,32 @@ test("an unrecorded stage survives a round trip through the stored save", () => 
 
   expect(round?.active?.stageTimes).toEqual([null, null, NOW]);
 });
+
+test("an advance that changes nothing returns the state it was given, not a copy", () => {
+  // Identity, deliberately, and it is load-bearing twice over.
+  //
+  // `settle` skips its write when `result.state === row.state`, and that guard
+  // was dead: this function opened with `{ ...state, consumedTotal }` on every
+  // call, so a fresh object came back even when every field in it was identical
+  // and the plugin wrote a row to the database on every *read*. The panel polls,
+  // so that was a write per poll per open companion, for nothing.
+  //
+  // It is also what makes the push channel's invariant expressible. A frame goes
+  // out on every write and on no read; if an unchanged settle still counted as a
+  // write, reading a companion would push, the panel would refetch, and the
+  // refetch would push again.
+  const state = freshState();
+  const result = advance(state, 0, 5_000);
+
+  expect(result.state).toBe(state);
+  expect(result.events).toEqual([]);
+});
+
+test("an advance that changes nothing but the clock still returns the same state", () => {
+  // The clock is passed rather than read precisely so it cannot move an outcome.
+  // A stage instant is only stamped at a transition, so a settle that transitions
+  // nothing must not rewrite the row just because time passed.
+  const state = freshState();
+
+  expect(advance(state, 0, 1).state).toBe(advance(state, 0, 999_999).state);
+});
