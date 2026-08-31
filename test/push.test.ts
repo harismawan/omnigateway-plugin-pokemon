@@ -13,11 +13,29 @@ const NOW = 1_700_000_000_000;
 function harness(floorMs = PUSH_FLOOR_MS) {
   let now = NOW;
   const sent: Array<{ connectionId: string; payload: unknown }> = [];
-  /** Armed timers, newest last, each with the delay it was asked for. */
-  const timers: Array<{ ms: number; run: () => void; cancelled: boolean }> = [];
+  /**
+   * Armed timers, newest last.
+   *
+   * `dueAt` is recorded at arm time rather than the delay being compared against
+   * the size of one `advance` call. Two timers armed at different instants are
+   * otherwise indistinguishable — one armed at `t=100` for 1000 ms is due at
+   * 1100, and a helper that fired everything with `ms <= 1000` would run it at
+   * `t=1000`, a hundred milliseconds early and green.
+   *
+   * `fired` and `cancelled` are separate because they mean opposite things. One
+   * flag for both would make "the pending frame was called off" true of a timer
+   * that ran, which is the assertion it exists to make.
+   */
+  const timers: Array<{
+    ms: number;
+    dueAt: number;
+    run: () => void;
+    cancelled: boolean;
+    fired: boolean;
+  }> = [];
 
   const schedule: Schedule = (run, ms) => {
-    const timer = { ms, run, cancelled: false };
+    const timer = { ms, dueAt: now + ms, run, cancelled: false, fired: false };
     timers.push(timer);
     return () => {
       timer.cancelled = true;
@@ -35,20 +53,12 @@ function harness(floorMs = PUSH_FLOOR_MS) {
     pusher,
     sent,
     timers,
-    /**
-     * Moves the clock and fires the timers that have genuinely come due.
-     *
-     * The delay is checked rather than assumed. A helper that fired everything
-     * armed would pass a coalescer that scheduled its trailing frame for the
-     * wrong interval — including one that scheduled it for `0`, which is the
-     * mistake worth catching, since react-query and `setTimeout` both read that
-     * as "immediately" and it would turn a floor into no floor at all.
-     */
+    /** Moves the clock and fires every armed timer that has genuinely come due. */
     advance(ms: number) {
       now += ms;
       for (const timer of [...timers]) {
-        if (timer.cancelled || timer.ms > ms) continue;
-        timer.cancelled = true;
+        if (timer.cancelled || timer.fired || timer.dueAt > now) continue;
+        timer.fired = true;
         timer.run();
       }
     },
@@ -108,6 +118,26 @@ test("a sustained burst still delivers, because the timer is never re-armed", ()
   expect(h.keys()).toEqual(["key-a", "key-a"]);
 });
 
+test("a key armed part way through a floor fires when it is actually due", () => {
+  // Two keys whose floors start at different instants, which is the ordinary
+  // case on a gateway serving more than one key and the one a harness comparing
+  // a delay against a single advance cannot tell apart.
+  const h = harness();
+  h.pusher.join("c1");
+
+  h.pusher.push("key-a");
+  h.advance(PUSH_FLOOR_MS / 2);
+  // Inside a's floor, so this arms a trailing frame due half a floor from now.
+  h.pusher.push("key-a");
+  // b has never been pushed, so it leads immediately.
+  h.pusher.push("key-b");
+
+  expect(h.keys()).toEqual(["key-a", "key-b"]);
+
+  h.advance(PUSH_FLOOR_MS / 2);
+  expect(h.keys()).toEqual(["key-a", "key-b", "key-a"]);
+});
+
 test("two keys are floored independently", () => {
   // Per key rather than per channel. Two keys earning at once are two stories,
   // and a shared floor would let a busy key swallow a quiet one's only frame.
@@ -157,7 +187,9 @@ test("the last connection leaving cancels the trailing frame it would have got",
 
   // The leading frame it was there for, and nothing after it left.
   expect(h.keys()).toEqual(["key-a"]);
-  expect(h.timers.every((timer) => timer.cancelled)).toBe(true);
+  // Cancelled, specifically — not merely "not pending". A timer that ran would
+  // also leave nothing pending, and that is the outcome this rules out.
+  expect(h.timers.every((timer) => timer.cancelled && !timer.fired)).toBe(true);
 });
 
 test("a connection that announces twice is still one connection", () => {

@@ -577,13 +577,20 @@ export default definePlugin({
           event.tokens.output +
           event.tokens.cacheRead +
           event.tokens.cacheWrite;
-        creditTokens(storage, event.apiKeyId, Math.round(tokens * multiplier), ctx.now());
-        settleAndRecord(event.apiKeyId);
-        // Unconditional, unlike every other site: `creditTokens` always writes,
-        // and on a key's first request the row it writes is the key arriving on
-        // the roster. One frame covers the credit and whatever the settle made
-        // of it, which is one change as an operator experiences it.
-        push(event.apiKeyId);
+        const credited = creditTokens(
+          storage,
+          event.apiKeyId,
+          Math.round(tokens * multiplier),
+          ctx.now(),
+        );
+        const settled = settleAndRecord(event.apiKeyId);
+        // One frame for the two writes, because a credit and what it grew into
+        // are one change as an operator experiences them — not because either is
+        // guaranteed to have happened. A failed request carries no tokens and a
+        // small enough multiplier rounds a real one away, and in both cases this
+        // handler writes nothing: the host emits `RequestCompleted` whether or
+        // not the request succeeded.
+        if (credited || settled) push(event.apiKeyId);
       });
     }
 

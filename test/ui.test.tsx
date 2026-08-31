@@ -116,6 +116,12 @@ type ChannelStub = {
   subscribed: string[];
   /** What the panel published, which is how its hello is observed. */
   sent: Array<{ topic: string; payload: unknown }>;
+  /**
+   * Makes `send` answer `false`, as the console does for a topic it has not
+   * acked. The panel's hello is the only thing that makes it reachable, so a
+   * send that fails is a state it has to be able to notice.
+   */
+  refuseSend: boolean;
   /** Pushes one message to every live subscriber of `topic`. */
   deliver(topic: string, message: ChannelMessage): void;
 };
@@ -125,9 +131,10 @@ function channelStub(): ChannelStub {
   const subscribed: string[] = [];
   const sent: Array<{ topic: string; payload: unknown }> = [];
 
-  return {
+  const stub: ChannelStub = {
     subscribed,
     sent,
+    refuseSend: false,
     transport: {
       subscribe(topic, listener) {
         subscribed.push(topic);
@@ -137,6 +144,7 @@ function channelStub(): ChannelStub {
         return () => set.delete(listener);
       },
       send(topic, payload) {
+        if (stub.refuseSend) return false;
         sent.push({ topic, payload });
         return true;
       },
@@ -145,6 +153,7 @@ function channelStub(): ChannelStub {
       for (const listener of listeners.get(topic) ?? []) listener(message);
     },
   };
+  return stub;
 }
 
 /** A transport that is pushing exactly the topics named. */
@@ -2847,20 +2856,6 @@ describe("the plugin's push channel", () => {
     expect(screen.getByRole("heading", { name: "Companion" })).toBeDefined();
   });
 
-  test("neither query polls while the channel is being pushed", async () => {
-    // The console's own fallback shape: `cadence(ms, topic)` is `false` while the
-    // topic is acked, so push replaces the poll rather than running beside it.
-    const channels = channelStub();
-    const { client } = renderCompanion(
-      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
-      { channels: channels.transport, connection: pushing(TOPIC) },
-    );
-    await openCompanion();
-
-    expect(intervalOf(client, ["roster"])).toBe(false);
-    expect(intervalOf(client, ["companion", KEY])).toBe(false);
-  });
-
   test("both queries poll again when the topic is not being pushed", async () => {
     // The case that makes the channel allowed to fail. A proxy that strips
     // `Upgrade`, a socket that dropped, a console that never acked the topic —
@@ -2875,5 +2870,87 @@ describe("the plugin's push channel", () => {
 
     expect(intervalOf(client, ["roster"])).toBe(10_000);
     expect(intervalOf(client, ["companion", KEY])).toBe(10_000);
+  });
+
+  test("the poll stays on until the plugin has actually been told we are here", async () => {
+    // The window this closes is narrow and real. `pushed(topic)` turns true on
+    // the console's ack, which is one round trip *before* the plugin has heard
+    // the hello — and the hello is the only thing that makes this panel
+    // reachable, since a plugin can only send to a connection it has heard
+    // from. A panel that stopped polling on the ack alone and then failed to
+    // announce would be subscribed, silent, and not polling, with nothing
+    // thrown and nothing logged.
+    const channels = channelStub();
+    channels.refuseSend = true;
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing(TOPIC) },
+    );
+    await openCompanion();
+
+    await act(async () => channels.deliver(TOPIC, { kind: "open" }));
+
+    // The transport says it is pushing this topic, and the panel polls anyway,
+    // because its hello did not land.
+    expect(intervalOf(client, ["roster"])).toBe(10_000);
+    expect(intervalOf(client, ["companion", KEY])).toBe(10_000);
+  });
+
+  test("the poll switches off once the hello has landed", async () => {
+    const channels = channelStub();
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing(TOPIC) },
+    );
+    await openCompanion();
+
+    await act(async () => channels.deliver(TOPIC, { kind: "open" }));
+
+    expect(intervalOf(client, ["roster"])).toBe(false);
+    expect(intervalOf(client, ["companion", KEY])).toBe(false);
+  });
+
+  test("a dropped socket re-announces the panel and resumes polling in between", async () => {
+    // The whole reason the plugin keeps a set of connection ids rather than one,
+    // and the whole reason a dropped socket recovers. The gateway fires the
+    // plugin's `onClose` for the old connection, so without a second hello the
+    // panel would come back subscribed and unreachable.
+    const channels = channelStub();
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing(TOPIC) },
+    );
+    await openCompanion();
+    await act(async () => channels.deliver(TOPIC, { kind: "open" }));
+    expect(channels.sent).toHaveLength(1);
+    expect(intervalOf(client, ["roster"])).toBe(false);
+
+    await act(async () => channels.deliver(TOPIC, { kind: "closed" }));
+
+    // Back to `idle`, so the panel polls again rather than sitting on a channel
+    // that is not delivering.
+    expect(intervalOf(client, ["roster"])).toBe(10_000);
+
+    await act(async () => channels.deliver(TOPIC, { kind: "open" }));
+
+    expect(channels.sent).toHaveLength(2);
+    expect(intervalOf(client, ["roster"])).toBe(false);
+  });
+
+  test("a refused channel leaves the panel polling", async () => {
+    // Unreachable for an admin, who is granted every opened plugin topic — but
+    // the panel must not depend on that being true of every principal the
+    // console will ever have.
+    const channels = channelStub();
+    const { client } = renderCompanion(
+      serving(view({ state: { active: active(), eggUsage: 0, eggTier: null, inventory: {} } })),
+      { channels: channels.transport, connection: pushing(TOPIC) },
+    );
+    await openCompanion();
+
+    await act(async () => channels.deliver(TOPIC, { kind: "refused" }));
+
+    expect(channels.sent).toEqual([]);
+    expect(intervalOf(client, ["roster"])).toBe(10_000);
   });
 });

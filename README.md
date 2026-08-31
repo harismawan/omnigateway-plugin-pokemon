@@ -142,8 +142,9 @@ Since 1.3.0 it is told twice over, and the order matters.
 
 The plugin opens one channel and sends a frame naming a key whenever that key's
 companion is **written** — a credit, a hatch, an evolution, a graduation, a
-purchase, an item, a rate-limit grant, or the species roll that lands minutes
-after a panel asked for it. Never on a read: this panel's own route settles a
+purchase, an item, a rate-limit grant, or either of the two answers that land
+minutes after a panel asked for them: the species roll behind the next hatch and
+the line behind a Ditto's reveal. Never on a read: this panel's own route settles a
 companion on the way in, and a frame there would have it refetch, settle, push
 and refetch again.
 

@@ -136,10 +136,16 @@ function Companion({ pluginId, api }: PluginUiProps) {
    * Which companion is on screen, read by the frame handler below.
    *
    * Derived here rather than after the roster because the handler needs it, and
-   * deriving it twice would be two answers to one question. The auto-open below
-   * adjusts `screen` during render and React re-runs this component
-   * immediately, so a frame arriving between the two passes is judged against
-   * the same value either way.
+   * deriving it twice would be two answers to one question.
+   *
+   * Moving it above the auto-open below changes nothing, and the reason is worth
+   * stating precisely because the tempting explanation is wrong. A render-phase
+   * `setScreen` does not rebind `screen` in the pass that called it: React
+   * discards that pass and re-invokes the component, so both this line and the
+   * one that used to sit after the auto-open read the same `screen` in every
+   * pass. It is not that a frame arriving in between sees a consistent value —
+   * no frame can arrive in between, because `usePluginChannel` installs the
+   * handler from an effect and a discarded pass is never committed.
    */
   const openKey = screen.at === "key" ? screen.apiKeyId : null;
 
@@ -189,10 +195,32 @@ function Companion({ pluginId, api }: PluginUiProps) {
    * subscription it has not acked, which would turn this panel's own timing into
    * a permission failure it then reported to its operator.
    */
+  const [joined, setJoined] = useState(false);
   useEffect(() => {
-    if (channelStatus !== "open") return;
-    send({ watching: true });
+    if (channelStatus !== "open") {
+      // Back to polling the moment the channel is anything but open, rather than
+      // waiting to be told again. A transport that dropped re-subscribes and
+      // `open` follows, and the plugin's `onClose` has by then forgotten the old
+      // connection — so this panel is unreachable until it says hello again.
+      setJoined(false);
+      return;
+    }
+    // The answer is kept rather than discarded, and it is what the poll is gated
+    // on below. `connection.pushed(topic)` goes true on the console's *ack*,
+    // which is one round trip before the plugin has heard anything — so a panel
+    // that trusted the ack alone would stop polling while still unreachable, and
+    // a hello that failed would leave it subscribed, silent and not polling,
+    // with nothing thrown and nothing logged.
+    setJoined(send({ watching: true }));
   }, [channelStatus, send]);
+
+  /**
+   * The topic to hand `cadence`, or nothing while this panel is not reachable.
+   *
+   * `cadence(ms, undefined)` is the pre-1.3.0 behaviour exactly — poll on the
+   * interval — so an unjoined channel costs the panel nothing it used to have.
+   */
+  const pushedTopic = joined ? topic : undefined;
 
   const roster = useQuery({
     queryKey: ["roster"],
@@ -206,7 +234,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
     // for the roster specifically because the roster is exactly the set of
     // companion rows, and a row is created by the same credit that pushes — so a
     // key joining the roster is a frame, not something only a poll would find.
-    refetchInterval: cadence(REFETCH_MS, topic),
+    refetchInterval: cadence(REFETCH_MS, pushedTopic),
   });
 
   const keys = roster.data?.keys ?? [];
@@ -238,7 +266,7 @@ function Companion({ pluginId, api }: PluginUiProps) {
     queryKey: ["companion", showing],
     queryFn: () => api.get<CompanionView>(`keys/${showing}`),
     enabled: showing !== null,
-    refetchInterval: cadence(REFETCH_MS, topic),
+    refetchInterval: cadence(REFETCH_MS, pushedTopic),
   });
 
   // A money surface that fails silently is worse than one that fails loudly.

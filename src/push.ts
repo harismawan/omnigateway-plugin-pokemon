@@ -50,8 +50,12 @@ const defaultSchedule: Schedule = (run, ms) => {
  * The shortest interval between two frames about one key.
  *
  * A second, which is what `INVALIDATION_FLOORS` gives `res:usage` and `res:logs`
- * in the gateway. Those were chosen against a 60-second poll and this replaces a
- * ten-second one, so the ratio here is the more conservative of the two.
+ * in the gateway. Those two share a figure while replacing very different polls
+ * — 60 seconds for usage and 2 for logs — so the number is not a ratio anybody
+ * derived, and copying it as though it were would be inventing a rule. What it
+ * is: the floor the host settled on for its hottest topics, one of which
+ * (`res:logs`) it applies to a *faster* poll than this panel's ten seconds. If
+ * that is tolerable there it is comfortable here.
  *
  * Per key rather than per channel: two keys earning at once are two independent
  * stories, and a shared floor would let a busy key swallow a quiet one's only
@@ -124,6 +128,12 @@ export function createPusher(deps: PusherDeps): Pusher {
       // work" property would be true only of pushes and not of timers.
       for (const cancel of pending.values()) cancel();
       pending.clear();
+      // Cleared alongside it, as the host's `stop()` does. Two reasons: this map
+      // otherwise keeps one entry per key ever pushed for the life of the
+      // process, and a panel that closes and reopens inside a floor would have
+      // its first change deferred by a trailing timer rather than led — measured
+      // against an audience that no longer existed.
+      lastSent.clear();
     },
 
     push(apiKeyId) {

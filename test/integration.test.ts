@@ -2684,7 +2684,7 @@ test("a rate-limit grant pushes, because it changes the bag", async () => {
   expect(pushedKeys()).toEqual([KEY]);
 });
 
-test("two changes inside the floor are one frame now and one after it", async () => {
+test("a second change inside the floor does not send a second frame", async () => {
   // The coalescer, wired up rather than in isolation — `test/push.test.ts` owns
   // its behaviour, and this owns the claim that the server actually goes through
   // it. Without a floor a busy key would push a frame per request, which is a
@@ -2698,6 +2698,12 @@ test("two changes inside the floor are one frame now and one after it", async ()
   // The leading frame only. The second credit is inside the floor, so its frame
   // is armed rather than sent — and `afterEach` closes the connection, which
   // cancels it.
+  //
+  // Only the leading half is asserted here, which is why the name no longer
+  // promises the trailing one. A fixture clock cannot observe a real
+  // `setTimeout`, so a test claiming "and one after it" would be describing
+  // something it never watched happen. `test/push.test.ts` drives both clocks
+  // and owns that half.
   expect(pushedKeys()).toEqual([KEY]);
 });
 
@@ -2728,6 +2734,11 @@ test("a refused purchase pushes nothing, because it wrote nothing", async () => 
   watch();
   spend(10);
   pushed = [];
+  // Past the floor, and this line is the test rather than housekeeping. Without
+  // it a frame the refusal wrongly emitted would land *inside* the floor, be
+  // armed as a trailing frame instead of sent, and leave `pushed` empty — so the
+  // assertion below would pass against the very bug it exists to catch.
+  clock += PUSH_FLOOR_MS;
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
   expect(buy).toBeDefined();
@@ -2752,6 +2763,10 @@ test("reading a companion that has not changed pushes nothing", async () => {
   watch();
   spend(1_000);
   pushed = [];
+  // As in the refusal test above: inside the floor an unwanted frame is armed
+  // rather than sent, and this assertion would pass against a route that pushed
+  // unconditionally — which is precisely the refetch loop it is here to forbid.
+  clock += PUSH_FLOOR_MS;
 
   const route = routes.find((r) => r.path === "/keys/:id");
   expect(route).toBeDefined();
@@ -2885,4 +2900,35 @@ test("the resolved reveal pushes when it lands, exactly as the roll does", async
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error("the reveal was never resolved");
+});
+
+test("a request that credited nothing pushes nothing", async () => {
+  // The host emits `RequestCompleted` for failed requests too — a 401, a 429, a
+  // provider 5xx — and those carry no tokens. `creditTokens` returns early on a
+  // non-positive figure, so nothing is written and there is nothing to say.
+  //
+  // Pushing anyway is the "uncoalesced push is worse than the poll" failure in
+  // miniature, on the one path where nothing happened: through a provider
+  // outage the panel would refetch the roster once per floor — once a second —
+  // where the poll it replaced managed once every ten.
+  await boot();
+  watch();
+
+  spend(0, "req_failed");
+
+  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+  expect(pushed).toEqual([]);
+});
+
+test("a multiplier that rounds a credit away pushes nothing either", async () => {
+  // The same hole reached by arithmetic rather than by a failed request:
+  // `Math.round(tokens * multiplier)` is 0 for a small enough multiplier, so a
+  // successful request can also write nothing.
+  await boot({ multiplier: 0.001 });
+  watch();
+
+  spend(1, "req_rounded");
+
+  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+  expect(pushed).toEqual([]);
 });

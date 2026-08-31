@@ -262,8 +262,13 @@ export function creditTokens(
   apiKeyId: string,
   tokens: number,
   now: number,
-): void {
-  if (tokens <= 0) return;
+): boolean {
+  // Reports whether it wrote, for the reason `settle` does. The host emits a
+  // `RequestCompleted` for a failed request too, and that request carries no
+  // tokens — so this early return is the common case during a provider outage,
+  // not an edge. A caller that assumed a credit always writes would push a frame
+  // per failed request naming a key that may not even have a row.
+  if (tokens <= 0) return false;
   storage.run(
     `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at, last_credit_at)
      VALUES (?, ?, ?, 0, ?, ?, ?)
@@ -273,6 +278,7 @@ export function creditTokens(
        last_credit_at = excluded.last_credit_at`,
     [apiKeyId, serialiseState(freshState()), Math.trunc(tokens), now, now, now],
   );
+  return true;
 }
 
 /**

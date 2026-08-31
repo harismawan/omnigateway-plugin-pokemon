@@ -44,7 +44,8 @@ away, because it is the fallback.
 Both halves are load-bearing. The first is what makes it safe to stop polling:
 if some write could change the panel's answer without emitting, an operator
 would sit in front of a stale screen with nothing scheduled to correct it. The
-write sites, all six:
+write sites, all seven — eight statements, since `settle` is reached from four
+call sites and writes through one of them:
 
 | Write | Site | What the panel would otherwise miss |
 | --- | --- | --- |
@@ -96,16 +97,20 @@ worse than the poll it replaces, and the host wrote the argument down first, in
 
 `src/push.ts` mirrors the host's answer: **leading and trailing, never one or the
 other.** The first emit for a key goes out immediately; further emits inside the
-floor replace a stored payload and leave the armed timer alone; the trailing
-frame fires at the floor. Leading alone loses the last change of a burst, which
+floor are dropped and leave the armed timer alone; the trailing frame fires at
+the floor. The host stores the newest payload per topic at that point and this
+does not, because every frame about a key is `{ apiKeyId }` — there is nothing
+to replace. Leading alone loses the last change of a burst, which
 is the one the operator is watching for. Trailing alone puts a floor's worth of
 latency on an idle gateway's first event, which is the case a socket was added
 for. Re-arming the timer on every emit would be a debounce, and a debounce under
 sustained load never fires at all.
 
-The floor is **1000 ms**, keyed per API key. It is the same figure
-`INVALIDATION_FLOORS` gives `res:usage` and `res:logs`, chosen there against a 60s
-poll; ours replaces a 10s poll, so the ratio is if anything more conservative.
+The floor is **1000 ms**, keyed per API key. It is the figure
+`INVALIDATION_FLOORS` gives `res:usage` and `res:logs` — which replace a 60s poll
+and a 2s one respectively, so it is the host's judgement about its hottest
+topics rather than a ratio anybody derived. One of those polls is faster than
+this panel's ten seconds, which is the part that makes it comfortable here.
 Per key rather than per channel, because two keys earning at once are two
 independent stories and flooring them together would let a busy key starve a
 quiet one's frame.
