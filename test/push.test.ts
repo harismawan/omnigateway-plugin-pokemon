@@ -35,11 +35,19 @@ function harness(floorMs = PUSH_FLOOR_MS) {
     pusher,
     sent,
     timers,
-    /** Fires every armed, uncancelled timer whose delay has elapsed. */
+    /**
+     * Moves the clock and fires the timers that have genuinely come due.
+     *
+     * The delay is checked rather than assumed. A helper that fired everything
+     * armed would pass a coalescer that scheduled its trailing frame for the
+     * wrong interval — including one that scheduled it for `0`, which is the
+     * mistake worth catching, since react-query and `setTimeout` both read that
+     * as "immediately" and it would turn a floor into no floor at all.
+     */
     advance(ms: number) {
       now += ms;
       for (const timer of [...timers]) {
-        if (timer.cancelled) continue;
+        if (timer.cancelled || timer.ms > ms) continue;
         timer.cancelled = true;
         timer.run();
       }

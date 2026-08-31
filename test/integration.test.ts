@@ -2839,3 +2839,50 @@ test("a hatch that settles on read pushes, because that read wrote", async () =>
   expect(readCompanion(storage, KEY)?.state?.active).not.toBeNull();
   expect(pushedKeys()).toEqual([KEY]);
 });
+
+test("the resolved reveal pushes when it lands, exactly as the roll does", async () => {
+  // `prefetchReveal` is the twin of `prefetchHatch` and was the write this
+  // design missed on its first pass. Both are fired unawaited from the panel's
+  // own route and both land long after that response went out; a disguised
+  // companion already standing at its threshold is waiting on this write and
+  // nothing else. Without a frame, the poll being off means the reveal simply
+  // never happens.
+  const online = coldCacheOnline();
+  await boot({}, online);
+  watch();
+  spend(1_000);
+  plant({
+    consumedTotal: 1_000,
+    active: activeMon({
+      baseId: 10,
+      plannedPath: [10, 11],
+      stageIndex: 0,
+      dittoDisguise: 10,
+      dittoRevealed: false,
+    }),
+    eggUsage: 0,
+    eggTier: null,
+    pendingHatch: null,
+    pendingReveal: null,
+    inventory: emptyInventory(),
+  });
+
+  const route = routes.find((r) => r.path === "/keys/:id");
+  expect(route).toBeDefined();
+  if (route === undefined) return;
+
+  pushed = [];
+  // Past the floor, so the frame under test is sent rather than folded into a
+  // trailing one armed by the credit above — see the note in the hatch test.
+  clock += PUSH_FLOOR_MS;
+
+  for (let attempt = 0; attempt < 100; attempt++) {
+    await route.handler({ params: { id: KEY }, query: {}, body: null });
+    if (readCompanion(storage, KEY)?.state?.pendingReveal != null) {
+      expect(pushedKeys()).toContain(KEY);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("the reveal was never resolved");
+});

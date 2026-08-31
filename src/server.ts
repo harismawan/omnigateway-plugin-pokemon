@@ -443,6 +443,13 @@ export default definePlugin({
         ctx.now(),
         apiKeyId,
       ]);
+
+      // The twin of the roll's frame below, and for the identical reason: this
+      // lands unawaited, long after the route that started it answered, and a
+      // disguised companion already standing at its threshold is waiting on this
+      // write and nothing else. Without it, a panel that has switched its poll
+      // off would sit in front of a Ditto that never reveals.
+      push(apiKeyId);
     };
 
     /**

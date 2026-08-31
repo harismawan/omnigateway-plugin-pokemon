@@ -51,15 +51,23 @@ write sites, all six:
 | `creditTokens` | `onRequestCompleted` | Tokens and the wallet — and the row's lazy creation, which is a key joining the roster |
 | `settleAndRecord` | `onRequestCompleted`, and on read | A hatch, an evolution, a graduation and its Dex row |
 | candy grant | `onLimitReached` | Inventory |
-| `pendingHatch` | the unawaited prefetch | The roll behind the next hatch |
+| `pendingHatch` | the unawaited hatch prefetch | The roll behind the next hatch |
+| `pendingReveal` | the unawaited reveal prefetch | The line behind a Ditto's reveal |
 | purchase | `POST /keys/:id/purchase` | A second tab's view of the wallet |
 | item use / unpin | `POST /keys/:id/use`, `/unpin` | A second tab's view of the bag |
 
-The fourth is the one that would have been missed by anyone enumerating the
-obvious ones. `prefetchOnce` is fired unawaited from the panel's own route and
-writes `pendingHatch` when it lands, which on a cold species cache is minutes
-later — roughly 649 fetches after the response went out. With polling on, the
-next poll collects it. With polling off and no frame, the egg never opens.
+The two prefetch writes are the ones that would be missed by anyone enumerating
+the obvious sites, and one of them **was** missed on this design's first pass —
+the table above originally listed only `pendingHatch`. Both are fired unawaited
+by `prefetchOnce` from the panel's own route and land long after that response
+went out, which on a cold species cache is minutes and roughly 649 fetches. With
+polling on, the next poll collects them. With polling off and no frame, the egg
+never opens and the Ditto never reveals — a companion waiting on a write that
+has already happened, forever.
+
+Recorded rather than quietly corrected because the shape of the mistake is the
+useful part: both are writes that no request and no route return value is
+attached to, so an enumeration that walks the handlers finds neither.
 
 The mutation routes are the three where a frame is arguably redundant: the panel
 that made the request already invalidates its own queries on success. They emit
