@@ -316,3 +316,30 @@ test("a save that will not parse is never overwritten, however contended", async
   expect(kept?.state).toBe("{oh no");
   expect(serialiseState(freshState())).not.toBe(kept?.state);
 });
+// ------------------------------------------------------------------- dialect
+
+test("no statement in src/ uses a placeholder only SQLite understands", async () => {
+  /*
+    The one rule in this migration that nothing else can catch.
+
+    `preparePluginSql` expands `{{name}}` and rewrites nothing else, so a `?`
+    reaches Postgres verbatim and the statement fails — on a clustered install
+    only, at runtime, in whichever path happens to run it. Every test in this
+    repository runs on SQLite, which accepts both spellings, so the suite is
+    exactly the wrong instrument: it is green either way.
+
+    Read as source text rather than by exercising a query, because the failure is
+    a statement nobody ran on the backend that refuses it.
+  */
+  const sources = new Bun.Glob("*.ts").scan({ cwd: new URL("../src", import.meta.url).pathname });
+  const offenders: string[] = [];
+  for await (const name of sources) {
+    const text = await Bun.file(new URL(`../src/${name}`, import.meta.url).pathname).text();
+    // Every string literal, in either quoting style this codebase uses for SQL.
+    for (const literal of text.match(/`[^`]*`|"[^"\n]*"/g) ?? []) {
+      if (!/\b(INSERT|UPDATE|DELETE|SELECT)\b/i.test(literal)) continue;
+      if (literal.includes("?")) offenders.push(`${name}: ${literal.slice(0, 60)}`);
+    }
+  }
+  expect(offenders).toEqual([]);
+});
