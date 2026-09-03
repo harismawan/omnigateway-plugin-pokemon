@@ -132,10 +132,18 @@ test("a purchase debits once when two replicas price it against one wallet", asy
   const after = await readCompanion(storage, KEY);
   expect(after?.tokensSpent).toBe(ITEM_PRICES.rareCandy);
   expect(after?.state?.inventory.rareCandy).toBe(1);
-  // Both saw the same wallet and both produced the same save, so both are told
-  // the purchase they asked for happened — and it did, once. What may never
-  // happen is the debit landing twice, which is the assertion above.
-  expect([one.ok, two.ok]).toEqual([true, true]);
+  // One debit, one candy, and exactly one caller told the purchase happened. The
+  // refusal is honest rather than unfortunate: that caller's own `UPDATE` matched
+  // nothing, so it hears `stale` and its wallet was never touched. The version
+  // that inferred the outcome from a later read told both of them yes — and, in
+  // the window where somebody wrote in between, told the one that *had* debited
+  // that it failed.
+  expect([one.ok, two.ok].filter(Boolean)).toHaveLength(1);
+  expect([one, two].find((result) => !result.ok)).toEqual({ ok: false, reason: "stale" });
+  // The winner answers with the balance the row now holds, taken from the
+  // statement that debited it rather than computed from the read before it.
+  const winner = [one, two].find((result) => result.ok);
+  expect(winner?.ok === true ? wallet(winner.row) : null).toBe(10);
 });
 
 test("a wallet that only covers one purchase cannot fund two different ones", async () => {

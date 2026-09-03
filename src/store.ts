@@ -989,23 +989,26 @@ export async function purchase(
     if ("refused" in outcome) return { ok: false, reason: outcome.refused };
     const nextState = outcome.applied;
     const serialised = serialiseState(nextState);
-    await storage.run(
+    // `RETURNING` for the reason `writeState` uses it, and it matters most here.
+    // Inferring the outcome from a later read cannot tell "somebody wrote after
+    // me" from "my write never landed" — and those two answers differ by a
+    // wallet: the second reports a purchase that was in fact debited as failed,
+    // which is the "fail closed for money" rule failing in the direction that
+    // loses the money.
+    const spent = await storage.get<{ tokens_spent: number | string }>(
       `UPDATE {{companion}}
        SET state = $1, tokens_spent = tokens_spent + $2, updated_at = $3
-       WHERE api_key_id = $4 AND state = $5 AND tokens_total - tokens_spent >= $2`,
+       WHERE api_key_id = $4 AND state = $5 AND tokens_total - tokens_spent >= $2
+       RETURNING tokens_spent`,
       [serialised, price, now, apiKeyId, row.raw],
     );
-    const after = await readCompanion(storage, apiKeyId);
-    // Read back rather than counted, because `run` reports no row count — and
-    // read as a whole row because the answer is two facts: the save is the one
-    // this purchase produced, and the debit that had to accompany it landed.
-    if (
-      after === null ||
-      after.raw !== serialised ||
-      after.tokensSpent !== row.tokensSpent + price
-    ) {
-      return { ok: false, reason: "stale" };
-    }
-    return { ok: true, row: after };
+    if (spent === null) return { ok: false, reason: "stale" };
+    return {
+      ok: true,
+      // The debited total straight from the statement that debited it, so the
+      // wallet this answers with is the row's rather than one computed from a
+      // balance read before the write.
+      row: { ...row, state: nextState, raw: serialised, tokensSpent: num(spent.tokens_spent) },
+    };
   }
 }
