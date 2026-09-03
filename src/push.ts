@@ -134,9 +134,14 @@ export function createPusher(deps: PusherDeps): Pusher {
       // The one frame nobody else is holding. A leading frame is raised inside a
       // route handler or inside the event path's own guard, both of which catch;
       // this one is raised by a timer, where a throw out of the host's transport
-      // is an uncaught exception with the gateway's process behind it. Swallowed
-      // rather than logged, because the panel's own poll is the recovery and a
-      // logger is not something this module has.
+      // is an uncaught exception with the gateway's process behind it.
+      //
+      // Swallowed rather than logged because this module has no logger — not
+      // because the loss is cheap. A panel being pushed has turned its poll off,
+      // so nothing recovers a dropped trailing frame except the next write's,
+      // which on a busy key is seconds and on an idle one is never. The trade is
+      // one frame against the process, and `pending` is already cleared above,
+      // so no key is left stuck.
     }
   };
 

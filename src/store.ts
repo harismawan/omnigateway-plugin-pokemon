@@ -501,7 +501,12 @@ function digest(input: string): string {
     a = Math.imul(a ^ code, 16777619);
     b = Math.imul(b ^ (code + i), 16777619);
   }
-  return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}`;
+  // Padded, so the join is injective. Base 36 of a 32-bit value is one to seven
+  // characters, and two variable-length halves concatenated are ambiguous:
+  // `(1, 1261)` and `(71, 1)` both spell `1z1`. It costs a factor of two on an
+  // event already at 2^-64, which is not why it is here — a hash whose halves
+  // can be read two ways is one nobody can reason about at all.
+  return `${(a >>> 0).toString(36).padStart(7, "0")}${(b >>> 0).toString(36).padStart(7, "0")}`;
 }
 
 /**
@@ -995,20 +1000,31 @@ export async function purchase(
     // wallet: the second reports a purchase that was in fact debited as failed,
     // which is the "fail closed for money" rule failing in the direction that
     // loses the money.
-    const spent = await storage.get<{ tokens_spent: number | string }>(
+    const debited = await storage.get<{
+      tokens_spent: number | string;
+      tokens_total: number | string;
+    }>(
       `UPDATE {{companion}}
        SET state = $1, tokens_spent = tokens_spent + $2, updated_at = $3
        WHERE api_key_id = $4 AND state = $5 AND tokens_total - tokens_spent >= $2
-       RETURNING tokens_spent`,
+       RETURNING tokens_spent, tokens_total`,
       [serialised, price, now, apiKeyId, row.raw],
     );
-    if (spent === null) return { ok: false, reason: "stale" };
+    if (debited === null) return { ok: false, reason: "stale" };
     return {
       ok: true,
-      // The debited total straight from the statement that debited it, so the
-      // wallet this answers with is the row's rather than one computed from a
-      // balance read before the write.
-      row: { ...row, state: nextState, raw: serialised, tokensSpent: num(spent.tokens_spent) },
+      // **Both** counters from the statement that moved one of them. Taking only
+      // the debit and keeping the total from the read above it made the answered
+      // wallet an under-report whenever a credit landed mid-purchase — harmless,
+      // since the row itself was right and the next poll corrected it, but the
+      // panel would show a balance nobody had.
+      row: {
+        ...row,
+        state: nextState,
+        raw: serialised,
+        tokensSpent: num(debited.tokens_spent),
+        tokensTotal: num(debited.tokens_total),
+      },
     };
   }
 }

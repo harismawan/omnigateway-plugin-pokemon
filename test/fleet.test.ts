@@ -7,10 +7,13 @@ import {
   creditTokens,
   lastGrantedAt,
   listCompanions,
+  listSightings,
   MIGRATIONS,
   purchase,
   readCompanion,
   readDex,
+  recordGraduation,
+  recordSightings,
   settle,
   wallet,
   writeState,
@@ -243,7 +246,7 @@ test("a second use of an item held once is refused once the first has landed", a
   expect(second).toEqual({ ok: false, reason: "none-held" });
 });
 
-test("one window pays one replica, and the loser reads back an instant that is not its own", async () => {
+test("one window pays one replica, and the loser is told so by its own statement", async () => {
   const previous = await lastGrantedAt(storage, KEY, "tokens:1w");
   expect(previous).toBeNull();
 
@@ -444,26 +447,56 @@ test("a BIGINT column arriving as a string is still a number by the time it is r
   /*
     Bun's Postgres driver hands a 64-bit column back as a **string** rather than
     narrowing it into a double on its own; `bun:sqlite` hands back a number. Every
-    instant and every counter this plugin stores is `BIGINT` — an epoch
-    millisecond does not fit in `int4` and neither does a shiny charm — so on a
-    clustered install every one of them arrives as text.
+    instant and every accumulating counter this plugin stores is `BIGINT` — an
+    epoch millisecond does not fit in `int4` and neither does a shiny charm — so
+    on a clustered install every one of them arrives as text.
 
-    Nothing else here can catch that: SQLite is the only backend these suites
-    run against, and it is the one that does not do it. So the driver is
-    imitated instead — every number a query returns is handed back as a string,
-    and the mappers must still answer with numbers that add up.
+    Nothing else here can catch that: SQLite is the only backend these suites run
+    against, and it is the one that does not do it. So the driver is imitated —
+    but only for the columns that are actually `BIGINT`. Stringifying *every*
+    number would be a worse imitation than none: `is_shiny` and the species ids
+    are `INTEGER`, Postgres narrows those to numbers, and a wrapper that turned
+    them into strings would fail `is_shiny === 1` for a reason no backend has.
   */
   await seed(4_000);
+  await claimGrant(storage, KEY, "tokens:1w", null, 12_345_678_901);
   const seeded = await readCompanion(storage, KEY);
   if (seeded?.state == null) throw new Error("no companion");
-  await claimGrant(storage, KEY, "tokens:1w", null, 12_345_678_901);
+  await recordGraduation(
+    storage,
+    KEY,
+    {
+      baseId: 1,
+      finalId: 3,
+      chainOrder: [1, 2, 3],
+      stageTimes: [1, 2, 3],
+      rarity: "common",
+      isShiny: true,
+      nature: "hardy",
+      caughtAt: 9_876_543_210,
+    },
+    "dex-1",
+  );
+  await recordSightings(
+    storage,
+    KEY,
+    {
+      plannedPath: [1],
+      stageIndex: 0,
+      stageTimes: [8_765_432_109],
+      rarity: "common",
+      isShiny: true,
+      disguised: false,
+    },
+    1,
+  );
 
   const asPostgres: typeof storage = {
     ...storage,
     get: async <T>(sql: string, params?: readonly unknown[]) =>
-      stringifyNumbers(await storage.get<T>(sql, params)) as T | null,
+      widen(await storage.get<T>(sql, params)) as T | null,
     all: async <T>(sql: string, params?: readonly unknown[]) =>
-      (await storage.all<T>(sql, params)).map((row) => stringifyNumbers(row) as T),
+      (await storage.all<T>(sql, params)).map((row) => widen(row) as T),
   };
 
   const row = await readCompanion(asPostgres, KEY);
@@ -473,22 +506,49 @@ test("a BIGINT column arriving as a string is still a number by the time it is r
   // subtracting, and a wallet renders as nonsense rather than as an error.
   expect(wallet(row as NonNullable<typeof row>)).toBe(4_000);
 
-  const listed = await listCompanions(asPostgres);
-  expect(listed[0]?.tokensTotal).toBe(4_000);
+  expect((await listCompanions(asPostgres))[0]?.tokensTotal).toBe(4_000);
   expect(await lastGrantedAt(asPostgres, KEY, "tokens:1w")).toBe(12_345_678_901);
+
+  const dex = await readDex(asPostgres, KEY);
+  expect(dex[0]?.caughtAt).toBe(9_876_543_210);
+  // The `INTEGER` columns beside it still read as themselves.
+  expect(dex[0]?.isShiny).toBe(true);
+  expect(dex[0]?.finalId).toBe(3);
+
+  const sightings = await listSightings(asPostgres, KEY);
+  expect(sightings[0]?.seenAt).toBe(8_765_432_109);
+  expect(sightings[0]?.speciesId).toBe(1);
+  expect(sightings[0]?.isShiny).toBe(true);
 });
 
-/** Every number in a row as the Postgres driver would hand a `BIGINT` back. */
-function stringifyNumbers(row: unknown): unknown {
+/**
+ * A row as the Postgres driver would hand it back: `BIGINT` columns as strings,
+ * everything else unchanged.
+ *
+ * Named per column rather than by type, because that is how the driver decides
+ * — `int8` becomes a string, `int4` does not — and a wrapper that guessed from
+ * the JavaScript type would model neither backend.
+ */
+const BIGINT_COLUMNS = new Set([
+  "tokens_total",
+  "tokens_spent",
+  "created_at",
+  "updated_at",
+  "last_credit_at",
+  "caught_at",
+  "granted_at",
+  "seen_at",
+]);
+
+function widen(row: unknown): unknown {
   if (row === null || typeof row !== "object") return row;
   return Object.fromEntries(
     Object.entries(row as Record<string, unknown>).map(([key, value]) => [
       key,
-      typeof value === "number" ? String(value) : value,
+      BIGINT_COLUMNS.has(key) && typeof value === "number" ? String(value) : value,
     ]),
   );
 }
-
 test("no statement in src/ uses a placeholder only SQLite understands", async () => {
   /*
     The one rule in this migration that nothing else can catch.

@@ -96,8 +96,14 @@ crash window between two writes and cost every concurrent settle on the default 
 remains is the ordering, plus ids that make a repeat idempotent.
 
 Ids are derived from stored facts: `${apiKeyId}:${digest(theSave)}:${index}`. A retried or
-duplicated settle over the same save produces the same id, and the insert is
-`ON CONFLICT (id) DO NOTHING`, so it is idempotent rather than merely unlikely to collide.
+duplicated settle over the same save produces **exactly** the same id, and the insert is
+`ON CONFLICT (id) DO NOTHING`, so the repeat is idempotent rather than merely unlikely to
+collide — that direction is arithmetic, not probability.
+
+Distinctness is the other direction and is probabilistic: two *different* saves collide with the
+likelihood of a 64-bit digest, within one key, which for a Dex of ten thousand rows is around
+5e-12. Measured rather than assumed — 400 000 realistic saves produced single-pass collisions at
+the rate a random 32-bit function would and none in both passes at once.
 
 **The save, not its `consumedTotal`, and that correction cost a Pokédex entry to find.** That
 number moves with traffic, and growth arrives without any: an everstone banks it, a rare candy
@@ -190,12 +196,16 @@ strings and a wallet renders as `NaN`.
   and every test still passed — the inference is only wrong when somebody writes in between.
   It survived on the one path where being wrong costs a wallet. Found by re-checking each
   finding against the code rather than against the memory of having fixed it.
-- The SQL was driven once through the host's **real** `PluginRepo` rather than the mirror in
-  `test/helpers/storage.ts` — migrations 1 to 7 through the actual guard, `RETURNING` on the
-  `UPDATE` and on both conflict clauses, and a counter and an instant past `int4` round-tripped.
-  It cannot be kept as a test in either repository: the host may not depend on a plugin, and a
-  plugin cannot import the unpublished `@omni/store`. That gap is why the mirror exists and why
-  it has to be re-run by hand when either side moves.
+- The SQL was driven once through the host's **real** `PluginRepo`, on **SQLite**, rather than
+  the mirror in `test/helpers/storage.ts` — migrations 1 to 7 through the actual guard, and
+  `RETURNING` on the `UPDATE` and on both conflict clauses. Naming the backend matters, because
+  the values past `int4` that were passed through it prove nothing there: SQLite stored those
+  before the column widths were corrected too. **The Postgres half is verified by reading and by
+  documented semantics, not by execution** — there is no Postgres on this machine — and that is
+  the weakest link in this whole design.
+  It cannot be kept as a test in either repository either: the host may not depend on a plugin,
+  and a plugin cannot import the unpublished `@omni/store`. That gap is why the mirror exists,
+  and why it has to be re-run by hand when either side moves.
 - Three of the findings above — the column widths, the false negative, and the Dex id — were
   found by review with runnable probes rather than by any suite here, because all three are
   invisible on SQLite or need two writers. Two are now pinned by `test/fleet.test.ts` (a
