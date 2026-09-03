@@ -254,8 +254,17 @@ export function collect(
  * whose individual has not graduated yet — a wrong panel with nothing on it to
  * say so.
  */
-export function readCollection(storage: PluginStorage, apiKeyId: string): SpeciesRecord[] {
-  return collect(readDex(storage, apiKeyId), listSightings(storage, apiKeyId));
+export async function readCollection(
+  storage: PluginStorage,
+  apiKeyId: string,
+): Promise<SpeciesRecord[]> {
+  // Together rather than in series: two independent reads of one key, and the
+  // panel waits for both either way.
+  const [dex, sightings] = await Promise.all([
+    readDex(storage, apiKeyId),
+    listSightings(storage, apiKeyId),
+  ]);
+  return collect(dex, sightings);
 }
 
 /**

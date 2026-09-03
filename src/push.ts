@@ -77,6 +77,17 @@ export type Pusher = {
 
 export type PusherDeps = {
   send: (connectionId: string, payload: ActivityFrame) => void;
+  /**
+   * Delivers to every connection holding this channel, on every replica.
+   *
+   * `PluginChannel.broadcast`, which arrived in `@omnigateway/plugin-api` 0.4.0
+   * without a generation bump — so it is optional here for the same reason every
+   * capability is: an older gateway does not have it, and the plugin degrades
+   * rather than throws. Degradation is `send` to this process's own listeners,
+   * which is exactly what shipped before, correct on one process and blind on a
+   * fleet.
+   */
+  broadcast?: (payload: ActivityFrame) => void;
   now: Clock;
   floorMs?: number;
   schedule?: Schedule;
@@ -104,8 +115,14 @@ export function createPusher(deps: PusherDeps): Pusher {
   /** Keys with a trailing frame already armed, and how to call it off. */
   const pending = new Map<string, () => void>();
 
+  const broadcast = deps.broadcast;
+
   const send = (apiKeyId: string): void => {
     lastSent.set(apiKeyId, deps.now());
+    if (broadcast !== undefined) {
+      broadcast({ apiKeyId });
+      return;
+    }
     for (const connectionId of listeners) deps.send(connectionId, { apiKeyId });
   };
 
@@ -122,6 +139,11 @@ export function createPusher(deps: PusherDeps): Pusher {
     leave(connectionId) {
       listeners.delete(connectionId);
       if (listeners.size > 0) return;
+      // A broadcast reaches an audience this process cannot see, so an empty
+      // local listener set is not an empty audience and nothing pending may be
+      // cancelled on the strength of it. Every pending entry fires within one
+      // floor, so there is nothing to leak.
+      if (broadcast !== undefined) return;
       // Nobody left to receive it. A plugin gets no teardown hook — a
       // `PluginSetupResult` is `{ routes }` — so this is the only moment a
       // pending timer can be cleaned up, and without it the "no audience, no
@@ -137,9 +159,20 @@ export function createPusher(deps: PusherDeps): Pusher {
     },
 
     push(apiKeyId) {
-      // Before anything is recorded, so an install whose panel is closed pays
-      // nothing at all: no map entry, no timer, no frame.
-      if (listeners.size === 0) return;
+      /*
+        Before anything is recorded, so an install whose panel is closed pays
+        nothing at all: no map entry, no timer, no frame.
+
+        **Only while frames cannot leave this process.** A replica's own listener
+        set says nothing about the fleet's: the panel is connected to whichever
+        pod the balancer picked, and the write that matters happened wherever the
+        request landed. Suppressing here is what made a cluster's panel go quiet,
+        so with a broadcast available the frame goes out regardless of who is
+        holding this process's sockets. What bounds it is the floor below and the
+        fact that this is called on writes only — an idle key costs nothing
+        either way.
+      */
+      if (broadcast === undefined && listeners.size === 0) return;
 
       // Inside the floor with a trailing frame already armed. Nothing to update
       // — every frame about this key is identical — and the timer is

@@ -54,14 +54,23 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
    filesystem module, which is why no test can touch the network or a real directory by accident.
 3. A capability the manifest does not declare is absent from the context, and code must degrade
    rather than throw: no `net` means an egg holds its progress and the sprite route answers 503, and
-   no `channels` means nothing is pushed and the panel falls back to its ten-second poll.
+   no `channels` means nothing is pushed and the panel falls back to its ten-second poll. A member
+   added to a capability without a generation bump — `PluginChannel.broadcast` is the one — is
+   feature-detected and falls back, because a manifest cannot ask for it.
 4. The manifest is a guardrail, not a sandbox. A plugin shares the gateway's process and can import
    past all of it. What the declaration buys is that accidental overreach is impossible and that
    intent is auditable from one readable file.
 5. The panel talks to its own backend through the SDK's `api`, which is bound to
    `/api/plugins/pokemon/`. It does not reach the console's own API, and a path that tries is
    refused rather than normalised.
-6. Nintendo and Game Freak assets are **never vendored** — not into the repository, the npm package,
+6. **One installation is several replicas.** Every storage call is asynchronous, SQL is written in
+   the `$1` dialect both SQLite and Postgres accept, and every write to `{{companion}}.state` goes
+   through `writeState` — a compare-and-swap against `CompanionRow.raw`, the stored text. Never
+   re-serialise the parsed state as the expected value: `parseState` clamps and defaults, so a save
+   that round-trips to different bytes would never match itself. A lost swap is reported, never
+   retried, except the candy grant, whose window is already claimed. Design:
+   `docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
+7. Nintendo and Game Freak assets are **never vendored** — not into the repository, the npm package,
    or any built artifact. They are fetched at runtime and cached in the plugin's scoped data
    directory.
 
@@ -87,7 +96,9 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 - Test-first. Write the failing test, watch it fail for the reason you expect, then implement.
 - Prefer behaviour tests at the narrowest stable boundary. Pure logic (`advance`, `roll`, `balance`,
   `activityOf`) is tested without a renderer or a database.
-- `test/helpers/storage.ts` mirrors the host's storage rules; it does not share them. `@omni/store`
+- `test/helpers/storage.ts` mirrors the host's storage rules, **including its core-table denylist
+  and its hand-rolled `BEGIN`/`COMMIT`** — `db.transaction` takes a synchronous function and would
+  commit before an awaited statement ran. It does not share them. `@omni/store`
   is unpublished, so an external plugin cannot test against the code that will run its SQL. When the
   host's rules change, that mirror must change with them or migrations pass here and fail at boot.
   `src/push.ts` is the same arrangement for `apps/gateway/src/stream/coalescer.ts`: a mirror of an
@@ -126,6 +137,10 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 - Growth counters only ever increase and are never recomputed from `request_logs`: retention prunes
   that table, and a recomputed meter runs backwards after a sweep — a Pokémon de-evolving because an
   operator tidied a database.
+- **A frame is broadcast, not sent per connection.** A `connectionId` is meaningful only on the
+  replica whose socket produced it, so `send` reaches the panels that happen to share a pod with the
+  code calling it. The pusher takes `broadcast` when the host has it and gives up "no audience, no
+  work" in exchange: this process's listener set says nothing about the fleet's.
 - **A frame goes out on every write to `{{companion}}` and on no read.** Both halves are
   load-bearing. The panel turns its poll off while the channel is pushed, so a write that does not
   push is a screen that stops updating with nothing to correct it — and a read that pushes is a

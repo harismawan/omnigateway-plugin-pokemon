@@ -84,6 +84,16 @@ declaring 1 is skipped at boot by a host implementing 2, so the number had to
 move regardless. See
 `2026-08-31-live-companion-channel-design.md`, which owns the channel.
 
+**Amended 2026-09-03.** The manifest declares `"api": 3`, and with it every
+storage call is asynchronous. The generation bump is again the host's — plugin
+API 3 is `ctx.storage` returning promises, which is what lets a store other than
+SQLite serve plugin storage — but a manifest declaring 2 is skipped at boot by a
+host implementing 3. The same amendment retires the argument recorded later in
+this design that a purchase needs no guard because the process is single-threaded:
+an installation is now a fleet of replicas over one database, and every write is
+conditional on the save it was computed from. See
+`2026-09-03-multi-pod-deployment-design.md`.
+
 The host hands it a `fetch` bound to that allowlist; a request to any other
 origin is refused by the host, not by convention.
 

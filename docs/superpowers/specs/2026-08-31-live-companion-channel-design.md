@@ -19,6 +19,16 @@ Plugin API generation 2 removes the reason. `ctx.channels` opens a named topic o
 the gateway's push socket, and `@omnigateway/dashboard-sdk` 0.1.4 gives the panel
 `usePluginChannel` to hold one. This design adopts both.
 
+**Amended 2026-09-03.** A frame is `broadcast` rather than `send`, where the host
+offers it (`@omnigateway/plugin-api` 0.4.0). A `connectionId` is meaningful only
+on the replica whose socket produced it, so on a clustered gateway `send` reached
+the panels that happened to share a pod with the code calling it — and the poll
+this design switches off was the only thing that had been covering the gap. With
+it goes "no audience, no work": this process's listener set says nothing about the
+fleet's, so a frame goes out whether or not anyone is connected *here*. The floor
+below is unchanged and is what bounds the cost. See
+`2026-09-03-multi-pod-deployment-design.md`.
+
 ## What this is not
 
 It is not a second copy of companion state on the wire. A frame carries

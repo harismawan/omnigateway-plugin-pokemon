@@ -5,7 +5,7 @@
     "": {
       "name": "omnigateway-plugin-pokemon",
       "dependencies": {
-        "@omnigateway/plugin-api": "^0.2.1",
+        "@omnigateway/plugin-api": "^0.3.0",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.5.7",
@@ -65,7 +65,7 @@
 
     "@omnigateway/dashboard-sdk": ["@omnigateway/dashboard-sdk@0.1.4", "", { "dependencies": { "@omnigateway/plugin-api": "^0.2.0" }, "peerDependencies": { "@tanstack/react-query": ">=5", "react": ">=19", "react-dom": ">=19", "styled-components": ">=6" } }, "sha512-K6q52cYXz5yXvVUfJzwgT55HsuaF54CxrR/W6P6EiPy7cF3q0XLe91nl0eoc4E101ciHFxa+KR5lPT2Dzlzrkw=="],
 
-    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.2.1", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-6QFGpZe118qZInKwwXJC7x56b+CHu6JCJB7VRDh63hmmuXOS8rTDPLd4Zyj5toWLvP+qDClU0WCwzi0vSoTPcw=="],
+    "@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.3.0", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-CBIdCxoWmK1jGkdNjcnrwnqk5FWFrpV8T3q7Xxz02GrbPItx7Q3AtyF6KII3W+TBQSoFK2JaKolWIMuwrOrNOA=="],
 
     "@tanstack/query-core": ["@tanstack/query-core@5.101.4", "", {}, "sha512-gNwcvOJcRbLWPOLG/2OBm+zM+Yv+MKsXKEOWC57USuZDEsI71hEErQsiEGx5wX9rzWWkfwM0fVSPoiIFSsxfiw=="],
 
@@ -188,5 +188,7 @@
     "ws": ["ws@8.21.3", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw=="],
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+
+    "@omnigateway/dashboard-sdk/@omnigateway/plugin-api": ["@omnigateway/plugin-api@0.2.1", "", { "dependencies": { "zod": "4.4.3" } }, "sha512-6QFGpZe118qZInKwwXJC7x56b+CHu6JCJB7VRDh63hmmuXOS8rTDPLd4Zyj5toWLvP+qDClU0WCwzi0vSoTPcw=="],
   }
 }

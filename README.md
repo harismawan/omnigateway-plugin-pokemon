@@ -77,11 +77,32 @@ did before 1.3.0.
 
 ### Host requirements
 
-This release declares `"api": 2` and needs a gateway implementing plugin API
-generation 2 — `@omnigateway/plugin-api` 0.2.x, shipped in OmniGateway 0.6.0 and
-later. A host on generation 1 skips the plugin at boot, server half included,
-and says so in one line; `omni plugin verify pokemon` reaches the same verdict
-without restarting anything. 1.2.2 remains the release for a generation-1 host.
+This release declares `"api": 3` and needs a gateway implementing plugin API
+generation 3 — `@omnigateway/plugin-api` 0.3.0 or later, which is where plugin
+storage became asynchronous. A host on an earlier generation skips the plugin at
+boot, server half included, and says so in one line; `omni plugin verify pokemon`
+reaches the same verdict without restarting anything. 1.3.x remains the release
+for a generation-2 host.
+
+### Running the gateway as several replicas
+
+Supported, and nothing needs configuring. The plugin uses one dialect both
+backends accept, and every write is conditional on the save it was computed from,
+so two replicas settling, buying or granting against one row cannot lose each
+other's work — see
+`docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
+
+The panel keeps up across pods when the gateway offers
+`PluginChannel.broadcast` (`@omnigateway/plugin-api` 0.4.0 and later): a frame
+then reaches every replica's sockets rather than the one that happened to serve
+the request. On an older host the plugin falls back to pushing to its own
+process's panels, which is correct on a single process and means a clustered
+panel sees only what its own pod wrote.
+
+Two things stay per pod, both caches of immutable facts: the species and sprite
+files under the plugin's data directory, which each replica fetches once, and the
+in-memory name lookups built from them. A cold cache is an ordinary state — the
+panel shows `#25` until the name arrives.
 
 The panel additionally needs `@omnigateway/dashboard-sdk` 0.1.4 or later, which
 is where `usePluginChannel` arrives. A console below it disables **only** the

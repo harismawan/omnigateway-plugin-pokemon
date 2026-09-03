@@ -99,11 +99,23 @@ function completed(over: Partial<RequestCompleted> = {}): RequestCompleted {
   };
 }
 
+/**
+ * Waits for an event handler to finish.
+ *
+ * The host's handler signature returns `void` and the plugin's handler bodies
+ * are asynchronous now, so firing an event hands back nothing to await — the
+ * plugin runs them through its own `detach`. Every promise behind one of those
+ * bodies is SQLite already resolved, so a handler settles in microtasks and one
+ * macrotask is past all of them.
+ */
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 /** Credits a flat number of tokens through the event path, as a request would. */
-function spend(tokens: number, requestId = `req_${Math.trunc(tokens)}`): void {
+async function spend(tokens: number, requestId = `req_${Math.trunc(tokens)}`): Promise<void> {
   onRequest?.(
     completed({ requestId, tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0 } }),
   );
+  await flush();
 }
 
 /**
@@ -114,8 +126,8 @@ function spend(tokens: number, requestId = `req_${Math.trunc(tokens)}`): void {
  * or the next `advance` walks the difference and the fixture stops being the
  * thing under test.
  */
-function plant(state: Record<string, unknown>): void {
-  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+async function plant(state: Record<string, unknown>): Promise<void> {
+  await storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
     JSON.stringify(state),
     KEY,
   ]);
@@ -264,7 +276,7 @@ async function namedBy(route: PluginRoute, apiKeyId: string): Promise<string> {
  */
 async function prefetched(apiKeyId: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt++) {
-    const pending = readCompanion(storage, apiKeyId)?.state?.pendingHatch;
+    const pending = (await readCompanion(storage, apiKeyId))?.state?.pendingHatch;
     if (pending !== null && pending !== undefined) return;
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
@@ -309,7 +321,10 @@ async function boot(
     logger: {
       debug: () => {},
       info: (message, fields) => logged.push({ message, event: fields?.event }),
-      warn: () => {},
+      // Recorded as well as `info`, because a handler that fails now says so
+      // here and nowhere else: the plugin runs every event body through its own
+      // `detach`, which catches the rejection the host cannot see.
+      warn: (message, fields) => logged.push({ message, event: fields?.event }),
       error: () => {},
     },
     storage,
@@ -394,7 +409,7 @@ test("the plugin subscribes to both events and exposes its routes", async () => 
 
 test("a finished request credits its key and nobody else", async () => {
   await boot();
-  spend(1_234);
+  await spend(1_234);
   onRequest?.(
     completed({
       requestId: "req_x",
@@ -402,9 +417,10 @@ test("a finished request credits its key and nobody else", async () => {
       tokens: { input: 99, output: 0, cacheRead: 0, cacheWrite: 0 },
     }),
   );
+  await flush();
 
-  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_234);
-  expect(readCompanion(storage, "key_other")?.tokensTotal).toBe(99);
+  expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(1_234);
+  expect((await readCompanion(storage, "key_other"))?.tokensTotal).toBe(99);
 });
 
 test("all four token classes count toward growth", async () => {
@@ -413,13 +429,14 @@ test("all four token classes count toward growth", async () => {
   // cache-heavy install's growth.
   await boot();
   onRequest?.(completed({ tokens: { input: 1, output: 10, cacheRead: 100, cacheWrite: 1_000 } }));
-  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_111);
+  await flush();
+  expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(1_111);
 });
 
 test("the operator's multiplier scales credits and is never retroactive", async () => {
   await boot({ multiplier: 10 });
-  spend(1_000);
-  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(10_000);
+  await spend(1_000);
+  expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(10_000);
 });
 
 test("a nonsense multiplier falls back to 1 rather than zeroing growth", async () => {
@@ -429,8 +446,8 @@ test("a nonsense multiplier falls back to 1 rather than zeroing growth", async (
     storage.close();
     storage = createTestStorage();
     await boot({ multiplier });
-    spend(500);
-    expect(readCompanion(storage, KEY)?.tokensTotal).toBe(500);
+    await spend(500);
+    expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(500);
   }
 });
 
@@ -439,9 +456,9 @@ test("an egg with no species available holds its progress instead of losing it",
   // incubation has to survive that, or an outage silently costs a player their
   // egg.
   await boot();
-  spend(EGG_HATCH_THRESHOLD * 2);
+  await spend(EGG_HATCH_THRESHOLD * 2);
 
-  const row = readCompanion(storage, KEY);
+  const row = await readCompanion(storage, KEY);
   expect(row?.state?.active).toBeNull();
   expect(row?.state?.eggUsage).toBe(EGG_HATCH_THRESHOLD * 2);
   expect(row?.tokensTotal).toBe(EGG_HATCH_THRESHOLD * 2);
@@ -451,8 +468,8 @@ test("a companion hatches, grows and graduates into the Dex", async () => {
   // The whole arc through the real event path. The species is planted directly,
   // because rolling one needs the network and this test does not.
   await boot();
-  spend(1_000);
-  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+  await spend(1_000);
+  await storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
     JSON.stringify({
       consumedTotal: 1_000,
       active: null,
@@ -472,14 +489,14 @@ test("a companion hatches, grows and graduates into the Dex", async () => {
     KEY,
   ]);
 
-  spend(EGG_HATCH_THRESHOLD + graduationTotal("common"), "req_big");
+  await spend(EGG_HATCH_THRESHOLD + graduationTotal("common"), "req_big");
 
-  const dex = readDex(storage, KEY);
+  const dex = await readDex(storage, KEY);
   expect(dex).toHaveLength(1);
   expect(dex[0]).toMatchObject({ baseId: 1, finalId: 3, rarity: "common", isShiny: true });
 
   // And it is back to an egg, ready to start again.
-  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
+  expect((await readCompanion(storage, KEY))?.state?.active).toBeNull();
   expect(logged.some((l) => l.event === "companion.graduated")).toBe(true);
 });
 
@@ -491,8 +508,8 @@ test("the panel is sent a species collection, ascending by number", async () => 
   // preserved `readDex`'s `caught_at DESC` would fail here rather than pass by
   // accident. Every stage of both lines is expected, not just the two finals.
   await boot({}, cachedSpecies([{ id: 10, captureRate: 255, forms: 3, finalId: 12 }]));
-  spend(100);
-  recordGraduation(
+  await spend(100);
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -507,7 +524,7 @@ test("the panel is sent a species collection, ascending by number", async () => 
     },
     "dex_newer",
   );
-  recordGraduation(
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -582,7 +599,7 @@ test("a line grown over days dates each stage from the day it was reached", asyn
   if (route === undefined) return;
 
   clock = 1_700_000_100_000;
-  spend(EGG_HATCH_THRESHOLD, "req_hatch");
+  await spend(EGG_HATCH_THRESHOLD, "req_hatch");
   // The roll is fired by the panel route, unawaited, so the egg cannot open
   // until a poll has been through — which is the ordinary case and the reason
   // stage 0 is stamped at the transition rather than when the egg filled up.
@@ -590,18 +607,18 @@ test("a line grown over days dates each stage from the day it was reached", asyn
   await prefetched(KEY);
 
   clock = 1_700_000_200_000;
-  spend(1, "req_open");
+  await spend(1, "req_open");
 
   clock = 1_700_000_300_000;
-  spend(phaseThreshold("common", 3, 0), "req_eleven");
+  await spend(phaseThreshold("common", 3, 0), "req_eleven");
 
   clock = 1_700_000_400_000;
-  spend(phaseThreshold("common", 3, 1), "req_twelve");
+  await spend(phaseThreshold("common", 3, 1), "req_twelve");
 
   clock = 1_700_000_500_000;
-  spend(phaseThreshold("common", 3, 2), "req_grad");
+  await spend(phaseThreshold("common", 3, 2), "req_grad");
 
-  const [graduation] = readDex(storage, KEY);
+  const [graduation] = await readDex(storage, KEY);
   expect(graduation?.chainOrder).toEqual([10, 11, 12]);
   // Three distinct instants, one per stage, and none of them the graduation's
   // own `caught_at` except the last.
@@ -630,19 +647,19 @@ test("a companion still growing is in the Pokédex, without the stages ahead of 
   if (route === undefined) return;
 
   clock = 1_700_000_100_000;
-  spend(EGG_HATCH_THRESHOLD, "req_hatch");
+  await spend(EGG_HATCH_THRESHOLD, "req_hatch");
   await route.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
 
   clock = 1_700_000_200_000;
-  spend(1, "req_open");
+  await spend(1, "req_open");
 
   // One evolution, so the companion sits at stage 1 of a three-stage line and
   // has never graduated anything.
   clock = 1_700_000_300_000;
-  spend(phaseThreshold("common", 3, 0), "req_eleven");
+  await spend(phaseThreshold("common", 3, 0), "req_eleven");
 
-  expect(readDex(storage, KEY)).toEqual([]);
+  expect(await readDex(storage, KEY)).toEqual([]);
 
   const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
   const { dex } = found.json as {
@@ -674,8 +691,8 @@ test("a disguised Ditto stays out of the Pokédex until it reveals", async () =>
   expect(route).toBeDefined();
   if (route === undefined) return;
 
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({
       baseId: 10,
@@ -713,8 +730,8 @@ test("a species seen on a companion survives that companion being rerolled away"
   // the fixture graduates it before it can be rerolled, and the test stops
   // being about rerolling at all.
   clock = 1_700_000_100_000;
-  spend(FRESH_EGG_BASE_PRICE, "req_rich");
-  plant({
+  await spend(FRESH_EGG_BASE_PRICE, "req_rich");
+  await plant({
     consumedTotal: FRESH_EGG_BASE_PRICE,
     active: activeMon({
       baseId: 10,
@@ -739,8 +756,8 @@ test("a species seen on a companion survives that companion being rerolled away"
     body: { kind: "egg", tier: null },
   });
   expect(bought.status ?? 200).toBe(200);
-  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
-  expect(readDex(storage, KEY)).toEqual([]);
+  expect((await readCompanion(storage, KEY))?.state?.active).toBeNull();
+  expect(await readDex(storage, KEY)).toEqual([]);
 
   const found = await route.handler({ params: { id: KEY }, query: {}, body: null });
   const { dex } = found.json as { dex: Array<{ speciesId: number }> };
@@ -754,42 +771,50 @@ test("a weekly ceiling pays at most weekly, and never on the install itself", as
   // frozen clock means a window that can never re-arm — which is exactly what a
   // key parked at its limit should experience.
   await boot();
-  spend(1_000);
+  await spend(1_000);
 
   const limit: LimitReached = { apiKeyId: KEY, dimension: "tokens", window: "1w", at: 2_000 };
-  const candy = () => readCompanion(storage, KEY)?.state?.inventory.rareCandy;
+  const candy = async () => (await readCompanion(storage, KEY))?.state?.inventory.rareCandy;
 
   // First sighting seeds and pays nothing.
   onLimit?.(limit);
-  expect(candy()).toBe(0);
+  await flush();
+  expect(await candy()).toBe(0);
 
   // Still the same instant: a key parked at its ceiling is not a faucet.
   onLimit?.(limit);
+  await flush();
   onLimit?.(limit);
-  expect(candy()).toBe(0);
+  await flush();
+  expect(await candy()).toBe(0);
 
   clock += WINDOW_MS["1w"];
   onLimit?.(limit);
-  expect(candy()).toBe(5);
+  await flush();
+  expect(await candy()).toBe(5);
 
   // And immediately again pays nothing more.
   onLimit?.(limit);
-  expect(candy()).toBe(5);
+  await flush();
+  expect(await candy()).toBe(5);
 
   clock += WINDOW_MS["1w"];
   onLimit?.(limit);
-  expect(candy()).toBe(10);
+  await flush();
+  expect(await candy()).toBe(10);
 });
 
 test("a five-hour window re-arms on its own schedule, not the weekly one", async () => {
   await boot();
-  spend(1_000);
+  await spend(1_000);
   const short: LimitReached = { apiKeyId: KEY, dimension: "requests", window: "5h", at: 1 };
 
   onLimit?.(short);
+  await flush();
   clock += WINDOW_MS["5h"];
   onLimit?.(short);
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(1);
+  await flush();
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(1);
 });
 
 test("a minute ceiling pays nothing, however often it is hit", async () => {
@@ -797,13 +822,14 @@ test("a minute ceiling pays nothing, however often it is hit", async () => {
   // ~144B a day against a 750M–6B graduation. The economy's premise is that
   // growth costs work, and a minute is not a span in which work happened.
   await boot();
-  spend(1_000);
+  await spend(1_000);
   const minute: LimitReached = { apiKeyId: KEY, dimension: "requests", window: "1m", at: 1 };
   for (let i = 0; i < 5; i++) {
     onLimit?.(minute);
+    await flush();
     clock += WINDOW_MS["1m"];
   }
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(0);
 });
 
 test("a key at every ceiling at once is paid for none of them", async () => {
@@ -812,26 +838,34 @@ test("a key at every ceiling at once is paid for none of them", async () => {
   // after the first, up to eleven free candies for a key merely already at its
   // limits.
   await boot();
-  spend(1_000);
+  await spend(1_000);
   for (const dimension of ["tokens", "requests", "spend"] as const) {
     for (const window of ["1w", "5h"] as const) {
       onLimit?.({ apiKeyId: KEY, dimension, window, at: 1 });
+      await flush();
     }
   }
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(0);
 });
 
 test("a limit on a key with no companion is ignored rather than crashing", async () => {
   // Limits fire for keys that have never served a request through this plugin.
+  //
+  // Read from the log rather than from `not.toThrow()`, which is what this was:
+  // the handler body is asynchronous and `detach` catches its rejection, so a
+  // throw is the one shape this failure can no longer take. What it would look
+  // like now is the warning below, and a row for a key that has never earned.
   await boot();
-  expect(() =>
-    onLimit?.({ apiKeyId: "never-seen", dimension: "tokens", window: "1w", at: 1 }),
-  ).not.toThrow();
+  onLimit?.({ apiKeyId: "never-seen", dimension: "tokens", window: "1w", at: 1 });
+  await flush();
+
+  expect(logged.some((entry) => entry.event === "companion.candy.failed")).toBe(false);
+  expect(await readCompanion(storage, "never-seen")).toBeNull();
 });
 
 test("the panel route reports a companion, and 404s for a key without one", async () => {
   await boot();
-  spend(2_000);
+  await spend(2_000);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   expect(route).toBeDefined();
@@ -847,7 +881,7 @@ test("the panel route reports a companion, and 404s for a key without one", asyn
 
 test("buying through the route spends the wallet and leaves growth alone", async () => {
   await boot();
-  spend(ITEM_PRICES.mint * 3);
+  await spend(ITEM_PRICES.mint * 3);
 
   const route = routes.find((r) => r.path === "/keys/:id/purchase");
   expect(route).toBeDefined();
@@ -860,7 +894,7 @@ test("buying through the route spends the wallet and leaves growth alone", async
   });
   expect(bought.status).toBeUndefined();
 
-  const row = readCompanion(storage, KEY);
+  const row = await readCompanion(storage, KEY);
   expect(row?.tokensTotal).toBe(ITEM_PRICES.mint * 3);
   expect(row?.tokensSpent).toBe(ITEM_PRICES.mint);
   expect(row?.state?.inventory.mint).toBe(1);
@@ -868,7 +902,7 @@ test("buying through the route spends the wallet and leaves growth alone", async
 
 test("an unaffordable purchase is refused and changes nothing", async () => {
   await boot();
-  spend(10);
+  await spend(10);
 
   const route = routes.find((r) => r.path === "/keys/:id/purchase");
   const refused = await route?.handler({
@@ -878,7 +912,7 @@ test("an unaffordable purchase is refused and changes nothing", async () => {
   });
 
   expect(refused?.status).toBe(409);
-  expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
+  expect((await readCompanion(storage, KEY))?.tokensSpent).toBe(0);
 });
 
 test("a disguised companion has its reveal resolved before it needs it", async () => {
@@ -887,8 +921,8 @@ test("a disguised companion has its reveal resolved before it needs it", async (
   // written into the save while the disguise is still growing.
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({
       baseId: 10,
@@ -910,7 +944,7 @@ test("a disguised companion has its reveal resolved before it needs it", async (
 
   for (let attempt = 0; attempt < 100; attempt++) {
     await route.handler({ params: { id: KEY }, query: {}, body: null });
-    const pending = readCompanion(storage, KEY)?.state?.pendingReveal;
+    const pending = (await readCompanion(storage, KEY))?.state?.pendingReveal;
     if (pending != null) {
       expect(pending.path[0]).toBe(132);
       // Derived from the fetched capture rate rather than written down here, so
@@ -926,8 +960,8 @@ test("a disguised companion has its reveal resolved before it needs it", async (
 test("an ordinary companion never resolves a reveal it will not use", async () => {
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11], stageIndex: 0 }),
     eggUsage: 0,
@@ -941,7 +975,7 @@ test("an ordinary companion never resolves a reveal it will not use", async () =
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  expect(readCompanion(storage, KEY)?.state?.pendingReveal).toBeNull();
+  expect((await readCompanion(storage, KEY))?.state?.pendingReveal).toBeNull();
   expect(online.calls.filter((url) => url.endsWith("/pokemon-species/132"))).toEqual([]);
 });
 
@@ -951,8 +985,8 @@ test("an item that cannot do anything is refused rather than burned", async () =
   // when a mint has no companion to work on. So the mint vanished, nothing
   // happened, and the route answered `{ ok: true }`.
   await boot();
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     // An egg: there is no nature to reroll.
     active: null,
@@ -969,12 +1003,12 @@ test("an item that cannot do anything is refused rather than burned", async () =
   expect(refused?.status).toBe(409);
   expect(refused?.json).toMatchObject({ error: "no-companion" });
   // The whole point: still two.
-  expect(readCompanion(storage, KEY)?.state?.inventory.mint).toBe(2);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.mint).toBe(2);
 });
 
 /** A companion with an everstone already on it. */
-function pinnedCompanion(): void {
-  plant({
+async function pinnedCompanion(): Promise<void> {
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ everstone: true }),
     eggUsage: 0,
@@ -993,22 +1027,22 @@ test("a pinned companion is released without spending a second stone", async () 
   // so releasing would mean holding a *spare* stone and then spending it to undo
   // the first. Pinning would be a trap rather than a choice.
   await boot();
-  spend(1_000);
-  pinnedCompanion();
+  await spend(1_000);
+  await pinnedCompanion();
 
   const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
   const released = await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
 
   expect(released?.status).toBeUndefined();
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   expect(state?.active?.everstone).toBe(false);
   expect(state?.inventory.everstone).toBe(0);
 });
 
 test("releasing a companion that is not pinned is refused", async () => {
   await boot();
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon(),
     eggUsage: 0,
@@ -1029,8 +1063,8 @@ test("releasing a companion that is not pinned is refused", async () => {
 
 test("a second everstone is refused rather than spent on an already-pinned companion", async () => {
   await boot();
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ everstone: true }),
     eggUsage: 0,
@@ -1051,15 +1085,15 @@ test("a second everstone is refused rather than spent on an already-pinned compa
   });
 
   expect(refused?.status).toBe(409);
-  expect(readCompanion(storage, KEY)?.state?.inventory.everstone).toBe(1);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.everstone).toBe(1);
 });
 
 test("releasing a pinned companion lets its banked growth spend itself", async () => {
   // End to end: the growth accrued while pinned is still there and settles the
   // moment the stone comes off.
   await boot();
-  spend(graduationTotal("common") * 2);
-  plant({
+  await spend(graduationTotal("common") * 2);
+  await plant({
     consumedTotal: graduationTotal("common") * 2,
     // Banked *in* `usedAtStage`, which is where a pinned companion's growth
     // accumulates. Setting only `consumedTotal` would leave nothing to release:
@@ -1084,13 +1118,13 @@ test("releasing a pinned companion lets its banked growth spend itself", async (
   const route = routes.find((r) => r.path === "/keys/:id");
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   // Pinned, so nothing moved.
-  expect(readCompanion(storage, KEY)?.state?.active?.stageIndex).toBe(0);
+  expect((await readCompanion(storage, KEY))?.state?.active?.stageIndex).toBe(0);
 
   const unpin = routes.find((r) => r.path === "/keys/:id/unpin");
   await unpin?.handler({ params: { id: KEY }, query: {}, body: null });
 
-  expect(readCompanion(storage, KEY)?.state?.active).toBeNull();
-  expect(readDex(storage, KEY)).toHaveLength(1);
+  expect((await readCompanion(storage, KEY))?.state?.active).toBeNull();
+  expect(await readDex(storage, KEY)).toHaveLength(1);
 });
 
 test("a lure steers the next roll and is spent by it", async () => {
@@ -1101,9 +1135,9 @@ test("a lure steers the next roll and is spent by it", async () => {
       { id: 20, captureRate: 255, forms: 3, finalId: 22 },
     ]),
   );
-  spend(100);
+  await spend(100);
   // Species 12 already collected, so a lure must produce the other line.
-  recordGraduation(
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -1118,7 +1152,7 @@ test("a lure steers the next roll and is spent by it", async () => {
     },
     "dex_1",
   );
-  plant({
+  await plant({
     consumedTotal: 100,
     active: null,
     eggUsage: 0,
@@ -1135,7 +1169,7 @@ test("a lure steers the next roll and is spent by it", async () => {
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
 
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   expect(state?.pendingHatch?.speciesId).toBe(20);
   // Spent by the roll it shaped, so one purchase buys one hatch.
   expect(state?.lure).toBe(false);
@@ -1146,8 +1180,8 @@ test("a lure with nothing left to find waits rather than being spent", async () 
   // pool, and an empty pool is indistinguishable from "the index has not
   // arrived" — so the egg would quietly never hatch and the lure would be gone.
   await boot({}, cachedSpecies([{ id: 10, captureRate: 255, forms: 3, finalId: 12 }]));
-  spend(100);
-  recordGraduation(
+  await spend(100);
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -1162,7 +1196,7 @@ test("a lure with nothing left to find waits rather than being spent", async () 
     },
     "dex_1",
   );
-  plant({
+  await plant({
     consumedTotal: 100,
     active: null,
     eggUsage: 0,
@@ -1179,7 +1213,7 @@ test("a lure with nothing left to find waits rather than being spent", async () 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
 
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   // It hatched anyway — a duplicate is better than a companion that never comes.
   expect(state?.pendingHatch?.speciesId).toBe(10);
   // And the lure is still there, to be used the day something new exists.
@@ -1187,8 +1221,8 @@ test("a lure with nothing left to find waits rather than being spent", async () 
 });
 
 /** Plants a companion holding `repel` copies, with an optional armed exclusion. */
-function withRepels(count: number, over: Record<string, unknown> = {}): void {
-  plant({
+async function withRepels(count: number, over: Record<string, unknown> = {}): Promise<void> {
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11] }),
     eggUsage: 0,
@@ -1209,8 +1243,8 @@ test("an egg cannot be bought while one is already incubating", async () => {
   // exactly one thing: release the current companion and re-roll. With no
   // companion there is nothing to release, so there is nothing to sell.
   await boot();
-  spend(freshEggPrice(null) * 2);
-  plant({
+  await spend(freshEggPrice(null) * 2);
+  await plant({
     consumedTotal: freshEggPrice(null) * 2,
     active: null,
     eggUsage: 4_000_000,
@@ -1231,7 +1265,7 @@ test("an egg cannot be bought while one is already incubating", async () => {
   });
 
   expect(refused?.status).toBe(409);
-  const row = readCompanion(storage, KEY);
+  const row = await readCompanion(storage, KEY);
   // The incubation is untouched and so is the wallet.
   expect(row?.state?.eggUsage).toBe(4_000_000);
   expect(row?.tokensSpent).toBe(0);
@@ -1241,8 +1275,8 @@ test("an egg is still sold to replace a companion", async () => {
   // The other half, and what the item is actually for: a reroll. The discarded
   // companion is not a graduation, so it never reaches the Dex.
   await boot();
-  spend(freshEggPrice(null) * 2);
-  plant({
+  await spend(freshEggPrice(null) * 2);
+  await plant({
     consumedTotal: freshEggPrice(null) * 2,
     active: activeMon({ usedAtStage: 9_000 }),
     eggUsage: 0,
@@ -1263,10 +1297,10 @@ test("an egg is still sold to replace a companion", async () => {
   });
 
   expect(bought?.status).toBeUndefined();
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   expect(state?.active).toBeNull();
   expect(state?.eggUsage).toBe(0);
-  expect(readDex(storage, KEY)).toHaveLength(0);
+  expect(await readDex(storage, KEY)).toHaveLength(0);
 });
 
 test("a second shiny charm is refused rather than sold", async () => {
@@ -1275,7 +1309,7 @@ test("a second shiny charm is refused rather than sold", async () => {
   // listing and the purchase; this refuses at the purchase, which is the
   // enforcement half.
   await boot();
-  spend(ITEM_PRICES.shinyCharm * 3);
+  await spend(ITEM_PRICES.shinyCharm * 3);
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
   const first = await buy?.handler({
@@ -1292,7 +1326,7 @@ test("a second shiny charm is refused rather than sold", async () => {
   });
 
   expect(second?.status).toBe(409);
-  const row = readCompanion(storage, KEY);
+  const row = await readCompanion(storage, KEY);
   expect(row?.state?.inventory.shinyCharm).toBe(1);
   // And the wallet was not touched by the refusal.
   expect(row?.tokensSpent).toBe(ITEM_PRICES.shinyCharm);
@@ -1301,7 +1335,7 @@ test("a second shiny charm is refused rather than sold", async () => {
 test("a spendable item can still be stocked up", async () => {
   // The guard is about passives only. A second candy is a second candy.
   await boot();
-  spend(ITEM_PRICES.rareCandy * 3);
+  await spend(ITEM_PRICES.rareCandy * 3);
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
   for (let n = 0; n < 2; n++) {
@@ -1313,19 +1347,19 @@ test("a spendable item can still be stocked up", async () => {
     expect(bought?.status).toBeUndefined();
   }
 
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(2);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(2);
 });
 
 test("a repel names the line it is refusing", async () => {
   await boot();
-  spend(1_000);
-  withRepels(2);
+  await spend(1_000);
+  await withRepels(2);
 
   const use = routes.find((r) => r.path === "/keys/:id/use");
   const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
 
   expect(used?.status).toBeUndefined();
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   // The final form, so the whole line is refused rather than the one base the
   // player happened to be looking at.
   expect(state?.repel).toBe(11);
@@ -1338,14 +1372,14 @@ test("a second repel is refused rather than spent on the slot it already fills",
   // was wasted — and using it on the *same* companion changed nothing at all
   // while `consume` still decremented. 500M for a state that was already true.
   await boot();
-  spend(1_000);
-  withRepels(2, { repel: 11 });
+  await spend(1_000);
+  await withRepels(2, { repel: 11 });
 
   const use = routes.find((r) => r.path === "/keys/:id/use");
   const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
 
   expect(refused?.status).toBe(409);
-  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(2);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.repel).toBe(2);
 });
 
 test("a repel is refused on a revealed Ditto, which nothing can roll anyway", async () => {
@@ -1353,8 +1387,8 @@ test("a repel is refused on a revealed Ditto, which nothing can roll anyway", as
   // no-op — and it is a *state change*, so `consume` cannot catch it. 500M for
   // an exclusion that was already in force.
   await boot();
-  spend(1_000);
-  withRepels(1, {
+  await spend(1_000);
+  await withRepels(1, {
     active: activeMon({
       baseId: 132,
       plannedPath: [132],
@@ -1367,7 +1401,7 @@ test("a repel is refused on a revealed Ditto, which nothing can roll anyway", as
   const refused = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "repel" } });
 
   expect(refused?.status).toBe(409);
-  expect(readCompanion(storage, KEY)?.state?.inventory.repel).toBe(1);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.repel).toBe(1);
 });
 
 test("a guarantee bought while a prefetch is in flight is not thrown away", async () => {
@@ -1429,7 +1463,7 @@ test("a guarantee bought while a prefetch is in flight is not thrown away", asyn
       },
     },
   );
-  spend(ITEM_PRICES.shinyCharm * 2);
+  await spend(ITEM_PRICES.shinyCharm * 2);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   // Fires the prefetch unawaited, as the panel does.
@@ -1453,7 +1487,7 @@ test("a guarantee bought while a prefetch is in flight is not thrown away", asyn
   // Let the in-flight prefetch finish whatever it is going to do.
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   // The charm survives, and no roll made without it was stored.
   expect(state?.inventory.shinyCharm).toBe(1);
   expect(state?.pendingHatch).toBeNull();
@@ -1473,8 +1507,8 @@ test("a guaranteed egg still hatches when a lure rules out everything it allows"
       { id: 10, captureRate: 255, forms: 3, finalId: 12 }, // common, uncollected
     ]),
   );
-  spend(100);
-  recordGraduation(
+  await spend(100);
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -1489,7 +1523,7 @@ test("a guaranteed egg still hatches when a lure rules out everything it allows"
     },
     "dex_1",
   );
-  plant({
+  await plant({
     consumedTotal: 100,
     active: null,
     eggUsage: 0,
@@ -1506,7 +1540,7 @@ test("a guaranteed egg still hatches when a lure rules out everything it allows"
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
 
-  const state = readCompanion(storage, KEY)?.state;
+  const state = (await readCompanion(storage, KEY))?.state;
   // It hatched, and it honoured the guarantee rather than the lure — the
   // guarantee costs up to 4B against the lure's 1B, and a rare egg producing a
   // common is what the tier pricing exists to prevent.
@@ -1521,7 +1555,7 @@ test("the shop is listed cheapest first", async () => {
   // the same display bug; this is the assertion that keeps a later entry from
   // being appended somewhere arbitrary again.
   await boot();
-  spend(1_000);
+  await spend(1_000);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   expect(route).toBeDefined();
@@ -1540,7 +1574,7 @@ test("the shop is listed cheapest first", async () => {
 
 test("an unknown shop entry is refused before it can be priced", async () => {
   await boot();
-  spend(10_000_000_000);
+  await spend(10_000_000_000);
 
   const route = routes.find((r) => r.path === "/keys/:id/purchase");
   for (const body of [
@@ -1553,7 +1587,7 @@ test("an unknown shop entry is refused before it can be priced", async () => {
     const refused = await route?.handler({ params: { id: KEY }, query: {}, body });
     expect(refused?.status).toBe(400);
   }
-  expect(readCompanion(storage, KEY)?.tokensSpent).toBe(0);
+  expect((await readCompanion(storage, KEY))?.tokensSpent).toBe(0);
 });
 
 test("a sprite request without the net capability degrades rather than throwing", async () => {
@@ -1616,16 +1650,16 @@ test("earning stamps the credit instant, and the panel route reports it", async 
   // from the row changing.
   await boot();
   clock = 1_700_000_123_000;
-  spend(2_000);
+  await spend(2_000);
 
-  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_123_000);
+  expect((await readCompanion(storage, KEY))?.lastCreditAt).toBe(1_700_000_123_000);
 
   // The second credit takes a different path — the row exists now, so this is
   // the `ON CONFLICT` branch rather than the insert — and the panel needs the
   // latest instant, not the first one ever recorded.
   clock = 1_700_000_456_000;
-  spend(3_000, "req_second");
-  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_456_000);
+  await spend(3_000, "req_second");
+  expect((await readCompanion(storage, KEY))?.lastCreditAt).toBe(1_700_000_456_000);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -1638,12 +1672,12 @@ test("shopping is not working: a purchase leaves the credit instant alone", asyn
   // companion whose operator bought a mint has not served a request.
   await boot();
   clock = 1_700_000_500_000;
-  spend(ITEM_PRICES.mint * 2);
+  await spend(ITEM_PRICES.mint * 2);
   // An active companion, because a mint needs a nature to reroll and is now
   // refused without one. This fixture used to be an egg and the assertion below
   // was that using the mint succeeded — pinning the burn as correct, which is
   // the same trap the mint's own comment already records it falling into once.
-  plant({
+  await plant({
     consumedTotal: ITEM_PRICES.mint * 2,
     active: activeMon(),
     eggUsage: 0,
@@ -1661,14 +1695,14 @@ test("shopping is not working: a purchase leaves the credit instant alone", asyn
     body: { kind: "item", item: "mint" },
   });
   expect(bought?.status).toBeUndefined();
-  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_500_000);
+  expect((await readCompanion(storage, KEY))?.lastCreditAt).toBe(1_700_000_500_000);
 
   // And neither does spending what was bought.
   clock = 1_700_012_000_000;
   const use = routes.find((r) => r.path === "/keys/:id/use");
   const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
   expect(used?.status).toBeUndefined();
-  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_500_000);
+  expect((await readCompanion(storage, KEY))?.lastCreditAt).toBe(1_700_000_500_000);
 });
 
 test("a companion written before the column still reads back after it is added", async () => {
@@ -1680,7 +1714,7 @@ test("a companion written before the column still reads back after it is added",
   expect(earlier).toHaveLength(4);
   storage.migrate(earlier);
 
-  storage.run(
+  await storage.run(
     `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [KEY, serialiseState(freshState()), 4_321, 21, 111, 222],
@@ -1689,7 +1723,7 @@ test("a companion written before the column still reads back after it is added",
   // `boot` runs the full migration list, so version 5 lands on the row above.
   await boot();
 
-  const row = readCompanion(storage, KEY);
+  const row = await readCompanion(storage, KEY);
   expect(row?.tokensTotal).toBe(4_321);
   expect(row?.tokensSpent).toBe(21);
   expect(row?.state).not.toBeNull();
@@ -1703,8 +1737,8 @@ test("a companion written before the column still reads back after it is added",
 
   // The next credit fills it in, so the row is not permanently activity-less.
   clock = 1_700_000_777_000;
-  spend(9);
-  expect(readCompanion(storage, KEY)?.lastCreditAt).toBe(1_700_000_777_000);
+  await spend(9);
+  expect((await readCompanion(storage, KEY))?.lastCreditAt).toBe(1_700_000_777_000);
 });
 
 test("a held item cannot be spent, however the request is spelled", async () => {
@@ -1717,7 +1751,7 @@ test("a held item cannot be spent, however the request is spelled", async () => 
   // nothing read — the right fact in the wrong place, stating a rule while a
   // literal elsewhere enforced it. The set is gone and this is what replaced it.
   await boot();
-  spend(ITEM_PRICES.shinyCharm);
+  await spend(ITEM_PRICES.shinyCharm);
 
   const buy = routes.find((r) => r.path === "/keys/:id/purchase");
   const bought = await buy?.handler({
@@ -1726,7 +1760,7 @@ test("a held item cannot be spent, however the request is spelled", async () => 
     body: { kind: "item", item: "shinyCharm" },
   });
   expect(bought?.status).toBeUndefined();
-  expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.shinyCharm).toBe(1);
 
   const use = routes.find((r) => r.path === "/keys/:id/use");
   const refused = await use?.handler({
@@ -1738,7 +1772,7 @@ test("a held item cannot be spent, however the request is spelled", async () => 
   // 400, not 409: the item is held, so "none-held" would be a lie. It is not
   // spendable at all, which is a bad request rather than a conflict.
   expect(refused?.status).toBe(400);
-  expect(readCompanion(storage, KEY)?.state?.inventory.shinyCharm).toBe(1);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.shinyCharm).toBe(1);
 });
 
 test("the charm in the bag reaches the roll the panel prefetches", async () => {
@@ -1754,19 +1788,19 @@ test("the charm in the bag reaches the roll the panel prefetches", async () => {
   // moves; any other total would leave both rolls on the same side of it and
   // prove nothing.
   await boot({}, cachedSpecies());
-  spend(902);
+  await spend(902);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
-  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+  expect((await readCompanion(storage, KEY))?.state?.pendingHatch).toMatchObject({
     speciesId: 10,
     isShiny: false,
   });
 
   // Now the same egg with a charm in the bag: the prefetch is dropped so it is
   // rolled again, and nothing else about the save moves.
-  plant({
+  await plant({
     consumedTotal: 902,
     active: null,
     eggUsage: 902,
@@ -1777,7 +1811,7 @@ test("the charm in the bag reaches the roll the panel prefetches", async () => {
 
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
-  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+  expect((await readCompanion(storage, KEY))?.state?.pendingHatch).toMatchObject({
     speciesId: 10,
     isShiny: true,
   });
@@ -1793,8 +1827,8 @@ test("a mint actually rerolls the nature it was spent on", async () => {
   // for an unreadable nature *and* the first entry of the cycle, so a fixture
   // starting there cannot tell a reroll from a default from a no-op.
   await boot();
-  spend(ITEM_PRICES.mint);
-  plant({
+  await spend(ITEM_PRICES.mint);
+  await plant({
     consumedTotal: ITEM_PRICES.mint,
     active: activeMon({ usedAtStage: 111, nature: "sassy" }),
     eggUsage: 0,
@@ -1802,13 +1836,13 @@ test("a mint actually rerolls the nature it was spent on", async () => {
     pendingHatch: null,
     inventory: { ...emptyInventory(), rareCandy: 0, mint: 1, shinyCharm: 0 },
   });
-  expect(readCompanion(storage, KEY)?.state?.active?.nature).toBe("sassy");
+  expect((await readCompanion(storage, KEY))?.state?.active?.nature).toBe("sassy");
 
   const use = routes.find((r) => r.path === "/keys/:id/use");
   const used = await use?.handler({ params: { id: KEY }, query: {}, body: { item: "mint" } });
   expect(used?.status).toBeUndefined();
 
-  const after = readCompanion(storage, KEY)?.state;
+  const after = (await readCompanion(storage, KEY))?.state;
   expect(after?.active?.nature).not.toBe("sassy");
   // The next nature in the cycle, which is deterministic on purpose — a reroll
   // needing entropy would be the one thing in this plugin that cannot be
@@ -1835,8 +1869,8 @@ test("a guaranteed egg discards the roll the old egg was already holding", async
   // line that nothing else would fail on if it were dropped.
   await boot();
   const price = freshEggPrice("rare");
-  spend(price);
-  plant({
+  await spend(price);
+  await plant({
     consumedTotal: price,
     active: activeMon(),
     eggUsage: 4_000_000,
@@ -1860,7 +1894,7 @@ test("a guaranteed egg discards the roll the old egg was already holding", async
   });
   expect(bought?.status).toBeUndefined();
 
-  const after = readCompanion(storage, KEY)?.state;
+  const after = (await readCompanion(storage, KEY))?.state;
   expect(after?.eggTier).toBe("rare");
   expect(after?.pendingHatch).toBeNull();
   expect(after?.eggUsage).toBe(0);
@@ -1869,8 +1903,8 @@ test("a guaranteed egg discards the roll the old egg was already holding", async
   // the hatch threshold cannot open the discarded common. There is no `net` in
   // this install, so no replacement roll can land either — the egg waits, which
   // is the honest outcome.
-  spend(EGG_HATCH_THRESHOLD * 2, "req_after_egg");
-  const settled = readCompanion(storage, KEY)?.state;
+  await spend(EGG_HATCH_THRESHOLD * 2, "req_after_egg");
+  const settled = (await readCompanion(storage, KEY))?.state;
   expect(settled?.active).toBeNull();
   expect(settled?.eggUsage).toBe(EGG_HATCH_THRESHOLD * 2);
 });
@@ -1882,8 +1916,8 @@ test("the panel route prices the stage a companion is actually on", async () => 
   // is precisely the shape that hides a swapped branch. Collapsing the ternary
   // to a bare `EGG_HATCH_THRESHOLD` passed every test in the package.
   await boot();
-  spend(7_000);
-  plant({
+  await spend(7_000);
+  await plant({
     consumedTotal: 7_000,
     // Stage 2 of an uncommon three-form line: 1,875,000,000 × 2 / 6.
     active: activeMon({ rarity: "uncommon", stageIndex: 1, usedAtStage: 3_333 }),
@@ -1910,6 +1944,7 @@ test("the panel route prices the stage a companion is actually on", async () => 
       tokens: { input: 1_234_567, output: 0, cacheRead: 0, cacheWrite: 0 },
     }),
   );
+  await flush();
   const egg = await route?.handler({ params: { id: "key_egg" }, query: {}, body: null });
   expect(egg?.json).toMatchObject({
     nextThreshold: EGG_HATCH_THRESHOLD,
@@ -1924,18 +1959,18 @@ test("an outsized multiplier is capped rather than trusted", async () => {
   // "fast" — every one of them below the cap — so removing `Math.min` changed
   // nothing any test could see.
   await boot({ multiplier: 2_500 });
-  spend(1_000);
+  await spend(1_000);
   // 1,000 × MAX_MULTIPLIER, not 1,000 × 2,500.
-  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_000_000);
+  expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(1_000_000);
 
   // And the mistyped exponent the comment names, which is the case that would
   // otherwise put the counter past what a JavaScript integer can hold.
   storage.close();
   storage = createTestStorage();
   await boot({ multiplier: 1e21 });
-  spend(1_000);
+  await spend(1_000);
 
-  const total = readCompanion(storage, KEY)?.tokensTotal ?? 0;
+  const total = (await readCompanion(storage, KEY))?.tokensTotal ?? 0;
   expect(total).toBe(1_000_000);
   expect(total).toBeLessThan(Number.MAX_SAFE_INTEGER);
 });
@@ -1997,7 +2032,7 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
   const pool = [COMMON_SPECIES, { id: 20, captureRate: 3, forms: 1, finalId: 20 }];
 
   await boot({}, cachedSpecies(pool));
-  spend(902);
+  await spend(902);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -2005,14 +2040,14 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
 
   // Unguaranteed: the heavily weighted common, which is what makes the paid
   // version worth anything.
-  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+  expect((await readCompanion(storage, KEY))?.state?.pendingHatch).toMatchObject({
     speciesId: 10,
     rarity: "common",
   });
 
   // The same key and the same credited total, so the seed is identical and the
   // guarantee is the only thing that differs between the two rolls.
-  plant({
+  await plant({
     consumedTotal: 902,
     active: null,
     eggUsage: 902,
@@ -2024,7 +2059,7 @@ test("the tier a guaranteed egg was paid for reaches the roll, not just the save
   await route?.handler({ params: { id: KEY }, query: {}, body: null });
   await prefetched(KEY);
 
-  expect(readCompanion(storage, KEY)?.state?.pendingHatch).toMatchObject({
+  expect((await readCompanion(storage, KEY))?.state?.pendingHatch).toMatchObject({
     speciesId: 20,
     rarity: "rare",
   });
@@ -2038,8 +2073,8 @@ test("the roster route lists each key that has a companion, with what it is show
   // ids of keys that have companions.
   await boot({}, cachedSpecies());
   clock = 1_700_000_100_000;
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0, rarity: "rare" }),
     eggUsage: 0,
@@ -2056,6 +2091,7 @@ test("the roster route lists each key that has a companion, with what it is show
       tokens: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
     }),
   );
+  await flush();
 
   const route = routes.find((r) => r.path === "/keys");
   expect(route).toBeDefined();
@@ -2096,8 +2132,8 @@ test("a key whose save cannot be read is listed as unreadable rather than droppe
   // The one key an operator most needs to find is the broken one. Hiding it
   // from the only surface that lists companions is how it stays broken.
   await boot();
-  spend(1_000);
-  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
+  await spend(1_000);
+  await storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", ["{ broken", KEY]);
 
   const route = routes.find((r) => r.path === "/keys");
   const listed = await route?.handler({ params: {}, query: {}, body: null });
@@ -2121,8 +2157,8 @@ test("the panel names the stage the companion is standing at, not its base", asy
       { id: 11, captureRate: 255, forms: 3, finalId: 12 },
     ]),
   );
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2140,8 +2176,8 @@ test("a species the cache has never seen shows no name rather than a wrong one",
   // The cold-cache case and the offline install are the same case here: the
   // name is decoration, and the panel falls back to the species number.
   await boot();
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
     eggUsage: 0,
@@ -2163,8 +2199,8 @@ test("a hatched companion whose species cache was wiped gets its name back", asy
   // only ran for eggs.
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2191,8 +2227,8 @@ test("a name that has already been warmed is never fetched twice", async () => {
   // species is asked for once per process and answered from disk after that.
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2218,12 +2254,12 @@ test("a name that has already been warmed is never fetched twice", async () => {
 test("a dex entry the cache has never seen is warmed too", async () => {
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(1_000);
+  await spend(1_000);
   // An *active* companion, and that is the fixture decision the test turns on:
   // an egg would set `prefetchHatch` building the whole species index, which
   // caches every document there is and would name the Dex entry without any of
   // the warming this test is about.
-  plant({
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
     eggUsage: 0,
@@ -2231,7 +2267,7 @@ test("a dex entry the cache has never seen is warmed too", async () => {
     pendingHatch: null,
     inventory: emptyInventory(),
   });
-  recordGraduation(
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -2272,10 +2308,10 @@ test("a pre-evolution nobody has a dex row for is warmed too", async () => {
   // which is the asymmetry this feature exists to remove.
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(1_000);
+  await spend(1_000);
   // Active rather than an egg, for the reason the test above gives: an egg sets
   // `prefetchHatch` building the whole index and names everything for free.
-  plant({
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
     eggUsage: 0,
@@ -2283,7 +2319,7 @@ test("a pre-evolution nobody has a dex row for is warmed too", async () => {
     pendingHatch: null,
     inventory: emptyInventory(),
   });
-  recordGraduation(
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -2320,8 +2356,8 @@ test("a species PokéAPI has forgotten is asked for once, not once per poll", as
   // operator left the panel open.
   const online = coldCacheOnline({ missing: [11] });
   await boot({}, online);
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2360,8 +2396,8 @@ test("a forgotten species does not starve the entries behind it", async () => {
   const dead = [30, 31, 32, 33, 34, 35, 36, 37];
   const online = coldCacheOnline({ missing: dead });
   await boot({}, online);
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 0 }),
     eggUsage: 0,
@@ -2372,8 +2408,8 @@ test("a forgotten species does not starve the entries behind it", async () => {
 
   // The eight dead species are the lowest-numbered, so they are what a poll
   // reaches first.
-  dead.forEach((finalId, index) => {
-    recordGraduation(
+  for (const [index, finalId] of dead.entries()) {
+    await recordGraduation(
       storage,
       KEY,
       {
@@ -2388,8 +2424,8 @@ test("a forgotten species does not starve the entries behind it", async () => {
       },
       `dex_dead_${finalId}`,
     );
-  });
-  recordGraduation(
+  }
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -2425,8 +2461,8 @@ test("one poll's warms share a chain rather than fetching it once each", async (
   // chain document once per species in a batch.
   const online = coldCacheOnline({ chainOf: () => 40 });
   await boot({}, online);
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({ baseId: 40, plannedPath: [40, 41], stageIndex: 0 }),
     eggUsage: 0,
@@ -2434,7 +2470,7 @@ test("one poll's warms share a chain rather than fetching it once each", async (
     pendingHatch: null,
     inventory: emptyInventory(),
   });
-  recordGraduation(
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -2466,8 +2502,8 @@ test("the roster never warms a name, however many keys it lists", async () => {
   // looked at.
   const online = coldCacheOnline();
   await boot({}, online);
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2483,7 +2519,8 @@ test("the roster never warms a name, however many keys it lists", async () => {
       tokens: { input: 3_000, output: 0, cacheRead: 0, cacheWrite: 0 },
     }),
   );
-  storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
+  await flush();
+  await storage.run("UPDATE {{companion}} SET state = ? WHERE api_key_id = ?", [
     JSON.stringify({
       consumedTotal: 0,
       active: activeMon({ baseId: 20, plannedPath: [20, 21], stageIndex: 0 }),
@@ -2513,8 +2550,8 @@ test("an install with no outbound access warms nothing and shows the number", as
   // answers honestly, rather than throwing on a `net` that is not there.
   const online = coldCacheOnline();
   await boot({}, { files: online.files });
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2543,8 +2580,8 @@ test("an install with no files capability never reaches the network to warm", as
       },
     },
   );
-  spend(5_000);
-  plant({
+  await spend(5_000);
+  await plant({
     consumedTotal: 5_000,
     active: activeMon({ baseId: 10, plannedPath: [10, 11, 12], stageIndex: 1 }),
     eggUsage: 0,
@@ -2563,7 +2600,7 @@ test("an install with no files capability never reaches the network to warm", as
 
 test("an egg has no species to name", async () => {
   await boot({}, cachedSpecies());
-  spend(100);
+  await spend(100);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   const found = await route?.handler({ params: { id: KEY }, query: {}, body: null });
@@ -2580,8 +2617,8 @@ test("every species in a graduated line carries its own name, and a cold one car
   // would caption as a number forever, and a stage carrying the wrong name
   // would print "Species 12" under a #10 sprite.
   await boot({}, cachedSpecies([{ id: 12, captureRate: 255, forms: 1, finalId: 12 }]));
-  spend(1_000);
-  recordGraduation(
+  await spend(1_000);
+  await recordGraduation(
     storage,
     KEY,
     {
@@ -2634,7 +2671,7 @@ test("nothing is pushed until a panel has announced itself", async () => {
   // connection the plugin has not heard from is one it cannot address. This is
   // also the property that keeps a closed panel free: no audience, no work.
   await boot();
-  spend(1_000);
+  await spend(1_000);
   expect(pushed).toEqual([]);
 });
 
@@ -2644,7 +2681,7 @@ test("a credited request pushes the key it credited", async () => {
   // something changed, never a second copy of what it changed to.
   await boot();
   watch();
-  spend(1_000);
+  await spend(1_000);
 
   expect(pushed).toEqual([{ connectionId: "conn_1", payload: { apiKeyId: KEY } }]);
 });
@@ -2656,9 +2693,9 @@ test("a first credit pushes the key that has just joined the roster", async () =
   // until something else happened to push.
   await boot();
   watch();
-  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+  expect(await storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
 
-  spend(1);
+  await spend(1);
 
   expect(pushedKeys()).toEqual([KEY]);
 });
@@ -2666,21 +2703,23 @@ test("a first credit pushes the key that has just joined the roster", async () =
 test("a rate-limit grant pushes, because it changes the bag", async () => {
   await boot();
   watch();
-  spend(1_000);
+  await spend(1_000);
 
   const limit: LimitReached = { apiKeyId: KEY, dimension: "tokens", window: "1w", at: 2_000 };
   // First sighting seeds the window and pays nothing, so it writes nothing to
   // the companion and must push nothing either.
   onLimit?.(limit);
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(0);
+  await flush();
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(0);
   pushed = [];
 
   // Well past the floor, which a week plainly is. Without moving the clock this
   // would assert the coalescer's behaviour by accident rather than the grant's.
   clock += WINDOW_MS["1w"];
   onLimit?.(limit);
+  await flush();
 
-  expect(readCompanion(storage, KEY)?.state?.inventory.rareCandy).toBe(5);
+  expect((await readCompanion(storage, KEY))?.state?.inventory.rareCandy).toBe(5);
   expect(pushedKeys()).toEqual([KEY]);
 });
 
@@ -2692,8 +2731,8 @@ test("a second change inside the floor does not send a second frame", async () =
   await boot();
   watch();
 
-  spend(1_000);
-  spend(1_000);
+  await spend(1_000);
+  await spend(1_000);
 
   // The leading frame only. The second credit is inside the floor, so its frame
   // is armed rather than sent — and `afterEach` closes the connection, which
@@ -2713,7 +2752,7 @@ test("a purchase pushes, so a second tab does not show a wallet already spent", 
   // showing tokens that are gone is the failure this plugin is least allowed.
   await boot();
   watch();
-  spend(ITEM_PRICES.mint * 3);
+  await spend(ITEM_PRICES.mint * 3);
   pushed = [];
   // A purchase is an operator clicking a button, which is never inside the floor
   // of the request that paid for it.
@@ -2732,7 +2771,7 @@ test("a refused purchase pushes nothing, because it wrote nothing", async () => 
   // a frame for it would be the panel refetching to render the same screen.
   await boot();
   watch();
-  spend(10);
+  await spend(10);
   pushed = [];
   // Past the floor, and this line is the test rather than housekeeping. Without
   // it a frame the refusal wrongly emitted would land *inside* the floor, be
@@ -2761,7 +2800,7 @@ test("reading a companion that has not changed pushes nothing", async () => {
   // from ever starting.
   await boot();
   watch();
-  spend(1_000);
+  await spend(1_000);
   pushed = [];
   // As in the refusal test above: inside the floor an unwanted frame is armed
   // rather than sent, and this assertion would pass against a route that pushed
@@ -2784,7 +2823,7 @@ test("the roll behind the next hatch pushes when it lands, not when it was asked
   // no frame here, the egg would simply never open.
   await boot({}, cachedSpecies());
   watch();
-  spend(EGG_HATCH_THRESHOLD);
+  await spend(EGG_HATCH_THRESHOLD);
   pushed = [];
   clock += PUSH_FLOOR_MS;
 
@@ -2801,7 +2840,7 @@ test("a departed panel is not sent to", async () => {
   await boot();
   watch();
   onGone?.("conn_1");
-  spend(1_000);
+  await spend(1_000);
 
   expect(pushed).toEqual([]);
 });
@@ -2813,10 +2852,10 @@ test("without the channels capability the plugin loads and simply does not push"
   await boot({}, null, { channels: false });
   expect(opened).toEqual([]);
 
-  spend(1_000);
+  await spend(1_000);
 
   expect(pushed).toEqual([]);
-  expect(readCompanion(storage, KEY)?.tokensTotal).toBe(1_000);
+  expect((await readCompanion(storage, KEY))?.tokensTotal).toBe(1_000);
 });
 
 test("a hatch that settles on read pushes, because that read wrote", async () => {
@@ -2826,7 +2865,7 @@ test("a hatch that settles on read pushes, because that read wrote", async () =>
   // in, and applying it is a write.
   await boot({}, cachedSpecies());
   watch();
-  spend(EGG_HATCH_THRESHOLD);
+  await spend(EGG_HATCH_THRESHOLD);
 
   const route = routes.find((r) => r.path === "/keys/:id");
   expect(route).toBeDefined();
@@ -2851,7 +2890,7 @@ test("a hatch that settles on read pushes, because that read wrote", async () =>
   // The roll has landed; this read is the one that opens the egg.
   await route.handler({ params: { id: KEY }, query: {}, body: null });
 
-  expect(readCompanion(storage, KEY)?.state?.active).not.toBeNull();
+  expect((await readCompanion(storage, KEY))?.state?.active).not.toBeNull();
   expect(pushedKeys()).toEqual([KEY]);
 });
 
@@ -2865,8 +2904,8 @@ test("the resolved reveal pushes when it lands, exactly as the roll does", async
   const online = coldCacheOnline();
   await boot({}, online);
   watch();
-  spend(1_000);
-  plant({
+  await spend(1_000);
+  await plant({
     consumedTotal: 1_000,
     active: activeMon({
       baseId: 10,
@@ -2893,7 +2932,7 @@ test("the resolved reveal pushes when it lands, exactly as the roll does", async
 
   for (let attempt = 0; attempt < 100; attempt++) {
     await route.handler({ params: { id: KEY }, query: {}, body: null });
-    if (readCompanion(storage, KEY)?.state?.pendingReveal != null) {
+    if ((await readCompanion(storage, KEY))?.state?.pendingReveal != null) {
       expect(pushedKeys()).toContain(KEY);
       return;
     }
@@ -2914,9 +2953,9 @@ test("a request that credited nothing pushes nothing", async () => {
   await boot();
   watch();
 
-  spend(0, "req_failed");
+  await spend(0, "req_failed");
 
-  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+  expect(await storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
   expect(pushed).toEqual([]);
 });
 
@@ -2927,8 +2966,8 @@ test("a multiplier that rounds a credit away pushes nothing either", async () =>
   await boot({ multiplier: 0.001 });
   watch();
 
-  spend(1, "req_rounded");
+  await spend(1, "req_rounded");
 
-  expect(storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
+  expect(await storage.all("SELECT api_key_id FROM {{companion}}")).toEqual([]);
   expect(pushed).toEqual([]);
 });

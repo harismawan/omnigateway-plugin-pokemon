@@ -10,7 +10,7 @@ const NOW = 1_700_000_000_000;
  * assertion about the trailing frame would be a sleep, and "the last change of a
  * burst is delivered" would be a claim in a test name rather than in the code.
  */
-function harness(floorMs = PUSH_FLOOR_MS) {
+function harness(floorMs = PUSH_FLOOR_MS, broadcasting = false) {
   let now = NOW;
   const sent: Array<{ connectionId: string; payload: unknown }> = [];
   /**
@@ -42,8 +42,12 @@ function harness(floorMs = PUSH_FLOOR_MS) {
     };
   };
 
+  /** Frames the host would fan out to every replica, when it can. */
+  const fanned: Array<{ apiKeyId: string }> = [];
+
   const pusher = createPusher({
     send: (connectionId, payload) => sent.push({ connectionId, payload }),
+    ...(broadcasting ? { broadcast: (payload: { apiKeyId: string }) => fanned.push(payload) } : {}),
     now: () => now,
     floorMs,
     schedule,
@@ -52,6 +56,7 @@ function harness(floorMs = PUSH_FLOOR_MS) {
   return {
     pusher,
     sent,
+    fanned,
     timers,
     /** Moves the clock and fires every armed timer that has genuinely come due. */
     advance(ms: number) {
@@ -217,4 +222,64 @@ test("a key quiet for longer than the floor leads again rather than waiting", ()
 
   expect(h.keys()).toEqual(["key-a", "key-a"]);
   expect(h.timers.filter((timer) => !timer.cancelled)).toHaveLength(0);
+});
+// ------------------------------------------------------------------- the fleet
+
+/**
+ * The half a single process cannot test for itself.
+ *
+ * A `connectionId` means something only on the replica whose socket produced it,
+ * so a plugin answering with `send` alone reaches the panels that happen to
+ * share a pod with it. These four assertions are the difference between a panel
+ * that keeps up on a cluster and one that goes quiet with its poll switched off.
+ */
+test("with a broadcast available a frame goes to the fleet, not to local sockets", () => {
+  const h = harness(PUSH_FLOOR_MS, true);
+  h.pusher.join("c1");
+
+  h.pusher.push("key-a");
+
+  expect(h.fanned).toEqual([{ apiKeyId: "key-a" }]);
+  // Not both: the host loops the broadcast back into this process's own
+  // subscribers, so sending here as well would deliver every frame twice.
+  expect(h.sent).toEqual([]);
+});
+
+test("a frame goes out with nobody connected to this replica", () => {
+  // The property this deliberately gives up. "No audience, no work" was measured
+  // against one process's listener set, and on a fleet that set says nothing
+  // about where the panel actually is — suppressing on it is what made the
+  // cluster's panel go quiet.
+  const h = harness(PUSH_FLOOR_MS, true);
+
+  h.pusher.push("key-a");
+
+  expect(h.fanned).toEqual([{ apiKeyId: "key-a" }]);
+});
+
+test("the floor still applies to a broadcast, per key", () => {
+  const h = harness(PUSH_FLOOR_MS, true);
+
+  h.pusher.push("key-a");
+  h.pusher.push("key-a");
+  h.pusher.push("key-b");
+  expect(h.fanned).toEqual([{ apiKeyId: "key-a" }, { apiKeyId: "key-b" }]);
+
+  h.advance(PUSH_FLOOR_MS);
+  // The trailing frame of key-a's burst, and nothing for key-b, which sent once.
+  expect(h.fanned).toEqual([{ apiKeyId: "key-a" }, { apiKeyId: "key-b" }, { apiKeyId: "key-a" }]);
+});
+
+test("a broadcasting pusher keeps its pending frame when the last local socket leaves", () => {
+  // The audience is elsewhere. Cancelling on an empty *local* set would drop the
+  // trailing frame of a burst for every panel on every other replica.
+  const h = harness(PUSH_FLOOR_MS, true);
+  h.pusher.join("c1");
+  h.pusher.push("key-a");
+  h.pusher.push("key-a");
+
+  h.pusher.leave("c1");
+  h.advance(PUSH_FLOOR_MS);
+
+  expect(h.fanned).toEqual([{ apiKeyId: "key-a" }, { apiKeyId: "key-a" }]);
 });
