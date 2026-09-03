@@ -141,10 +141,12 @@ export default definePlugin({
      * degrade rather than throw. Degradation here is the panel's ten-second poll,
      * which is exactly what it shipped with before this existed.
      *
-     * A plugin cannot broadcast — `PluginChannel` offers `send(connectionId, …)`
-     * and nothing else — so a panel is reachable only once it has announced
-     * itself, which is what `onMessage` is doing here. That is the other side of
-     * the host's rule that a client must subscribe before it sends.
+     * A panel announces itself through `onMessage` here, and on a host without
+     * `broadcast` that hello is the only thing that makes it reachable: `send`
+     * needs a connection id, and this is where one arrives. It is the other side
+     * of the host's rule that a client must subscribe before it sends, and it is
+     * kept on the broadcast path too — the pusher still needs to know whether
+     * anybody is listening here when it cannot reach the fleet.
      */
     const activity = ctx.channels?.open("activity");
     /*
@@ -383,8 +385,8 @@ export default definePlugin({
         );
       }
 
-      // Recorded by `settle` itself, in the transaction that wrote the state
-      // that produced them, and reported here only because a graduation is
+      // Recorded by `settle` itself, in the same call that won the swap for the
+      // state that produced them, and reported here only because a graduation is
       // worth one line in the log.
       for (const event of result.events) {
         if (event.kind !== "graduated") continue;

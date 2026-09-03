@@ -57,15 +57,19 @@ The expected value is the stored *text*, never a re-serialisation of the parsed 
 `parseState` clamps, defaults and drops, so a save that round-trips to different bytes would
 never match itself and no write would ever land.
 
-`PluginStorage.run` reports no row count, so the outcome is read back. That read is the
-price of the guarantee.
+`PluginStorage.run` reports no row count, so the statement reports itself: every conditional
+write ends in `RETURNING`, and `storage.get` answers null when nothing matched.
 
-**Two callers writing byte-identical saves both hear "yes", and that is correct rather than
-tolerated.** Identical bytes mean identical `expected` and therefore identical intent — one
-action submitted twice, not two actions. Exactly one `UPDATE` matched, so a purchase debits
-once and an item is added once; telling the second caller it failed would report a loss that
-did not happen. Two genuinely different intents cannot collide this way, because the second
-reads the first's result as its own `expected`.
+**The obvious substitute — write, then read the row back and compare — was written first and
+is wrong in the direction that costs the most.** It is two statements with an await between
+them, so anybody who reads what we just wrote and writes their own save before our `SELECT`
+lands turns a swap that *succeeded* into "failed". A settle that reports no write files no Dex
+row for a graduation the row has already taken, and nothing re-emits it because the state has
+moved; a purchase answers 409 with the wallet already debited. A false negative here is
+unrecoverable where a false positive is merely rude, and inference cannot tell them apart.
+
+With `RETURNING`, a second caller writing a byte-identical save correctly hears "no" and loses
+nothing by it: the identical intent was already applied by the caller that won.
 
 Purchases carry the wallet check into the same predicate
 (`tokens_total - tokens_spent >= $price`), because the read above it is what refuses politely
@@ -91,9 +95,16 @@ which is the ordinary path: a poll settling while a credit settles. The transact
 crash window between two writes and cost every concurrent settle on the default backend. What
 remains is the ordering, plus ids that make a repeat idempotent.
 
-Ids are derived from stored facts: `${apiKeyId}:${consumedTotalBeforeTheSettle}:${index}`.
-A retried or duplicated settle over the same save produces the same id, and the insert is
+Ids are derived from stored facts: `${apiKeyId}:${digest(theSave)}:${index}`. A retried or
+duplicated settle over the same save produces the same id, and the insert is
 `ON CONFLICT (id) DO NOTHING`, so it is idempotent rather than merely unlikely to collide.
+
+**The save, not its `consumedTotal`, and that correction cost a Pokédex entry to find.** That
+number moves with traffic, and growth arrives without any: an everstone banks it, a rare candy
+injects it, and a graduation hands its overflow to the next egg. Two graduations at one token
+total therefore both took index 0 of the same number — an unpinned companion graduating, and
+the line that hatched from its overflow graduating on the next settle, produced one id between
+them and `DO NOTHING` swallowed the second.
 
 Sightings stay outside the transaction and stay the caller's, because they are written on
 *every* settle including the ones that change nothing — that is what registers a companion
@@ -106,9 +117,11 @@ already half way up its line, and it is idempotent on its own primary key.
 instant the caller read, with the outcome read back. Exactly one replica wins the window and
 only the winner writes candy.
 
-Known bound, marked in the source: two replicas claiming a *fresh* window in the same
-millisecond both read back their own instant and both pay. One extra candy, rate-limited by
-the window's own duration. Closing it needs a claim-token column.
+It ends in `RETURNING` for the same reason every other conditional write does, and here the
+read-back version was not merely fragile but wrong: two replicas writing the same instant would
+each find *their own* number on the row, put there by the other, and both pay. Nor did that
+need two clocks — two limit events for one key drain in a single pass of the host's bus and
+both read the same `now`, so one process reached it alone.
 
 ## The channel
 
@@ -141,6 +154,24 @@ fact that frames follow writes: an idle key still costs nothing.
   again. That is the host's decision and this plugin cannot improve on it; it is recorded
   here so nobody discovers it during a migration.
 
+## Column widths
+
+Every instant and every accumulating counter is `BIGINT`, not `INTEGER`. SQLite's `INTEGER` is
+64-bit whatever a column declares, so on the default backend the word is advisory; Postgres
+reads it as `int4` and stops at 2 147 483 647, while an epoch millisecond is 1.7e12. The first
+credit on a clustered install would have failed with "value out of range", inside an event
+handler, where it surfaces as one warning line — the plugin would migrate, load, and never
+write a row. A shiny charm costs 3e9, so the counters overflow on their own account as well.
+
+The migrations were edited in place rather than extended, because there is no portable
+`ALTER`: SQLite cannot change a column's type. That is safe for the same reason it is
+necessary — a SQLite install applied version 1 long ago, never re-reads the text, and stores
+the same bytes either way, while a Postgres install is necessarily fresh.
+
+At the read end `BIGINT` arrives from Bun's driver as a **string**. Every mapper converts, as
+the host's own repos do; without it `tokens_total - tokens_spent` is a subtraction between
+strings and a wallet renders as `NaN`.
+
 ## History
 
 - The transactional settle above was written, and `test/fleet.test.ts` — which drives two
@@ -149,9 +180,15 @@ fact that frames follow writes: an idle key still costs nothing.
   install, on the path a panel takes. A design that had shipped without a concurrent test
   would have made the default backend worse in the name of making the clustered one better.
 - The rule that two byte-identical writers both hear "yes" was likewise discovered by a test
-  written to assert the opposite. Two consumes of one held item produce the same save, so
-  telling the second one `stale` would report a loss that did not happen — the assertion was
-  wrong, not the code.
+  written to assert the opposite, defended in this document, and then deleted along with the
+  read-back that made it necessary. It was a true statement about a mechanism that should not
+  have existed: the same inference that produced the harmless false positive produced the
+  harmful false negative, and `RETURNING` produces neither.
+- Three of the findings above — the column widths, the false negative, and the Dex id — were
+  found by review with runnable probes rather than by any suite here, because all three are
+  invisible on SQLite or need two writers. Two are now pinned by `test/fleet.test.ts` (a
+  storage that stringifies its numbers the way the Postgres driver does; a graduation pair at
+  one token total) and one by a source-text check for `?` placeholders.
 
 ## Amends
 

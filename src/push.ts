@@ -128,7 +128,16 @@ export function createPusher(deps: PusherDeps): Pusher {
 
   const fire = (apiKeyId: string): void => {
     if (!pending.delete(apiKeyId)) return;
-    send(apiKeyId);
+    try {
+      send(apiKeyId);
+    } catch {
+      // The one frame nobody else is holding. A leading frame is raised inside a
+      // route handler or inside the event path's own guard, both of which catch;
+      // this one is raised by a timer, where a throw out of the host's transport
+      // is an uncaught exception with the gateway's process behind it. Swallowed
+      // rather than logged, because the panel's own poll is the recovery and a
+      // logger is not something this module has.
+    }
   };
 
   return {
@@ -142,7 +151,14 @@ export function createPusher(deps: PusherDeps): Pusher {
       // A broadcast reaches an audience this process cannot see, so an empty
       // local listener set is not an empty audience and nothing pending may be
       // cancelled on the strength of it. Every pending entry fires within one
-      // floor, so there is nothing to leak.
+      // floor, so nothing accumulates there.
+      //
+      // `lastSent` is what this early return does keep, and keeping it is the
+      // point: with frames still going out, forgetting when a key last had one
+      // would let the next write lead again inside its own floor. It holds a
+      // string and a number per key ever written, which is bounded by the number
+      // of API keys an installation has — the same order as the species names
+      // this plugin already keeps for the life of the process.
       if (broadcast !== undefined) return;
       // Nobody left to receive it. A plugin gets no teardown hook — a
       // `PluginSetupResult` is `{ routes }` — so this is the only moment a

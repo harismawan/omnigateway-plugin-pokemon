@@ -13,6 +13,33 @@ import { type CompanionState, freshState, parseState, serialiseState } from "./s
  * and exactly the property a snapshot wants. Putting it in a table would grow
  * every snapshot an operator downloads with data that re-fetches itself.
  */
+/*
+  `BIGINT` for every instant and every accumulating counter, and the word is not
+  decoration.
+
+  SQLite's `INTEGER` is 64-bit whatever width a column declares, so on the
+  default backend this reads as a preference. Postgres reads it as a type:
+  `INTEGER` is `int4` and stops at 2 147 483 647, while an epoch millisecond is
+  1.7e12. The *first credit* on a clustered install would fail with "value out of
+  range for type integer", inside an event handler, where the failure surfaces as
+  one warning line — the plugin would migrate, load, and then never write a row.
+  The counters overflow on their own account too: a shiny charm costs 3e9.
+
+  The host's own Postgres schema states the same rule where its SQLite one says
+  `INTEGER` (`packages/store/src/postgres/migrations/001_init.sql`): instants and
+  accumulating counters are `BIGINT`, small enumerations stay `INTEGER`. Species
+  ids and flags below are genuinely small and stay.
+
+  **Edited in place rather than added as a later migration**, because there is no
+  portable `ALTER`: SQLite cannot change a column's type at all. Editing is safe
+  because of the same asymmetry that makes it necessary — a SQLite install
+  applied version 1 long ago and never re-reads this text, and its storage is
+  identical either way, while a Postgres install is necessarily fresh, since
+  plugin tables do not migrate between dialects.
+
+  The consequence at the read end is that `BIGINT` arrives from the driver as a
+  **string**. Every mapper below converts, the way the host's own repos do.
+*/
 export const MIGRATIONS: readonly PluginMigration[] = [
   {
     version: 1,
@@ -20,10 +47,10 @@ export const MIGRATIONS: readonly PluginMigration[] = [
       CREATE TABLE {{companion}} (
         api_key_id   TEXT PRIMARY KEY,
         state        TEXT NOT NULL,
-        tokens_total INTEGER NOT NULL DEFAULT 0,
-        tokens_spent INTEGER NOT NULL DEFAULT 0,
-        created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL
+        tokens_total BIGINT NOT NULL DEFAULT 0,
+        tokens_spent BIGINT NOT NULL DEFAULT 0,
+        created_at   BIGINT NOT NULL,
+        updated_at   BIGINT NOT NULL
       )
     `,
   },
@@ -39,7 +66,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         rarity      TEXT NOT NULL,
         is_shiny    INTEGER NOT NULL DEFAULT 0,
         nature      TEXT,
-        caught_at   INTEGER NOT NULL
+        caught_at   BIGINT NOT NULL
       )
     `,
   },
@@ -56,7 +83,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         window_key TEXT NOT NULL,
         -- An instant, not a tier. A grant is rate-limited by the window's own
         -- duration, because nothing tells this plugin when a window empties.
-        granted_at INTEGER NOT NULL,
+        granted_at BIGINT NOT NULL,
         PRIMARY KEY (api_key_id, window_key)
       )
     `,
@@ -72,7 +99,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     // column existed has never had a credit *observed*, and backfilling
     // `updated_at` into it would invent traffic that may never have happened —
     // an idle-looking companion is a smaller lie than a working-looking one.
-    sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at INTEGER`,
+    sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at BIGINT`,
   },
   {
     version: 6,
@@ -115,7 +142,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         chain_order TEXT NOT NULL,
         rarity      TEXT NOT NULL,
         is_shiny    INTEGER NOT NULL DEFAULT 0,
-        seen_at     INTEGER NOT NULL,
+        seen_at     BIGINT NOT NULL,
         PRIMARY KEY (api_key_id, species_id)
       )
     `,
@@ -195,10 +222,28 @@ export function wallet(row: CompanionRow): number {
 type StoredCompanion = {
   api_key_id: string;
   state: string;
-  tokens_total: number;
-  tokens_spent: number;
-  last_credit_at: number | null;
+  /** `BIGINT`, so a string on Postgres and a number on SQLite. See `num`. */
+  tokens_total: number | string;
+  tokens_spent: number | string;
+  last_credit_at: number | string | null;
 };
+
+/**
+ * One `BIGINT` column as a number.
+ *
+ * Bun's Postgres driver hands a 64-bit column back as a **string** rather than
+ * narrowing it into a double on its own, while `bun:sqlite` hands back a number.
+ * Without this the difference is silent and arithmetic becomes concatenation:
+ * `tokens_total - tokens_spent` is `NaN` and a wallet renders as nothing, or
+ * worse, `consumedTotal` compares as a string and growth stops.
+ *
+ * At the mapper, which is where the host's own repos convert and for the same
+ * reason — one place per row shape, rather than at each of the dozens of call
+ * sites that read the field afterwards.
+ */
+const num = (value: number | string): number => Number(value);
+const numOrNull = (value: number | string | null): number | null =>
+  value === null ? null : Number(value);
 
 export async function readCompanion(
   storage: PluginStorage,
@@ -214,13 +259,13 @@ export async function readCompanion(
     apiKeyId: row.api_key_id,
     state: parseState(row.state),
     raw: row.state,
-    tokensTotal: row.tokens_total,
-    tokensSpent: row.tokens_spent,
-    // Taken straight from the column. A `?? null` here was tried and deleted:
+    tokensTotal: num(row.tokens_total),
+    tokensSpent: num(row.tokens_spent),
+    // Converted but never defaulted. A `?? null` here was tried and deleted:
     // migration 5 gives every row the column and `bun:sqlite` hands back SQL
     // NULL as `null`, so the coalesce could not change an outcome — and no
     // mutation of it could fail a test, which is the definition of decoration.
-    lastCreditAt: row.last_credit_at,
+    lastCreditAt: numOrNull(row.last_credit_at),
   };
 }
 
@@ -252,9 +297,9 @@ export async function listCompanions(storage: PluginStorage): Promise<CompanionR
     apiKeyId: row.api_key_id,
     state: parseState(row.state),
     raw: row.state,
-    tokensTotal: row.tokens_total,
-    tokensSpent: row.tokens_spent,
-    lastCreditAt: row.last_credit_at,
+    tokensTotal: num(row.tokens_total),
+    tokensSpent: num(row.tokens_spent),
+    lastCreditAt: numOrNull(row.last_credit_at),
   }));
 }
 
@@ -302,25 +347,31 @@ export async function creditTokens(
  * Replaces one save with another, and reports whether this caller is the one
  * that did it.
  *
- * **Every write to `state` goes through here**, which is the whole point: a
- * guard at one site is a guard the next site forgets. `expected` is the row as
- * it was read, so the `UPDATE` lands only while nothing has moved underneath —
- * on a fleet, two replicas read the same save, both compute from it, and
- * last-writer-wins silently discards one of them. For a settle that means
- * `consumedTotal` going backwards and a lifetime of tokens re-granted as
- * growth; for a purchase it means an item bought and lost.
+ * **Every write that carries only the save goes through here**, which is the
+ * point: a guard at one site is a guard the next site forgets. (`purchase` is
+ * the one write that does not, because it moves the wallet in the same
+ * statement; it carries the identical predicate plus the balance check.)
+ * `expected` is the row as it was read, so the `UPDATE` lands only while nothing
+ * has moved underneath — on a fleet, two replicas read the same save, both
+ * compute from it, and last-writer-wins silently discards one of them. For a
+ * settle that means `consumedTotal` going backwards and a lifetime of tokens
+ * re-granted as growth; for a purchase it means an item bought and lost.
  *
- * The outcome is read back rather than taken from a row count, because
- * `PluginStorage.run` reports none. That read costs a statement and buys the
- * only signal a caller has.
+ * **The statement reports its own outcome, through `RETURNING`.** `run` yields
+ * no row count, and the obvious substitute — write, then read the row back and
+ * compare — was written here first and is wrong in the direction that costs the
+ * most. It is two statements with an await between them, so anybody who reads
+ * what we just wrote and writes their own save before our `SELECT` lands turns a
+ * swap that *succeeded* into `false`: a settle that reports no write files no
+ * Dex row for a graduation the row has already taken, and nothing can re-emit it
+ * because the state moved; a purchase answers 409 with the wallet debited. A
+ * false negative here is unrecoverable, where a false positive is merely rude,
+ * and inference cannot distinguish them. `RETURNING` does not infer.
  *
- * **Two callers writing byte-identical saves both hear "yes", and that is
- * correct rather than tolerated.** Identical bytes mean identical `expected` and
- * identical intent — a double submission of one action, not two actions. Only
- * one `UPDATE` matched, so a purchase debits once and an item is added once;
- * telling the second caller it failed would report a loss that did not happen.
- * Two *different* intents can never collide this way, because the second reads
- * the first's result as its own `expected`.
+ * With it, a second caller writing a byte-identical save correctly hears "no":
+ * its own `UPDATE` matched nothing. It loses nothing by that answer — the
+ * identical intent was already applied by the caller that won — and the panel's
+ * refetch shows the result either way.
  */
 export async function writeState(
   storage: PluginStorage,
@@ -330,15 +381,13 @@ export async function writeState(
   now: number,
 ): Promise<boolean> {
   const serialised = serialiseState(next);
-  await storage.run(
-    "UPDATE {{companion}} SET state = $1, updated_at = $2 WHERE api_key_id = $3 AND state = $4",
+  const applied = await storage.get<{ ok: number }>(
+    `UPDATE {{companion}} SET state = $1, updated_at = $2
+     WHERE api_key_id = $3 AND state = $4
+     RETURNING 1 AS ok`,
     [serialised, now, apiKeyId, expected],
   );
-  const after = await storage.get<{ state: string }>(
-    "SELECT state FROM {{companion}} WHERE api_key_id = $1",
-    [apiKeyId],
-  );
-  return after?.state === serialised;
+  return applied !== null;
 }
 
 /**
@@ -396,7 +445,6 @@ export async function settle(
     return { row, events: [], wrote: false };
   }
 
-  const before = row.state.consumedTotal;
   const wrote = await writeState(storage, apiKeyId, row.raw, result.state, now);
   if (wrote) {
     let index = 0;
@@ -418,7 +466,7 @@ export async function settle(
           nature: event.nature,
           caughtAt: now,
         },
-        dexId(apiKeyId, before, index++),
+        dexId(apiKeyId, row.raw, index++),
       );
     }
   }
@@ -436,17 +484,46 @@ export async function settle(
 }
 
 /**
+ * A 64-bit digest of a save, as two FNV-1a passes in base 36.
+ *
+ * Deliberately not `hashSeed` from `server.ts`, which is 32 bits and seeds a
+ * roll: there a collision picks a different Pokémon and nobody can tell, here it
+ * would silently drop a graduation. Two passes rather than one because 32 bits
+ * collide at a few tens of thousands of rows by the birthday bound, and a Dex
+ * outlives that; the second pass mixes the position in so the two are not the
+ * same function of the same bytes.
+ */
+function digest(input: string): string {
+  let a = 2166136261;
+  let b = 0x811c9dc5 ^ 0x9e3779b9;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    a = Math.imul(a ^ code, 16777619);
+    b = Math.imul(b ^ (code + i), 16777619);
+  }
+  return `${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}`;
+}
+
+/**
  * A Dex row id, derived rather than minted.
  *
- * Every part is a stored fact: the key, what the save had already absorbed
- * before this settle, and which graduation of this settle it is. A retried or
- * duplicated settle over the same save therefore produces the same id, which
- * with `DO NOTHING` below makes the insert idempotent — where a counter and a
- * clock (what this was) makes two replicas mint two ids for one graduation and
- * file it twice.
+ * Every part is a stored fact: the key, the save this graduation came out of,
+ * and which graduation of that settle it is. A retried or duplicated settle over
+ * the same save produces the same id, which with `DO NOTHING` below makes the
+ * insert idempotent — where a counter and a clock, which is what this was, let
+ * two replicas mint two ids for one graduation and file it twice.
+ *
+ * **The whole save rather than its `consumedTotal`, and that correction cost a
+ * Pokédex entry to find.** `consumedTotal` moves with *traffic*, and growth can
+ * arrive without any: an everstone banks it, a rare candy injects it, and a
+ * graduation hands its overflow to the next egg. Two graduations at one token
+ * total therefore both took index 0 of the same number — so an unpinned
+ * companion that graduated, and the line that hatched from its overflow and
+ * graduated on the next settle, produced one id between them and `DO NOTHING`
+ * swallowed the second. The save is what actually differs between them.
  */
-function dexId(apiKeyId: string, consumedBefore: number, index: number): string {
-  return `${apiKeyId}:${consumedBefore}:${index}`;
+function dexId(apiKeyId: string, raw: string, index: number): string {
+  return `${apiKeyId}:${digest(raw)}:${index}`;
 }
 
 export async function recordGraduation(
@@ -486,7 +563,7 @@ type StoredDex = {
   rarity: string;
   is_shiny: number;
   nature: string | null;
-  caught_at: number;
+  caught_at: number | string;
 };
 
 /**
@@ -584,7 +661,7 @@ export async function readDex(storage: PluginStorage, apiKeyId: string): Promise
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
       nature: row.nature,
-      caughtAt: row.caught_at,
+      caughtAt: num(row.caught_at),
     });
   }
   return entries;
@@ -678,7 +755,7 @@ type StoredSighting = {
   chain_order: string;
   rarity: string;
   is_shiny: number;
-  seen_at: number;
+  seen_at: number | string;
 };
 
 /**
@@ -705,7 +782,7 @@ export async function listSightings(storage: PluginStorage, apiKeyId: string): P
       chainOrder: chain,
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
-      seenAt: row.seen_at,
+      seenAt: num(row.seen_at),
     });
   }
   return sightings;
@@ -717,11 +794,11 @@ export async function lastGrantedAt(
   apiKeyId: string,
   windowKey: string,
 ): Promise<number | null> {
-  const row = await storage.get<{ granted_at: number }>(
+  const row = await storage.get<{ granted_at: number | string }>(
     "SELECT granted_at FROM {{grants}} WHERE api_key_id = $1 AND window_key = $2",
     [apiKeyId, windowKey],
   );
-  return row?.granted_at ?? null;
+  return row === null ? null : num(row.granted_at);
 }
 
 /**
@@ -737,10 +814,13 @@ export async function lastGrantedAt(
  * `previous` is null for a window never seen, where the claim is the insert
  * itself and the conflict clause refuses the second one.
  *
- * ponytail: two replicas claiming a fresh window in the *same millisecond* both
- * read back their own instant and both pay — one extra candy, bounded by the
- * window's own rate limit. Closing it needs a claim token column and a per-write
- * nonce; add it if the seeding path ever pays something that compounds.
+ * **`RETURNING` rather than a read-back, and that is worth a payout.** Reading
+ * the row afterwards and comparing it to `at` cannot tell a win from a loss when
+ * both callers write the same instant — the loser finds its own number there,
+ * put there by the winner, and pays too. Nor is that a two-clock coincidence:
+ * two limit events for one key drain in a single pass of the host's bus and both
+ * read the same clock, so one process reaches it alone. A refused `DO UPDATE`
+ * returns no row whatever it would have written.
  */
 export async function claimGrant(
   storage: PluginStorage,
@@ -749,21 +829,22 @@ export async function claimGrant(
   previous: number | null,
   at: number,
 ): Promise<boolean> {
-  if (previous === null) {
-    await storage.run(
-      `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
-       ON CONFLICT (api_key_id, window_key) DO NOTHING`,
-      [apiKeyId, windowKey, at],
-    );
-  } else {
-    await storage.run(
-      `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
-       ON CONFLICT (api_key_id, window_key) DO UPDATE SET granted_at = excluded.granted_at
-       WHERE {{grants}}.granted_at = $4`,
-      [apiKeyId, windowKey, at, previous],
-    );
-  }
-  return (await lastGrantedAt(storage, apiKeyId, windowKey)) === at;
+  const claimed =
+    previous === null
+      ? await storage.get<{ ok: number }>(
+          `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
+           ON CONFLICT (api_key_id, window_key) DO NOTHING
+           RETURNING 1 AS ok`,
+          [apiKeyId, windowKey, at],
+        )
+      : await storage.get<{ ok: number }>(
+          `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
+           ON CONFLICT (api_key_id, window_key) DO UPDATE SET granted_at = excluded.granted_at
+           WHERE {{grants}}.granted_at = $4
+           RETURNING 1 AS ok`,
+          [apiKeyId, windowKey, at, previous],
+        );
+  return claimed !== null;
 }
 
 export type ShopEntry =

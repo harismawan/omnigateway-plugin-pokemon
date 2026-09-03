@@ -6,6 +6,7 @@ import {
   consume,
   creditTokens,
   lastGrantedAt,
+  listCompanions,
   MIGRATIONS,
   purchase,
   readCompanion,
@@ -64,17 +65,45 @@ test("the second writer of a stale save loses, and the row keeps the first one's
   expect(after?.state?.lure).toBe(false);
 });
 
-test("two callers writing the same save both hear yes, because it is one intent twice", async () => {
+test("the second of two identical writers hears no, and loses nothing by it", async () => {
+  // The statement reports itself rather than being inferred from a later read,
+  // so the loser is told it did not write — which is true. What it asked for is
+  // on the row regardless, put there by the caller that won, so the honest
+  // answer costs it nothing. The inferring version said "yes" to both, and paid
+  // for that symmetry by also saying "no" to writes that had landed.
   await seed(1_000);
   const a = await readCompanion(storage, KEY);
   const b = await readCompanion(storage, KEY);
   if (a?.state == null || b?.state == null) throw new Error("seeded companion did not read back");
 
   expect(await writeState(storage, KEY, a.raw, { ...a.state, incense: true }, 10)).toBe(true);
-  expect(await writeState(storage, KEY, b.raw, { ...b.state, incense: true }, 11)).toBe(true);
+  expect(await writeState(storage, KEY, b.raw, { ...b.state, incense: true }, 11)).toBe(false);
 
-  // One row, one outcome, and nobody told they lost something they did not.
   expect((await readCompanion(storage, KEY))?.state?.incense).toBe(true);
+});
+
+test("a swap that landed is never reported as lost, however busy the row", async () => {
+  /*
+    The failure the read-back version had and this one cannot.
+
+    Inferring the outcome from a later `SELECT` means anybody who writes between
+    the `UPDATE` and that read turns a successful swap into `false` — and a
+    settle that reports no write files no Dex row for a graduation the row has
+    already taken, with nothing able to re-emit it. Here the write is racing a
+    second writer that lands immediately after it, which is exactly the window
+    that used to lie.
+  */
+  await seed(1_000);
+  const mine = await readCompanion(storage, KEY);
+  if (mine?.state == null) throw new Error("no companion");
+
+  const won = await writeState(storage, KEY, mine.raw, { ...mine.state, incense: true }, 10);
+  // Somebody else writes the instant afterwards, over what this call just wrote.
+  const next = await readCompanion(storage, KEY);
+  if (next?.state == null) throw new Error("no companion");
+  await writeState(storage, KEY, next.raw, { ...next.state, lure: true }, 11);
+
+  expect(won).toBe(true);
 });
 
 test("a purchase debits once when two replicas price it against one wallet", async () => {
@@ -163,12 +192,12 @@ test("an item is spent once when two replicas consume the same held one", async 
   // **One decrement**, which is the assertion that matters: the bag cannot pay
   // twice for one held item however many replicas reach for it.
   expect((await readCompanion(storage, KEY))?.state?.inventory.lure).toBe(0);
-  // Both are told yes, and that is the rule `writeState` documents rather than a
-  // gap in this test. Two consumes of one item from one save produce the same
-  // save, so this is one intent submitted twice — the item was spent once and
-  // the lure is armed, which is what both callers asked for. A caller told
-  // `stale` here would be told it lost something it did not.
-  expect([one.ok, two.ok]).toEqual([true, true]);
+  // One caller wrote, one did not, and each is told which. The one refused is
+  // told `stale` rather than `none-held`: it read a bag that had the item, so
+  // the honest report is that the save moved, not that the item was missing.
+  expect([one.ok, two.ok].filter(Boolean)).toHaveLength(1);
+  expect([one, two].find((result) => !result.ok)).toEqual({ ok: false, reason: "stale" });
+  // And the effect landed exactly once, from the winner.
   expect((await readCompanion(storage, KEY))?.state?.lure).toBe(true);
 });
 
@@ -290,11 +319,12 @@ test("the losing settle reports no events, so its graduation is neither logged n
 
   const [first, second] = await Promise.all([settle(storage, KEY, 60), settle(storage, KEY, 61)]);
 
-  // Both settles compute the same transition from the same save, so this is the
-  // byte-identical case again — what matters is that the row moved once and
-  // nothing was granted twice.
-  expect(first?.row.state?.consumedTotal).toBe(EGG_HATCH_THRESHOLD);
-  expect(second?.row.state?.consumedTotal).toBe(EGG_HATCH_THRESHOLD);
+  // One settle wrote and one did not, and the loser reports the save as it read
+  // it — no events, so its caller logs no graduation and pushes no frame for a
+  // write it did not make. The winner's growth is on the row either way, and a
+  // second helping was never applied: `advance` works from the difference.
+  expect([first?.wrote, second?.wrote].filter(Boolean)).toHaveLength(1);
+  expect([first, second].find((result) => result?.wrote === false)?.events).toEqual([]);
   expect((await readCompanion(storage, KEY))?.state?.consumedTotal).toBe(EGG_HATCH_THRESHOLD);
 });
 
@@ -316,7 +346,140 @@ test("a save that will not parse is never overwritten, however contended", async
   expect(kept?.state).toBe("{oh no");
   expect(serialiseState(freshState())).not.toBe(kept?.state);
 });
+test("two graduations at one token total are two Dex rows, not one", async () => {
+  /*
+    The trap in deriving an id from `consumedTotal`, which is what this did
+    first: that number moves with *traffic*, and growth arrives without any. An
+    everstone banks it, a rare candy injects it, and a graduation hands its
+    overflow to the next egg — so two graduations can happen at one token total,
+    both take index 0 of the same number, and `ON CONFLICT DO NOTHING` swallows
+    the second. Silently and unrecoverably: nothing re-emits a graduation whose
+    state has already moved.
+
+    Every settle below is zero-gain — no tokens are credited after the seed,
+    which is the whole point. The ids must differ anyway.
+  */
+  const BANK = 5_000_000_000;
+  await seed(10_000);
+  const start = await readCompanion(storage, KEY);
+  if (start?.state == null) throw new Error("no companion");
+
+  // A companion pinned at its final stage while a busy key banked growth into
+  // it, with the stone just taken off.
+  await writeState(
+    storage,
+    KEY,
+    start.raw,
+    {
+      ...start.state,
+      consumedTotal: start.tokensTotal,
+      active: {
+        baseId: 132,
+        plannedPath: [132],
+        stageIndex: 0,
+        stageTimes: [1],
+        usedAtStage: BANK,
+        rarity: "common",
+        isShiny: false,
+        nature: "hardy",
+        dittoDisguise: null,
+        dittoRevealed: false,
+        everstone: false,
+        soothe: false,
+        soothedRaw: 0,
+      },
+    },
+    5,
+  );
+
+  // The banked growth graduates it, and the overflow lands in the next egg.
+  const first = await settle(storage, KEY, 100);
+  expect(first?.events.map((event) => event.kind)).toEqual(["graduated"]);
+
+  // The panel's prefetch rolls that egg; still no tokens arrive.
+  const hatching = await readCompanion(storage, KEY);
+  if (hatching?.state == null) throw new Error("no companion");
+  await writeState(
+    storage,
+    KEY,
+    hatching.raw,
+    {
+      ...hatching.state,
+      pendingHatch: {
+        speciesId: 1,
+        path: [1, 2, 3],
+        rarity: "common",
+        isShiny: false,
+        nature: "hardy",
+        ditto: false,
+      },
+    },
+    110,
+  );
+
+  // The same overflow carries the new line all the way out, at the same total.
+  const second = await settle(storage, KEY, 120);
+  expect(second?.events.map((event) => event.kind)).toEqual([
+    "hatched",
+    "evolved",
+    "evolved",
+    "graduated",
+  ]);
+
+  const dex = await readDex(storage, KEY);
+  expect(dex.map((entry) => entry.finalId).sort((a, b) => a - b)).toEqual([3, 132]);
+});
+
 // ------------------------------------------------------------------- dialect
+
+test("a BIGINT column arriving as a string is still a number by the time it is read", async () => {
+  /*
+    Bun's Postgres driver hands a 64-bit column back as a **string** rather than
+    narrowing it into a double on its own; `bun:sqlite` hands back a number. Every
+    instant and every counter this plugin stores is `BIGINT` — an epoch
+    millisecond does not fit in `int4` and neither does a shiny charm — so on a
+    clustered install every one of them arrives as text.
+
+    Nothing else here can catch that: SQLite is the only backend these suites
+    run against, and it is the one that does not do it. So the driver is
+    imitated instead — every number a query returns is handed back as a string,
+    and the mappers must still answer with numbers that add up.
+  */
+  await seed(4_000);
+  const seeded = await readCompanion(storage, KEY);
+  if (seeded?.state == null) throw new Error("no companion");
+  await claimGrant(storage, KEY, "tokens:1w", null, 12_345_678_901);
+
+  const asPostgres: typeof storage = {
+    ...storage,
+    get: async <T>(sql: string, params?: readonly unknown[]) =>
+      stringifyNumbers(await storage.get<T>(sql, params)) as T | null,
+    all: async <T>(sql: string, params?: readonly unknown[]) =>
+      (await storage.all<T>(sql, params)).map((row) => stringifyNumbers(row) as T),
+  };
+
+  const row = await readCompanion(asPostgres, KEY);
+  expect(row?.tokensTotal).toBe(4_000);
+  expect(row?.lastCreditAt).toBe(1);
+  // The arithmetic, not just the shape: a string here concatenates instead of
+  // subtracting, and a wallet renders as nonsense rather than as an error.
+  expect(wallet(row as NonNullable<typeof row>)).toBe(4_000);
+
+  const listed = await listCompanions(asPostgres);
+  expect(listed[0]?.tokensTotal).toBe(4_000);
+  expect(await lastGrantedAt(asPostgres, KEY, "tokens:1w")).toBe(12_345_678_901);
+});
+
+/** Every number in a row as the Postgres driver would hand a `BIGINT` back. */
+function stringifyNumbers(row: unknown): unknown {
+  if (row === null || typeof row !== "object") return row;
+  return Object.fromEntries(
+    Object.entries(row as Record<string, unknown>).map(([key, value]) => [
+      key,
+      typeof value === "number" ? String(value) : value,
+    ]),
+  );
+}
 
 test("no statement in src/ uses a placeholder only SQLite understands", async () => {
   /*

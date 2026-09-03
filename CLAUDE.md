@@ -63,13 +63,18 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 5. The panel talks to its own backend through the SDK's `api`, which is bound to
    `/api/plugins/pokemon/`. It does not reach the console's own API, and a path that tries is
    refused rather than normalised.
-6. **One installation is several replicas.** Every storage call is asynchronous, SQL is written in
-   the `$1` dialect both SQLite and Postgres accept, and every write to `{{companion}}.state` goes
-   through `writeState` — a compare-and-swap against `CompanionRow.raw`, the stored text. Never
-   re-serialise the parsed state as the expected value: `parseState` clamps and defaults, so a save
-   that round-trips to different bytes would never match itself. A lost swap is reported, never
-   retried, except the candy grant, whose window is already claimed. Design:
-   `docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
+6. **One installation is several replicas.** Every storage call is asynchronous; SQL is written in
+   the `$1` dialect both SQLite and Postgres accept, with every instant and counter `BIGINT` —
+   `INTEGER` is `int4` on Postgres and an epoch millisecond does not fit — and every mapper
+   converts, because a `BIGINT` arrives from the driver as a string. Every write to
+   `{{companion}}.state` is conditional on `CompanionRow.raw`, the stored text: `writeState` is the
+   one that carries only the save, `purchase` folds the wallet into the same predicate. Never
+   re-serialise the parsed state as the expected value — `parseState` clamps and defaults, so a save
+   that round-trips to different bytes would never match itself — and never infer the outcome from a
+   later read: every conditional write ends in `RETURNING`, because a read-back reports a write that
+   landed as lost the moment anyone else writes, which costs a graduation nothing can re-emit. A
+   lost swap is reported, never retried, except the candy grant, whose window is already claimed.
+   Design: `docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
 7. Nintendo and Game Freak assets are **never vendored** — not into the repository, the npm package,
    or any built artifact. They are fetched at runtime and cached in the plugin's scoped data
    directory.
