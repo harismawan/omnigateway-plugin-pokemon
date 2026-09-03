@@ -50,7 +50,7 @@ own.
 
 ## Capabilities
 
-The manifest declares five, and each one is there for a reason a reader can
+The manifest declares six, and each one is there for a reason a reader can
 check:
 
 | Capability | Why |
@@ -60,6 +60,7 @@ check:
 | `net:outbound` | Species data, companion sprites and item icons are fetched at runtime. The manifest also declares the origins, `https://pokeapi.co` and `https://raw.githubusercontent.com`; the host hands the plugin a `fetch` bound to that allowlist and refuses anything else. |
 | `events:request` | Growth is credited from `RequestCompleted` — all four token classes, which are disjoint, so summing them double-counts nothing. |
 | `events:limit` | A key parked at a `5h` or `1w` ceiling earns a rare candy, rated by the window's own length. A `1m` ceiling pays nothing: a minute is not a span in which work happened. |
+| `channels` | One push topic, `plugin:pokemon:activity`. The plugin sends a frame naming a key whenever that key's companion is written, and the panel refreshes instead of waiting out its poll. The frame carries the key and never the companion — see [the LIVE switch](#the-consoles-live-switch-and-the-push-channel) below. |
 
 Worth restating, because a plugin author reading a capability list will assume
 otherwise: **this is a guardrail, not a sandbox.** A plugin shares the gateway's
@@ -70,7 +71,43 @@ from one readable file. It constrains honest code and not hostile code.
 The plugin degrades rather than failing when a capability is absent. With no
 `net`, an incubating egg holds its progress instead of losing it, and both
 sprite routes answer `503` — the panel then draws each item as an emoji, which
-is the same thing it draws before the cache has filled.
+is the same thing it draws before the cache has filled. With no `channels`,
+nothing is pushed and the panel polls on its ten-second interval, exactly as it
+did before 1.3.0.
+
+### Host requirements
+
+This release declares `"api": 3` and needs a gateway implementing plugin API
+generation 3 — `@omnigateway/plugin-api` 0.3.0 or later, which is where plugin
+storage became asynchronous. A host on an earlier generation skips the plugin at
+boot, server half included, and says so in one line; `omni plugin verify pokemon`
+reaches the same verdict without restarting anything. 1.3.x remains the release
+for a generation-2 host.
+
+### Running the gateway as several replicas
+
+Supported, and nothing needs configuring. The plugin uses one dialect both
+backends accept, and every write is conditional on the save it was computed from,
+so two replicas settling, buying or granting against one row cannot lose each
+other's work — see
+`docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
+
+The panel keeps up across pods when the gateway offers
+`PluginChannel.broadcast` (`@omnigateway/plugin-api` 0.4.0 and later): a frame
+then reaches every replica's sockets rather than the one that happened to serve
+the request. On an older host the plugin falls back to pushing to its own
+process's panels, which is correct on a single process and means a clustered
+panel sees only what its own pod wrote.
+
+Two things stay per pod, both caches of immutable facts: the species and sprite
+files under the plugin's data directory, which each replica fetches once, and the
+in-memory name lookups built from them. A cold cache is an ordinary state — the
+panel shows `#25` until the name arrives.
+
+The panel additionally needs `@omnigateway/dashboard-sdk` 0.1.4 or later, which
+is where `usePluginChannel` arrives. A console below it disables **only** the
+panel — the server half goes on crediting growth — which is the host's rule for
+an `sdk` range mismatch rather than anything this plugin chooses.
 
 ## Nintendo and Game Freak intellectual property
 
@@ -119,14 +156,39 @@ and the panel stops refreshing without an error anywhere.
 `test/package.test.ts` checks the built bundle still imports it and carries no
 `createContext` of its own.
 
-## The console's LIVE switch
+## The console's LIVE switch, and the push channel
 
-The panel polls, because growth arrives from requests it cannot hear about. It
-polls on the console's cadence rather than its own: the chassis bar's LIVE
-control pauses every screen at once, this panel included, and there is
-deliberately no per-panel refresh setting. Paused means it stops refetching, not
-that it stops working — an operator who pauses still sees the companion they
-opened.
+Growth arrives from requests the panel cannot observe, so it has to be told.
+Since 1.3.0 it is told twice over, and the order matters.
+
+The plugin opens one channel and sends a frame naming a key whenever that key's
+companion is **written** — a credit, a hatch, an evolution, a graduation, a
+purchase, an item, a rate-limit grant, or either of the two answers that land
+minutes after a panel asked for them: the species roll behind the next hatch and
+the line behind a Ditto's reveal. Never on a read: this panel's own route settles a
+companion on the way in, and a frame there would have it refetch, settle, push
+and refetch again.
+
+A frame carries the key and nothing else. Both halves of the panel then refresh
+through the same routes the poll uses, so push and poll cannot disagree — the
+rule the console's own `res:*` topics are built on.
+
+Frames are floored at one second per key. Uncoalesced, a frame per credited
+request would be a panel refetch per request, which is strictly worse than the
+ten-second poll it replaces. The floor is leading **and** trailing: the first
+change goes out at once, and the last change of a burst is not lost.
+
+**The poll is still there, and that is deliberate.** `cadence(ms, topic)` returns
+`false` while the topic is being pushed and the interval when it is not, so the
+ten-second poll switches itself off when the channel is live and comes back on
+its own when the socket drops — or was never there. Channel delivery is
+best-effort and drops rather than queues, so a panel with no poll underneath it
+would be one whose freshness depended on a frame nothing promised to deliver.
+
+Above both sits the chassis bar's LIVE control, which pauses every screen at
+once, this panel included; there is deliberately no per-panel refresh setting.
+Paused means it stops refreshing, not that it stops working — an operator who
+pauses still sees the companion they opened.
 
 ## Licence
 

@@ -13,6 +13,33 @@ import { type CompanionState, freshState, parseState, serialiseState } from "./s
  * and exactly the property a snapshot wants. Putting it in a table would grow
  * every snapshot an operator downloads with data that re-fetches itself.
  */
+/*
+  `BIGINT` for every instant and every accumulating counter, and the word is not
+  decoration.
+
+  SQLite's `INTEGER` is 64-bit whatever width a column declares, so on the
+  default backend this reads as a preference. Postgres reads it as a type:
+  `INTEGER` is `int4` and stops at 2 147 483 647, while an epoch millisecond is
+  1.7e12. The *first credit* on a clustered install would fail with "value out of
+  range for type integer", inside an event handler, where the failure surfaces as
+  one warning line — the plugin would migrate, load, and then never write a row.
+  The counters overflow on their own account too: a shiny charm costs 3e9.
+
+  The host's own Postgres schema states the same rule where its SQLite one says
+  `INTEGER` (`packages/store/src/postgres/migrations/001_init.sql`): instants and
+  accumulating counters are `BIGINT`, small enumerations stay `INTEGER`. Species
+  ids and flags below are genuinely small and stay.
+
+  **Edited in place rather than added as a later migration**, because there is no
+  portable `ALTER`: SQLite cannot change a column's type at all. Editing is safe
+  because of the same asymmetry that makes it necessary — a SQLite install
+  applied version 1 long ago and never re-reads this text, and its storage is
+  identical either way, while a Postgres install is necessarily fresh, since
+  plugin tables do not migrate between dialects.
+
+  The consequence at the read end is that `BIGINT` arrives from the driver as a
+  **string**. Every mapper below converts, the way the host's own repos do.
+*/
 export const MIGRATIONS: readonly PluginMigration[] = [
   {
     version: 1,
@@ -20,10 +47,10 @@ export const MIGRATIONS: readonly PluginMigration[] = [
       CREATE TABLE {{companion}} (
         api_key_id   TEXT PRIMARY KEY,
         state        TEXT NOT NULL,
-        tokens_total INTEGER NOT NULL DEFAULT 0,
-        tokens_spent INTEGER NOT NULL DEFAULT 0,
-        created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL
+        tokens_total BIGINT NOT NULL DEFAULT 0,
+        tokens_spent BIGINT NOT NULL DEFAULT 0,
+        created_at   BIGINT NOT NULL,
+        updated_at   BIGINT NOT NULL
       )
     `,
   },
@@ -39,7 +66,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         rarity      TEXT NOT NULL,
         is_shiny    INTEGER NOT NULL DEFAULT 0,
         nature      TEXT,
-        caught_at   INTEGER NOT NULL
+        caught_at   BIGINT NOT NULL
       )
     `,
   },
@@ -56,7 +83,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         window_key TEXT NOT NULL,
         -- An instant, not a tier. A grant is rate-limited by the window's own
         -- duration, because nothing tells this plugin when a window empties.
-        granted_at INTEGER NOT NULL,
+        granted_at BIGINT NOT NULL,
         PRIMARY KEY (api_key_id, window_key)
       )
     `,
@@ -72,7 +99,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
     // column existed has never had a credit *observed*, and backfilling
     // `updated_at` into it would invent traffic that may never have happened —
     // an idle-looking companion is a smaller lie than a working-looking one.
-    sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at INTEGER`,
+    sql: `ALTER TABLE {{companion}} ADD COLUMN last_credit_at BIGINT`,
   },
   {
     version: 6,
@@ -115,7 +142,7 @@ export const MIGRATIONS: readonly PluginMigration[] = [
         chain_order TEXT NOT NULL,
         rarity      TEXT NOT NULL,
         is_shiny    INTEGER NOT NULL DEFAULT 0,
-        seen_at     INTEGER NOT NULL,
+        seen_at     BIGINT NOT NULL,
         PRIMARY KEY (api_key_id, species_id)
       )
     `,
@@ -169,6 +196,18 @@ export type CompanionRow = {
   apiKeyId: string;
   /** Null when the stored save could not be read — never a fresh companion. */
   state: CompanionState | null;
+  /**
+   * The stored save exactly as the column holds it.
+   *
+   * Kept because it is what every write compares against. A gateway is a fleet
+   * now: two replicas settle, buy and grant against one row, and `state` is
+   * read-modify-written across an `await` on every one of those paths — so the
+   * write has to say *which* save it is replacing. Re-serialising the parsed
+   * state would not do: `parseState` clamps, defaults and drops, so a save that
+   * round-trips to different bytes would never match itself and no write would
+   * ever land.
+   */
+  raw: string;
   tokensTotal: number;
   tokensSpent: number;
   /** When tokens last landed, or null for a row that predates the column. */
@@ -183,28 +222,50 @@ export function wallet(row: CompanionRow): number {
 type StoredCompanion = {
   api_key_id: string;
   state: string;
-  tokens_total: number;
-  tokens_spent: number;
-  last_credit_at: number | null;
+  /** `BIGINT`, so a string on Postgres and a number on SQLite. See `num`. */
+  tokens_total: number | string;
+  tokens_spent: number | string;
+  last_credit_at: number | string | null;
 };
 
-export function readCompanion(storage: PluginStorage, apiKeyId: string): CompanionRow | null {
-  const row = storage.get<StoredCompanion>(
+/**
+ * One `BIGINT` column as a number.
+ *
+ * Bun's Postgres driver hands a 64-bit column back as a **string** rather than
+ * narrowing it into a double on its own, while `bun:sqlite` hands back a number.
+ * Without this the difference is silent and arithmetic becomes concatenation:
+ * `tokens_total - tokens_spent` is `NaN` and a wallet renders as nothing, or
+ * worse, `consumedTotal` compares as a string and growth stops.
+ *
+ * At the mapper, which is where the host's own repos convert and for the same
+ * reason — one place per row shape, rather than at each of the dozens of call
+ * sites that read the field afterwards.
+ */
+const num = (value: number | string): number => Number(value);
+const numOrNull = (value: number | string | null): number | null =>
+  value === null ? null : Number(value);
+
+export async function readCompanion(
+  storage: PluginStorage,
+  apiKeyId: string,
+): Promise<CompanionRow | null> {
+  const row = await storage.get<StoredCompanion>(
     `SELECT api_key_id, state, tokens_total, tokens_spent, last_credit_at
-     FROM {{companion}} WHERE api_key_id = ?`,
+     FROM {{companion}} WHERE api_key_id = $1`,
     [apiKeyId],
   );
   if (row === null) return null;
   return {
     apiKeyId: row.api_key_id,
     state: parseState(row.state),
-    tokensTotal: row.tokens_total,
-    tokensSpent: row.tokens_spent,
-    // Taken straight from the column. A `?? null` here was tried and deleted:
+    raw: row.state,
+    tokensTotal: num(row.tokens_total),
+    tokensSpent: num(row.tokens_spent),
+    // Converted but never defaulted. A `?? null` here was tried and deleted:
     // migration 5 gives every row the column and `bun:sqlite` hands back SQL
     // NULL as `null`, so the coalesce could not change an outcome — and no
     // mutation of it could fail a test, which is the definition of decoration.
-    lastCreditAt: row.last_credit_at,
+    lastCreditAt: numOrNull(row.last_credit_at),
   };
 }
 
@@ -226,8 +287,8 @@ export function readCompanion(storage: PluginStorage, apiKeyId: string): Compani
  * the top of the roster. Written as a boolean key it needs no version of SQLite
  * newer than the one the gateway happens to link.
  */
-export function listCompanions(storage: PluginStorage): CompanionRow[] {
-  const rows = storage.all<StoredCompanion>(
+export async function listCompanions(storage: PluginStorage): Promise<CompanionRow[]> {
+  const rows = await storage.all<StoredCompanion>(
     `SELECT api_key_id, state, tokens_total, tokens_spent, last_credit_at
      FROM {{companion}}
      ORDER BY last_credit_at IS NULL, last_credit_at DESC, tokens_total DESC, api_key_id ASC`,
@@ -235,9 +296,10 @@ export function listCompanions(storage: PluginStorage): CompanionRow[] {
   return rows.map((row) => ({
     apiKeyId: row.api_key_id,
     state: parseState(row.state),
-    tokensTotal: row.tokens_total,
-    tokensSpent: row.tokens_spent,
-    lastCreditAt: row.last_credit_at,
+    raw: row.state,
+    tokensTotal: num(row.tokens_total),
+    tokensSpent: num(row.tokens_spent),
+    lastCreditAt: numOrNull(row.last_credit_at),
   }));
 }
 
@@ -257,22 +319,75 @@ export function listCompanions(storage: PluginStorage): CompanionRow[] {
  * and settles all move `updated_at` and must leave this one alone, or the
  * panel's activity state would read a shopping trip as work.
  */
-export function creditTokens(
+export async function creditTokens(
   storage: PluginStorage,
   apiKeyId: string,
   tokens: number,
   now: number,
-): void {
-  if (tokens <= 0) return;
-  storage.run(
+): Promise<boolean> {
+  // Reports whether it wrote, for the reason `settle` does. The host emits a
+  // `RequestCompleted` for a failed request too, and that request carries no
+  // tokens — so this early return is the common case during a provider outage,
+  // not an edge. A caller that assumed a credit always writes would push a frame
+  // per failed request naming a key that may not even have a row.
+  if (tokens <= 0) return false;
+  await storage.run(
     `INSERT INTO {{companion}} (api_key_id, state, tokens_total, tokens_spent, created_at, updated_at, last_credit_at)
-     VALUES (?, ?, ?, 0, ?, ?, ?)
+     VALUES ($1, $2, $3, 0, $4, $5, $6)
      ON CONFLICT(api_key_id) DO UPDATE SET
        tokens_total = tokens_total + excluded.tokens_total,
        updated_at = excluded.updated_at,
        last_credit_at = excluded.last_credit_at`,
     [apiKeyId, serialiseState(freshState()), Math.trunc(tokens), now, now, now],
   );
+  return true;
+}
+
+/**
+ * Replaces one save with another, and reports whether this caller is the one
+ * that did it.
+ *
+ * **Every write that carries only the save goes through here**, which is the
+ * point: a guard at one site is a guard the next site forgets. (`purchase` is
+ * the one write that does not, because it moves the wallet in the same
+ * statement; it carries the identical predicate plus the balance check.)
+ * `expected` is the row as it was read, so the `UPDATE` lands only while nothing
+ * has moved underneath — on a fleet, two replicas read the same save, both
+ * compute from it, and last-writer-wins silently discards one of them. For a
+ * settle that means `consumedTotal` going backwards and a lifetime of tokens
+ * re-granted as growth; for a purchase it means an item bought and lost.
+ *
+ * **The statement reports its own outcome, through `RETURNING`.** `run` yields
+ * no row count, and the obvious substitute — write, then read the row back and
+ * compare — was written here first and is wrong in the direction that costs the
+ * most. It is two statements with an await between them, so anybody who reads
+ * what we just wrote and writes their own save before our `SELECT` lands turns a
+ * swap that *succeeded* into `false`: a settle that reports no write files no
+ * Dex row for a graduation the row has already taken, and nothing can re-emit it
+ * because the state moved; a purchase answers 409 with the wallet debited. A
+ * false negative here is unrecoverable, where a false positive is merely rude,
+ * and inference cannot distinguish them. `RETURNING` does not infer.
+ *
+ * With it, a second caller writing a byte-identical save correctly hears "no":
+ * its own `UPDATE` matched nothing. It loses nothing by that answer — the
+ * identical intent was already applied by the caller that won — and the panel's
+ * refetch shows the result either way.
+ */
+export async function writeState(
+  storage: PluginStorage,
+  apiKeyId: string,
+  expected: string,
+  next: CompanionState,
+  now: number,
+): Promise<boolean> {
+  const serialised = serialiseState(next);
+  const applied = await storage.get<{ ok: number }>(
+    `UPDATE {{companion}} SET state = $1, updated_at = $2
+     WHERE api_key_id = $3 AND state = $4
+     RETURNING 1 AS ok`,
+    [serialised, now, apiKeyId, expected],
+  );
+  return applied !== null;
 }
 
 /**
@@ -285,36 +400,147 @@ export function creditTokens(
  * A save that cannot be read is left exactly as it is. Overwriting it with a
  * fresh companion would be the one irreversible thing this plugin could do to
  * somebody's months of growth, and it would do it silently.
+ *
+ * `wrote` reports whether the row actually moved, because the push channel's
+ * invariant is a frame on every write and on no read — and this is called on
+ * both paths. A caller cannot infer it from `events`: `advance` can return a
+ * changed state with none, so an inference would go wrong in the direction that
+ * silently costs the panel a frame.
+ *
+ * **The graduations are written here, after the swap this caller won.** They used
+ * to be the caller's, one statement later, and on a fleet that is a window: the
+ * replica that loses the swap must record nothing, and it cannot know it lost
+ * until the swap has answered.
+ *
+ * **Deliberately not in a transaction, and that was learnt the hard way.** The
+ * host's SQLite plugin storage is one connection with `BEGIN`/`COMMIT` written
+ * by hand and no queue in front of it, so two overlapping
+ * `storage.transaction` calls — which is what two settles are the moment one of
+ * them awaits — fail outright with "cannot start a transaction within a
+ * transaction". That is a single-process failure, not a cluster one, and it
+ * arrives on the ordinary path: a poll settling while a credit settles. What the
+ * transaction was buying is a crash window between two writes; what it cost is
+ * every concurrent settle on the default backend.
+ *
+ * The order is the mitigation that remains. The swap first, so only one replica
+ * records; the Dex rows after it, each under an id derived from the save they
+ * came from, so a settle repeated over the same save files the same row rather
+ * than a second one.
+ *
+ * Sightings stay outside, and stay the caller's, because they are recorded on
+ * every settle rather than on a write — including the settles that change
+ * nothing. That is what registers a companion already half way up its line.
  */
-export function settle(
+export async function settle(
   storage: PluginStorage,
   apiKeyId: string,
   now: number,
-): { row: CompanionRow; events: readonly CompanionEvent[] } | null {
-  const row = readCompanion(storage, apiKeyId);
+): Promise<{ row: CompanionRow; events: readonly CompanionEvent[]; wrote: boolean } | null> {
+  const row = await readCompanion(storage, apiKeyId);
   if (row === null) return null;
-  if (row.state === null) return { row, events: [] };
+  if (row.state === null) return { row, events: [], wrote: false };
 
   const result = advance(row.state, row.tokensTotal, now);
-  if (result.events.length === 0 && result.state === row.state) return { row, events: [] };
+  if (result.events.length === 0 && result.state === row.state) {
+    return { row, events: [], wrote: false };
+  }
 
-  storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-    serialiseState(result.state),
-    now,
-    apiKeyId,
-  ]);
-  return { row: { ...row, state: result.state }, events: result.events };
+  const wrote = await writeState(storage, apiKeyId, row.raw, result.state, now);
+  if (wrote) {
+    let index = 0;
+    for (const event of result.events) {
+      if (event.kind !== "graduated") continue;
+      await recordGraduation(
+        storage,
+        apiKeyId,
+        {
+          baseId: event.baseId,
+          finalId: event.finalId,
+          chainOrder: event.chainOrder,
+          // Straight from the event, because the state that accumulated these
+          // is discarded by the graduation that produced it. A clock read here
+          // would date every stage to the settle that finished the line.
+          stageTimes: event.stageTimes,
+          rarity: event.rarity,
+          isShiny: event.isShiny,
+          nature: event.nature,
+          caughtAt: now,
+        },
+        dexId(apiKeyId, row.raw, index++),
+      );
+    }
+  }
+
+  // A replica that lost the swap reports nothing and writes nothing: the state
+  // on the row is the winner's, its graduations are already recorded, and the
+  // next settle reads them. Returning the events anyway would log a graduation
+  // twice and push a frame for a write this process did not make.
+  if (!wrote) return { row, events: [], wrote: false };
+  return {
+    row: { ...row, state: result.state, raw: serialiseState(result.state) },
+    events: result.events,
+    wrote: true,
+  };
 }
 
-export function recordGraduation(
+/**
+ * A 64-bit digest of a save, as two FNV-1a passes in base 36.
+ *
+ * Deliberately not `hashSeed` from `server.ts`, which is 32 bits and seeds a
+ * roll: there a collision picks a different Pokémon and nobody can tell, here it
+ * would silently drop a graduation. Two passes rather than one because 32 bits
+ * collide at a few tens of thousands of rows by the birthday bound, and a Dex
+ * outlives that; the second pass mixes the position in so the two are not the
+ * same function of the same bytes.
+ */
+function digest(input: string): string {
+  let a = 2166136261;
+  let b = 0x811c9dc5 ^ 0x9e3779b9;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    a = Math.imul(a ^ code, 16777619);
+    b = Math.imul(b ^ (code + i), 16777619);
+  }
+  // Padded, so the join is injective. Base 36 of a 32-bit value is one to seven
+  // characters, and two variable-length halves concatenated are ambiguous:
+  // `(1, 1261)` and `(71, 1)` both spell `1z1`. It costs a factor of two on an
+  // event already at 2^-64, which is not why it is here — a hash whose halves
+  // can be read two ways is one nobody can reason about at all.
+  return `${(a >>> 0).toString(36).padStart(7, "0")}${(b >>> 0).toString(36).padStart(7, "0")}`;
+}
+
+/**
+ * A Dex row id, derived rather than minted.
+ *
+ * Every part is a stored fact: the key, the save this graduation came out of,
+ * and which graduation of that settle it is. A retried or duplicated settle over
+ * the same save produces the same id, which with `DO NOTHING` below makes the
+ * insert idempotent — where a counter and a clock, which is what this was, let
+ * two replicas mint two ids for one graduation and file it twice.
+ *
+ * **The whole save rather than its `consumedTotal`, and that correction cost a
+ * Pokédex entry to find.** `consumedTotal` moves with *traffic*, and growth can
+ * arrive without any: an everstone banks it, a rare candy injects it, and a
+ * graduation hands its overflow to the next egg. Two graduations at one token
+ * total therefore both took index 0 of the same number — so an unpinned
+ * companion that graduated, and the line that hatched from its overflow and
+ * graduated on the next settle, produced one id between them and `DO NOTHING`
+ * swallowed the second. The save is what actually differs between them.
+ */
+function dexId(apiKeyId: string, raw: string, index: number): string {
+  return `${apiKeyId}:${digest(raw)}:${index}`;
+}
+
+export async function recordGraduation(
   storage: PluginStorage,
   apiKeyId: string,
   entry: Omit<DexEntry, "id">,
   id: string,
-): void {
-  storage.run(
+): Promise<void> {
+  await storage.run(
     `INSERT INTO {{dex}} (id, api_key_id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (id) DO NOTHING`,
     [
       id,
       apiKeyId,
@@ -342,7 +568,7 @@ type StoredDex = {
   rarity: string;
   is_shiny: number;
   nature: string | null;
-  caught_at: number;
+  caught_at: number | string;
 };
 
 /**
@@ -413,10 +639,10 @@ function parseStageTimes(raw: string | null): readonly (number | null)[] | null 
  * precedent, and the contrast with `parseState` is deliberate rather than
  * inconsistent.
  */
-export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
-  const rows = storage.all<StoredDex>(
+export async function readDex(storage: PluginStorage, apiKeyId: string): Promise<DexEntry[]> {
+  const rows = await storage.all<StoredDex>(
     `SELECT id, base_id, final_id, chain_order, stage_times, rarity, is_shiny, nature, caught_at
-     FROM {{dex}} WHERE api_key_id = ? ORDER BY caught_at DESC`,
+     FROM {{dex}} WHERE api_key_id = $1 ORDER BY caught_at DESC`,
     [apiKeyId],
   );
 
@@ -440,7 +666,7 @@ export function readDex(storage: PluginStorage, apiKeyId: string): DexEntry[] {
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
       nature: row.nature,
-      caughtAt: row.caught_at,
+      caughtAt: num(row.caught_at),
     });
   }
   return entries;
@@ -495,21 +721,21 @@ export type ReachedStages = {
  * let a reroll move the roll's diversity weighting and the lure, which is the
  * economy rather than the panel.
  */
-export function recordSightings(
+export async function recordSightings(
   storage: PluginStorage,
   apiKeyId: string,
   reached: ReachedStages,
   now: number,
-): void {
+): Promise<void> {
   if (reached.disguised) return;
 
   const chain = JSON.stringify(reached.plannedPath);
   const stages = reached.plannedPath.slice(0, reached.stageIndex + 1);
   for (const [stage, speciesId] of stages.entries()) {
-    storage.run(
+    await storage.run(
       `INSERT INTO {{sightings}} (api_key_id, species_id, chain_order, rarity, is_shiny, seen_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(api_key_id, species_id) DO NOTHING`,
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (api_key_id, species_id) DO NOTHING`,
       [
         apiKeyId,
         speciesId,
@@ -534,7 +760,7 @@ type StoredSighting = {
   chain_order: string;
   rarity: string;
   is_shiny: number;
-  seen_at: number;
+  seen_at: number | string;
 };
 
 /**
@@ -544,10 +770,10 @@ type StoredSighting = {
  * and the rest are returned: a collection is history, so losing one entry is a
  * gap and hiding the other two hundred because of it would be worse.
  */
-export function listSightings(storage: PluginStorage, apiKeyId: string): Sighting[] {
-  const rows = storage.all<StoredSighting>(
+export async function listSightings(storage: PluginStorage, apiKeyId: string): Promise<Sighting[]> {
+  const rows = await storage.all<StoredSighting>(
     `SELECT species_id, chain_order, rarity, is_shiny, seen_at
-     FROM {{sightings}} WHERE api_key_id = ? ORDER BY species_id ASC`,
+     FROM {{sightings}} WHERE api_key_id = $1 ORDER BY species_id ASC`,
     [apiKeyId],
   );
 
@@ -561,36 +787,69 @@ export function listSightings(storage: PluginStorage, apiKeyId: string): Sightin
       chainOrder: chain,
       rarity: row.rarity,
       isShiny: row.is_shiny === 1,
-      seenAt: row.seen_at,
+      seenAt: num(row.seen_at),
     });
   }
   return sightings;
 }
 
 /** When this window last paid, or null for never. */
-export function lastGrantedAt(
+export async function lastGrantedAt(
   storage: PluginStorage,
   apiKeyId: string,
   windowKey: string,
-): number | null {
-  const row = storage.get<{ granted_at: number }>(
-    "SELECT granted_at FROM {{grants}} WHERE api_key_id = ? AND window_key = ?",
+): Promise<number | null> {
+  const row = await storage.get<{ granted_at: number | string }>(
+    "SELECT granted_at FROM {{grants}} WHERE api_key_id = $1 AND window_key = $2",
     [apiKeyId, windowKey],
   );
-  return row?.granted_at ?? null;
+  return row === null ? null : num(row.granted_at);
 }
 
-export function setGrantedAt(
+/**
+ * Claims a window's payout, and reports whether this caller won it.
+ *
+ * A compare-and-swap on the instant the caller read, for the reason `writeState`
+ * is one: on a fleet two replicas see the same `LimitReached` for one key, both
+ * read the same `lastGrantedAt`, and both decide to pay. An unconditional upsert
+ * lets the later instant through and pays twice for one window; the swap lets
+ * exactly one of them past, and the loser reads back an instant that is not its
+ * own.
+ *
+ * `previous` is null for a window never seen, where the claim is the insert
+ * itself and the conflict clause refuses the second one.
+ *
+ * **`RETURNING` rather than a read-back, and that is worth a payout.** Reading
+ * the row afterwards and comparing it to `at` cannot tell a win from a loss when
+ * both callers write the same instant — the loser finds its own number there,
+ * put there by the winner, and pays too. Nor is that a two-clock coincidence:
+ * two limit events for one key drain in a single pass of the host's bus and both
+ * read the same clock, so one process reaches it alone. A refused `DO UPDATE`
+ * returns no row whatever it would have written.
+ */
+export async function claimGrant(
   storage: PluginStorage,
   apiKeyId: string,
   windowKey: string,
+  previous: number | null,
   at: number,
-): void {
-  storage.run(
-    `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES (?, ?, ?)
-     ON CONFLICT(api_key_id, window_key) DO UPDATE SET granted_at = excluded.granted_at`,
-    [apiKeyId, windowKey, at],
-  );
+): Promise<boolean> {
+  const claimed =
+    previous === null
+      ? await storage.get<{ ok: number }>(
+          `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
+           ON CONFLICT (api_key_id, window_key) DO NOTHING
+           RETURNING 1 AS ok`,
+          [apiKeyId, windowKey, at],
+        )
+      : await storage.get<{ ok: number }>(
+          `INSERT INTO {{grants}} (api_key_id, window_key, granted_at) VALUES ($1, $2, $3)
+           ON CONFLICT (api_key_id, window_key) DO UPDATE SET granted_at = excluded.granted_at
+           WHERE {{grants}}.granted_at = $4
+           RETURNING 1 AS ok`,
+          [apiKeyId, windowKey, at, previous],
+        );
+  return claimed !== null;
 }
 
 export type ShopEntry =
@@ -612,7 +871,7 @@ export type ItemRefusal = "no-companion" | "nothing-new" | "already-armed" | "al
 
 export type ConsumeResult =
   | { ok: true; row: CompanionRow }
-  | { ok: false; reason: "none-held" | "unreadable" | "missing" | ItemRefusal };
+  | { ok: false; reason: "none-held" | "unreadable" | "missing" | "stale" | ItemRefusal };
 
 /**
  * What an item's effect returns: the state it produced, or why it did nothing.
@@ -645,14 +904,14 @@ export type ItemOutcome = { applied: CompanionState } | { refused: ItemRefusal }
  * The effect therefore sees the state as it stands, and the decrement is applied
  * to what the effect produced rather than to what it was given.
  */
-export function consume(
+export async function consume(
   storage: PluginStorage,
   apiKeyId: string,
   item: ItemKind,
   applyToState: (state: CompanionState) => ItemOutcome,
   now: number,
-): ConsumeResult {
-  const row = readCompanion(storage, apiKeyId);
+): Promise<ConsumeResult> {
+  const row = await readCompanion(storage, apiKeyId);
   if (row === null) return { ok: false, reason: "missing" };
   if (row.state === null) return { ok: false, reason: "unreadable" };
   if ((row.state.inventory[item] ?? 0) <= 0) return { ok: false, reason: "none-held" };
@@ -669,53 +928,57 @@ export function consume(
       [item]: (outcome.applied.inventory[item] ?? 0) - 1,
     },
   };
-  storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-    serialiseState(nextState),
-    now,
-    apiKeyId,
-  ]);
-  return { ok: true, row: { ...row, state: nextState } };
+  // Refused rather than retried when the save moved underneath: the effect ran
+  // against a companion that no longer exists in that form, and re-running it
+  // against the winner's save is a decision for whoever asked, not for a silent
+  // loop that spends an item against a state nobody looked at.
+  if (!(await writeState(storage, apiKeyId, row.raw, nextState, now))) {
+    return { ok: false, reason: "stale" };
+  }
+  return { ok: true, row: { ...row, state: nextState, raw: serialiseState(nextState) } };
 }
 
 export type PurchaseResult =
   | { ok: true; row: CompanionRow }
-  | { ok: false; reason: "insufficient" | "unreadable" | "missing" | ItemRefusal };
+  | { ok: false; reason: "insufficient" | "unreadable" | "missing" | "stale" | ItemRefusal };
 
 /**
  * Buys one shop entry.
  *
- * There is deliberately no transaction here, and the reasoning is worth keeping
- * because the instinct to add one is strong and was acted on before being
- * checked.
+ * There is still no transaction here, and the reasoning has changed twice, so it
+ * is worth keeping straight. It was once argued away on the grounds that
+ * `bun:sqlite` is synchronous and the process single-threaded, so nothing could
+ * interleave between the read and the write. Neither half of that is true any
+ * more: storage is asynchronous, and an installation is a fleet.
  *
- * It would not protect against two concurrent clicks: `bun:sqlite` is
- * synchronous and this process single-threaded, so nothing can interleave
- * between the read and the write. (The rate limiter's synchronous claim exists
- * for a genuinely different reason — it awaits.) And it would not protect
- * against a throw from the caller-supplied `applyToState`, because that runs
- * before any write happens, so there is nothing yet to roll back. The state and
- * the spent counter move in a single UPDATE, which SQLite already applies
- * atomically.
+ * What replaced it is not a transaction but a **condition on the one statement**.
+ * Everything a purchase writes — the new save and the debit — moves in a single
+ * `UPDATE`, which both backends apply atomically, and that `UPDATE` lands only
+ * while the save is still the one that was priced and the wallet still covers
+ * the price. A transaction around a read and a conditional write would add
+ * nothing the condition does not already guarantee, and it would not help
+ * against a throw from the caller-supplied `applyToState`, which runs before any
+ * write and so has nothing to roll back.
  *
- * Wrapping it changed no observable behaviour and no test could fail on its
- * removal, which is the definition of decoration — and decoration around money
- * is worse than none, because it invites the belief that something is being
- * guarded. Add one the day a purchase needs a second write.
+ * The wallet check is repeated *in SQL* rather than trusted from the read above
+ * it: the read is what refuses politely, the predicate is what makes it true.
+ * Without it two replicas both see a balance that covers one purchase and both
+ * spend it, and `tokens_spent` passes `tokens_total`.
  *
  * Growth is never rewound. A purchase raises `tokens_spent` only, so no
  * evolution is ever undone by shopping.
  */
-export function purchase(
+export async function purchase(
   storage: PluginStorage,
   apiKeyId: string,
   entry: ShopEntry,
   applyToState: (state: CompanionState) => ItemOutcome,
   now: number,
-): PurchaseResult {
+): Promise<PurchaseResult> {
   const price = shopPrice(entry);
 
   {
-    const row = readCompanion(storage, apiKeyId);
+    const row = await readCompanion(storage, apiKeyId);
     if (row === null) return { ok: false, reason: "missing" };
     // A save that will not parse cannot be spent against: the balance is
     // readable but the state a purchase mutates is not, and writing a fresh one
@@ -730,13 +993,38 @@ export function purchase(
     const outcome = applyToState(row.state);
     if ("refused" in outcome) return { ok: false, reason: outcome.refused };
     const nextState = outcome.applied;
-    storage.run(
-      "UPDATE {{companion}} SET state = ?, tokens_spent = tokens_spent + ?, updated_at = ? WHERE api_key_id = ?",
-      [serialiseState(nextState), price, now, apiKeyId],
+    const serialised = serialiseState(nextState);
+    // `RETURNING` for the reason `writeState` uses it, and it matters most here.
+    // Inferring the outcome from a later read cannot tell "somebody wrote after
+    // me" from "my write never landed" — and those two answers differ by a
+    // wallet: the second reports a purchase that was in fact debited as failed,
+    // which is the "fail closed for money" rule failing in the direction that
+    // loses the money.
+    const debited = await storage.get<{
+      tokens_spent: number | string;
+      tokens_total: number | string;
+    }>(
+      `UPDATE {{companion}}
+       SET state = $1, tokens_spent = tokens_spent + $2, updated_at = $3
+       WHERE api_key_id = $4 AND state = $5 AND tokens_total - tokens_spent >= $2
+       RETURNING tokens_spent, tokens_total`,
+      [serialised, price, now, apiKeyId, row.raw],
     );
+    if (debited === null) return { ok: false, reason: "stale" };
     return {
       ok: true,
-      row: { ...row, state: nextState, tokensSpent: row.tokensSpent + price },
+      // **Both** counters from the statement that moved one of them. Taking only
+      // the debit and keeping the total from the read above it made the answered
+      // wallet an under-report whenever a credit landed mid-purchase — harmless,
+      // since the row itself was right and the next poll corrected it, but the
+      // panel would show a balance nobody had.
+      row: {
+        ...row,
+        state: nextState,
+        raw: serialised,
+        tokensSpent: num(debited.tokens_spent),
+        tokensTotal: num(debited.tokens_total),
+      },
     };
   }
 }

@@ -76,6 +76,24 @@ The plugin declares the origins it will contact, in its manifest:
 "origins": ["https://pokeapi.co", "https://raw.githubusercontent.com"]
 ```
 
+**Amended 2026-08-31.** Six capabilities, not five: `channels` joined them in
+1.3.0, and the manifest moved from `"api": 1` to `"api": 2` with it. The
+generation bump is the host's rather than this plugin's — plugin API 2 removed
+`ctx.provider.register`, which this plugin never called — but a manifest
+declaring 1 is skipped at boot by a host implementing 2, so the number had to
+move regardless. See
+`2026-08-31-live-companion-channel-design.md`, which owns the channel.
+
+**Amended 2026-09-03.** The manifest declares `"api": 3`, and with it every
+storage call is asynchronous. The generation bump is again the host's — plugin
+API 3 is `ctx.storage` returning promises, which is what lets a store other than
+SQLite serve plugin storage — but a manifest declaring 2 is skipped at boot by a
+host implementing 3. The same amendment retires the argument recorded later in
+this design that a purchase needs no guard because the process is single-threaded:
+an installation is now a fleet of replicas over one database, and every write is
+conditional on the save it was computed from. See
+`2026-09-03-multi-pod-deployment-design.md`.
+
 The host hands it a `fetch` bound to that allowlist; a request to any other
 origin is refused by the host, not by convention.
 
@@ -711,6 +729,19 @@ needs during an incident, and a Pokémon is not.
 **Amended 2026-08-21**, and the interval it replaces was never written here —
 it lived only in a comment on `REFETCH_MS`, which is how a number nobody agreed
 to becomes one nobody can question.
+
+**Amended again 2026-08-31: polling is now the fallback rather than the
+mechanism, and "nothing here is worth a socket" is withdrawn.** Plugin API
+generation 2 gave the plugin a channel and SDK 0.1.4 gave the panel
+`usePluginChannel`, so the panel is told when a companion is written instead of
+asking. Everything below still holds and still describes what happens whenever
+the channel is absent — no `channels` capability, a console below 0.1.4, a proxy
+that strips `Upgrade`, a socket that dropped. The one line that changes is the
+call: both queries now pass the channel's topic, and `cadence(ms, topic)` is
+`false` while that topic is being pushed. The poll is kept rather than deleted
+because channel delivery is best-effort and drops rather than queues, so it is
+what makes the channel allowed to fail.
+`2026-08-31-live-companion-channel-design.md` owns the rest.
 
 Growth arrives from requests the panel has no way to hear about, so it polls;
 nothing here is worth a socket. Both queries take their interval from the

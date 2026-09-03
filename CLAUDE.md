@@ -53,14 +53,29 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 2. Capabilities arrive as arguments. Nothing in `src/` reaches for `fetch`, `process`, or a
    filesystem module, which is why no test can touch the network or a real directory by accident.
 3. A capability the manifest does not declare is absent from the context, and code must degrade
-   rather than throw: no `net` means an egg holds its progress and the sprite route answers 503.
+   rather than throw: no `net` means an egg holds its progress and the sprite route answers 503, and
+   no `channels` means nothing is pushed and the panel falls back to its ten-second poll. A member
+   added to a capability without a generation bump — `PluginChannel.broadcast` is the one — is
+   feature-detected and falls back, because a manifest cannot ask for it.
 4. The manifest is a guardrail, not a sandbox. A plugin shares the gateway's process and can import
    past all of it. What the declaration buys is that accidental overreach is impossible and that
    intent is auditable from one readable file.
 5. The panel talks to its own backend through the SDK's `api`, which is bound to
    `/api/plugins/pokemon/`. It does not reach the console's own API, and a path that tries is
    refused rather than normalised.
-6. Nintendo and Game Freak assets are **never vendored** — not into the repository, the npm package,
+6. **One installation is several replicas.** Every storage call is asynchronous; SQL is written in
+   the `$1` dialect both SQLite and Postgres accept, with every instant and counter `BIGINT` —
+   `INTEGER` is `int4` on Postgres and an epoch millisecond does not fit — and every mapper
+   converts, because a `BIGINT` arrives from the driver as a string. Every write to
+   `{{companion}}.state` is conditional on `CompanionRow.raw`, the stored text: `writeState` is the
+   one that carries only the save, `purchase` folds the wallet into the same predicate. Never
+   re-serialise the parsed state as the expected value — `parseState` clamps and defaults, so a save
+   that round-trips to different bytes would never match itself — and never infer the outcome from a
+   later read: every conditional write ends in `RETURNING`, because a read-back reports a write that
+   landed as lost the moment anyone else writes, which costs a graduation nothing can re-emit. A
+   lost swap is reported, never retried, except the candy grant, whose window is already claimed.
+   Design: `docs/superpowers/specs/2026-09-03-multi-pod-deployment-design.md`.
+7. Nintendo and Game Freak assets are **never vendored** — not into the repository, the npm package,
    or any built artifact. They are fetched at runtime and cached in the plugin's scoped data
    directory.
 
@@ -86,9 +101,16 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 - Test-first. Write the failing test, watch it fail for the reason you expect, then implement.
 - Prefer behaviour tests at the narrowest stable boundary. Pure logic (`advance`, `roll`, `balance`,
   `activityOf`) is tested without a renderer or a database.
-- `test/helpers/storage.ts` mirrors the host's storage rules; it does not share them. `@omni/store`
+- `test/helpers/storage.ts` mirrors the host's storage rules, **including its core-table denylist
+  and its hand-rolled `BEGIN`/`COMMIT`** — `db.transaction` takes a synchronous function and would
+  commit before an awaited statement ran. It does not share them. `@omni/store`
   is unpublished, so an external plugin cannot test against the code that will run its SQL. When the
   host's rules change, that mirror must change with them or migrations pass here and fail at boot.
+  `src/push.ts` is the same arrangement for `apps/gateway/src/stream/coalescer.ts`: a mirror of an
+  internal module, floors included, that hears nothing when the original moves.
+- The integration suite drives a fixture clock while the pusher arms real timers, so the two agree
+  only while nothing is pending. A test that wants a distinct frame moves `clock` past
+  `PUSH_FLOOR_MS` first. Coalescing itself belongs to `test/push.test.ts`, which controls both.
 - Stub both capabilities. A test that reaches PokéAPI is testing PokéAPI.
 - Panel tests run under happy-dom via `bun run test:ui`, kept out of the server run because
   registering a DOM mutates process-wide globals. Assert visible text, roles, and accessible names —
@@ -120,10 +142,31 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`; the tag is the sole ver
 - Growth counters only ever increase and are never recomputed from `request_logs`: retention prunes
   that table, and a recomputed meter runs backwards after a sweep — a Pokémon de-evolving because an
   operator tidied a database.
+- **A frame is broadcast, not sent per connection.** A `connectionId` is meaningful only on the
+  replica whose socket produced it, so `send` reaches the panels that happen to share a pod with the
+  code calling it. The pusher takes `broadcast` when the host has it and gives up "no audience, no
+  work" in exchange: this process's listener set says nothing about the fleet's.
+- **A frame goes out on every write to `{{companion}}` and on no read.** Both halves are
+  load-bearing. The panel turns its poll off while the channel is pushed, so a write that does not
+  push is a screen that stops updating with nothing to correct it — and a read that pushes is a
+  refetch loop, because `GET /keys/:id` settles on the way in. When you add a write, add the
+  `push`; `settle` reports `wrote` so no call site has to guess.
+- **`advance` returns the state object it was given when nothing changed**, and `settle` reads that
+  identity to decide whether to write. It is not a micro-optimisation: the guard was dead once —
+  `advance` opened by allocating unconditionally — so the plugin wrote a row on every read, and the
+  push invariant above could not have been expressed at all.
+- Push frames name a key and never carry the companion. Push and poll must end in the same fetch and
+  the same serialiser, which is the rule the console's own `res:*` topics follow.
+- Anything on the channel is reachable by any admin panel in the console, which can spell the topic
+  itself. Nothing may ride it that is not already admin-reachable through this plugin's own gated
+  routes.
 - `last_credit_at` is written **only** where tokens are credited. A purchase, an item use, and a
   settle all move `updated_at` and must leave it alone, or the panel reads a shopping trip as work.
 - Everything is seeded from stored facts rather than a clock, so a retried roll is the same roll.
-  `now` is passed in, never read.
+  `now` is passed in, never read. The one scheduler in the plugin — the push floor in `src/push.ts`
+  — takes its `Schedule` as an argument for the same reason the host's coalescer does: a bare
+  `setTimeout` would put "the last change of a burst is delivered" in a test name rather than in the
+  code.
 - `settle` is idempotent; calling it on read costs a comparison, not a second helping of growth.
 - Species names are resolved server-side and **cache-only** — `cachedSpeciesName` takes `files` and
   not `net`, enforced by the type. A roster repainting on a poll must not become a crawl of an

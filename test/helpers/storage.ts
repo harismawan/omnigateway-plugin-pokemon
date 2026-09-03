@@ -59,9 +59,15 @@ const TABLE_NAME = /^[a-z][a-z0-9_]{0,31}$/;
  */
 const CORE_TABLES = [
   "api_keys",
+  // Postgres holds this one and SQLite does not, and the host's guard refuses
+  // both names on both backends. A mirror that listed only SQLite's would pass
+  // a migration here that a clustered install rejects at boot.
+  "config_version",
   "credential_health",
   "credentials",
   "migrations",
+  // The replica heartbeat table, added with cluster mode.
+  "nodes",
   "plugin_migrations",
   "quota_samples",
   "quota_windows",
@@ -85,7 +91,7 @@ const CORE_TABLE_REFERENCE = new RegExp(`\\b(?:${CORE_TABLES.join("|")})\\b`, "i
  * refused here too, or a plugin would learn the habit somewhere it is harmless
  * and ship it somewhere it is not.
  */
-const CONNECTION_STATEMENT = /^\s*(pragma|attach|detach|vacuum)\b/i;
+const CONNECTION_STATEMENT = /^\s*(pragma|attach|detach|vacuum|set|reset)\b/i;
 
 /** Expands `{{name}}` to `"plugin_pokemon_<name>"`, quoted as the host quotes it. */
 function expand(sql: string): string {
@@ -119,6 +125,8 @@ export type TestStorage = PluginStorage & {
    * been tested the way it will run.
    */
   migrate(migrations: readonly PluginMigration[]): void;
+  /** Runs `fn` with every read and write on this storage failing. */
+  failing<T>(fn: () => Promise<T>): Promise<T>;
   /** Table names this plugin owns, as SQLite stores them (unquoted, sorted). */
   listTables(): string[];
   close(): void;
@@ -130,6 +138,8 @@ export function createTestStorage(): TestStorage {
   // `plugin_migrations` ledger of its own. One database per test, so an
   // in-memory set is equivalent to the host's table for the span it covers.
   const applied = new Set<number>();
+  /** Set by `failing`, so a test can watch a route survive a store that is down. */
+  let broken = false;
 
   return {
     migrate(migrations: readonly PluginMigration[]): void {
@@ -145,21 +155,49 @@ export function createTestStorage(): TestStorage {
       }
     },
 
-    run(sql: string, params?: readonly unknown[]): void {
+    async run(sql: string, params?: readonly unknown[]): Promise<void> {
+      if (broken) throw new Error("storage is unavailable");
       db.run(expand(sql), toBindings(params));
     },
 
-    all<T>(sql: string, params?: readonly unknown[]): T[] {
+    async all<T>(sql: string, params?: readonly unknown[]): Promise<T[]> {
+      if (broken) throw new Error("storage is unavailable");
       return db.prepare(expand(sql)).all(...toBindings(params)) as T[];
     },
 
-    get<T>(sql: string, params?: readonly unknown[]): T | null {
+    async get<T>(sql: string, params?: readonly unknown[]): Promise<T | null> {
+      if (broken) throw new Error("storage is unavailable");
       const row = db.prepare(expand(sql)).get(...toBindings(params));
       return row === null || row === undefined ? null : (row as T);
     },
 
-    transaction<T>(fn: () => T): T {
-      return db.transaction(fn)();
+    /**
+     * `BEGIN`/`COMMIT` by hand rather than `db.transaction`, which takes a
+     * *synchronous* function: handed an async one it commits the moment that
+     * function returns its promise, so every statement the plugin awaits inside
+     * lands outside the transaction and a rollback takes nothing back. The host
+     * hand-rolls it for the same reason, and a mirror that used the convenience
+     * would pass tests the real thing fails.
+     */
+    async transaction<T>(fn: () => Promise<T>): Promise<T> {
+      db.run("BEGIN");
+      try {
+        const out = await fn();
+        db.run("COMMIT");
+        return out;
+      } catch (error) {
+        db.run("ROLLBACK");
+        throw error;
+      }
+    },
+
+    async failing<T>(fn: () => Promise<T>): Promise<T> {
+      broken = true;
+      try {
+        return await fn();
+      } finally {
+        broken = false;
+      }
     },
 
     listTables(): string[] {

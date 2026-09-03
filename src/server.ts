@@ -2,8 +2,12 @@
 // re-exports the manifest schema and with it zod, which a plugin never needs at
 // runtime — importing it bundled half a megabyte of validator into every plugin
 // that only wanted an identity function and some types.
-import { definePlugin, type PluginContext, type PluginRoute } from "@omnigateway/plugin-api/define";
-import type { CompanionEvent } from "./advance.ts";
+import {
+  definePlugin,
+  type PluginChannel,
+  type PluginContext,
+  type PluginRoute,
+} from "@omnigateway/plugin-api/define";
 import {
   DITTO_SPECIES_ID,
   EGG_HATCH_THRESHOLD,
@@ -26,10 +30,12 @@ import {
   speciesIndex,
   spriteBytes,
 } from "./pokeapi.ts";
+import { type ActivityFrame, createPusher } from "./push.ts";
 import { NATURES, roll } from "./roll.ts";
 import type { CompanionState } from "./state.ts";
 import { hasShinyCharm } from "./state.ts";
 import {
+  claimGrant,
   consume,
   creditTokens,
   type ItemOutcome,
@@ -39,12 +45,11 @@ import {
   purchase,
   readCompanion,
   readDex,
-  recordGraduation,
   recordSightings,
   type ShopEntry,
-  setGrantedAt,
   settle,
   wallet,
+  writeState,
 } from "./store.ts";
 
 /**
@@ -56,6 +61,16 @@ import {
  * de-evolves anything.
  */
 const MAX_MULTIPLIER = 1_000;
+
+/**
+ * `PluginChannel.broadcast`, structurally.
+ *
+ * Written out here rather than imported because this plugin builds against
+ * `@omnigateway/plugin-api` 0.3.x, where the member does not exist — and
+ * pinning 0.4.0 would refuse to install beside an older gateway for the sake of
+ * a member the plugin has to check for at runtime anyway.
+ */
+type Broadcasting = { broadcast?: (payload: unknown) => void };
 
 /**
  * How many unknown species one poll of the key route may go and look up.
@@ -97,25 +112,6 @@ function multiplierFrom(config: Readonly<Record<string, unknown>>): number {
   return Math.min(raw, MAX_MULTIPLIER);
 }
 
-/**
- * A Dex row id.
- *
- * `now` is passed rather than read, like everything else in this plugin — and a
- * counter is mixed in because two graduations can land in the same millisecond
- * when a large credit carries through several lines at once. A primary-key
- * collision would throw *after* `settle` had already written the state back,
- * losing the graduation with nothing to say so.
- */
-let dexSequence = 0;
-function dexId(
-  apiKeyId: string,
-  event: Extract<CompanionEvent, { kind: "graduated" }>,
-  now: number,
-): string {
-  dexSequence += 1;
-  return `${apiKeyId}:${event.baseId}:${event.finalId}:${now}:${dexSequence}`;
-}
-
 export default definePlugin({
   migrations: MIGRATIONS,
 
@@ -131,6 +127,75 @@ export default definePlugin({
     if (storage === undefined) throw new Error("the companion needs the storage capability");
 
     const multiplier = multiplierFrom(ctx.config);
+
+    /**
+     * The channel the panel watches, and the frames that let it stop polling.
+     *
+     * `activity` is half of the wire topic `plugin:pokemon:activity` — the host
+     * supplies the `plugin:pokemon:` half from the validated manifest, so this
+     * cannot name another plugin's channel any more than `{{companion}}` can name
+     * another plugin's table.
+     *
+     * Absent when the capability is: the manifest declares `channels`, but a
+     * capability a manifest declares can still be missing, and the plugin has to
+     * degrade rather than throw. Degradation here is the panel's ten-second poll,
+     * which is exactly what it shipped with before this existed.
+     *
+     * A panel announces itself through `onMessage` here, and on a host without
+     * `broadcast` that hello is the only thing that makes it reachable: `send`
+     * needs a connection id, and this is where one arrives. It is the other side
+     * of the host's rule that a client must subscribe before it sends, and it is
+     * kept on the broadcast path too — the pusher still needs to know whether
+     * anybody is listening here when it cannot reach the fleet.
+     */
+    const activity = ctx.channels?.open("activity");
+    /*
+      The fleet-wide half of the channel, when the host has one.
+
+      `send` names a connection, and a connection id means something only on the
+      process whose socket produced it — so on a gateway running as several
+      replicas the panel hears about the writes that happened to land on its own
+      pod and nothing else, while its poll is switched off because the channel is
+      live. `broadcast` names the topic instead and the host fans it out.
+
+      Feature-detected rather than declared, because it arrived in
+      `@omnigateway/plugin-api` 0.4.0 without a generation bump: a manifest
+      cannot ask for it, and an older gateway simply does not have it. That is
+      the same posture this plugin takes for every capability — degrade, never
+      throw — and the degradation here is the single-process behaviour it shipped
+      with.
+    */
+    const broadcasting = activity as (PluginChannel & Broadcasting) | undefined;
+    const pusher =
+      activity === undefined
+        ? null
+        : createPusher({
+            send: (connectionId, payload) => activity.send(connectionId, payload),
+            ...(typeof broadcasting?.broadcast === "function"
+              ? { broadcast: (payload: ActivityFrame) => broadcasting.broadcast?.(payload) }
+              : {}),
+            now: ctx.now,
+          });
+
+    if (activity !== undefined && pusher !== null) {
+      // The payload is ignored on purpose. A panel's hello says "I am here and I
+      // can be sent to", and there is nothing a panel could put in it that this
+      // plugin would act on — every route it wants is admin-gated HTTP.
+      activity.onMessage(({ connectionId }) => pusher.join(connectionId));
+      activity.onClose((connectionId) => pusher.leave(connectionId));
+    }
+
+    /**
+     * Reports that a key's companion was written.
+     *
+     * Called from every write site and from no read, which is the invariant that
+     * lets the panel turn its poll off — see
+     * `docs/superpowers/specs/2026-08-31-live-companion-channel-design.md`. A
+     * frame names the key and never carries the companion: push and poll must
+     * end in the same fetch and the same serialiser, or they are two answers to
+     * one question.
+     */
+    const push = (apiKeyId: string): void => pusher?.push(apiKeyId);
 
     /**
      * One prefetch at a time, per key.
@@ -278,10 +343,15 @@ export default definePlugin({
      *
      * Called on read as well as after a credit. `settle` is idempotent, so the
      * repetition costs a comparison rather than a second helping of growth.
+     *
+     * Reports whether anything was written rather than pushing a frame itself.
+     * The event path credits *and* settles for one request, and a frame from
+     * each would be two claims about one change — so the decision belongs to the
+     * call site, which knows how many changes it just made.
      */
-    const settleAndRecord = (apiKeyId: string): void => {
-      const result = settle(storage, apiKeyId, ctx.now());
-      if (result === null) return;
+    const settleAndRecord = async (apiKeyId: string): Promise<boolean> => {
+      const result = await settle(storage, apiKeyId, ctx.now());
+      if (result === null) return false;
 
       /*
         What the companion alive right now has been, recorded before its events
@@ -300,7 +370,7 @@ export default definePlugin({
       */
       const active = result.row.state?.active;
       if (active !== null && active !== undefined) {
-        recordSightings(
+        await recordSightings(
           storage,
           apiKeyId,
           {
@@ -315,29 +385,15 @@ export default definePlugin({
         );
       }
 
+      // Recorded by `settle` itself, in the same call that won the swap for the
+      // state that produced them, and reported here only because a graduation is
+      // worth one line in the log.
       for (const event of result.events) {
         if (event.kind !== "graduated") continue;
-        recordGraduation(
-          storage,
-          apiKeyId,
-          {
-            baseId: event.baseId,
-            finalId: event.finalId,
-            chainOrder: event.chainOrder,
-            // Straight from the event, because the state that accumulated these
-            // is discarded by the graduation that produced it. `ctx.now()` here
-            // would date every stage to the settle that finished the line,
-            // which is precisely the single-date behaviour this replaces.
-            stageTimes: event.stageTimes,
-            rarity: event.rarity,
-            isShiny: event.isShiny,
-            nature: event.nature,
-            caughtAt: ctx.now(),
-          },
-          dexId(apiKeyId, event, ctx.now()),
-        );
         ctx.logger.info("companion graduated", { event: "companion.graduated", count: 1 });
       }
+
+      return result.wrote;
     };
 
     /**
@@ -364,17 +420,21 @@ export default definePlugin({
       const detail = await speciesDetail({ net, files }, DITTO_SPECIES_ID);
       if (detail === null) return;
 
-      const current = readCompanion(storage, apiKeyId);
+      const current = await readCompanion(storage, apiKeyId);
       // Re-read rather than trusting the state this started from: an await
       // happened, and a credit may have landed — or the reveal may already have
-      // been resolved by a poll that overlapped this one.
+      // been resolved by a poll that overlapped this one, here or on another
+      // replica.
       if (current?.state == null) return;
       const latest = current.state.active;
       if (latest === null || latest.dittoDisguise === null || latest.dittoRevealed) return;
       if (current.state.pendingReveal !== null) return;
 
-      storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-        JSON.stringify({
+      const wrote = await writeState(
+        storage,
+        apiKeyId,
+        current.raw,
+        {
           ...current.state,
           pendingReveal: {
             path: detail.chain,
@@ -384,10 +444,19 @@ export default definePlugin({
               detail.isMythical,
             ),
           },
-        }),
+        },
         ctx.now(),
-        apiKeyId,
-      ]);
+      );
+      // No frame for a write that did not land. This is a prefetch: whoever won
+      // the swap has already pushed its own, and the next poll re-resolves.
+      if (!wrote) return;
+
+      // The twin of the roll's frame below, and for the identical reason: this
+      // lands unawaited, long after the route that started it answered, and a
+      // disguised companion already standing at its threshold is waiting on this
+      // write and nothing else. Without it, a panel that has switched its poll
+      // off would sit in front of a Ditto that never reveals.
+      push(apiKeyId);
     };
 
     /**
@@ -404,7 +473,7 @@ export default definePlugin({
       const candidates = await speciesIndex({ net, files });
       if (candidates.length === 0) return;
 
-      const collected = new Set(readDex(storage, apiKeyId).map((entry) => entry.finalId));
+      const collected = new Set((await readDex(storage, apiKeyId)).map((entry) => entry.finalId));
       const rolled = roll({
         candidates,
         // Seeded from facts rather than from a clock, so a retried prefetch
@@ -441,7 +510,7 @@ export default definePlugin({
         detail.isMythical,
       );
 
-      const current = readCompanion(storage, apiKeyId);
+      const current = await readCompanion(storage, apiKeyId);
       // Re-read rather than trusting the state this started from: an await
       // happened in between, and a credit may have landed.
       if (current?.state == null || current.state.pendingHatch !== null) return;
@@ -473,8 +542,11 @@ export default definePlugin({
       */
       if (paidRollInputs(current.state) !== paidRollInputs(state)) return;
 
-      storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-        JSON.stringify({
+      const wrote = await writeState(
+        storage,
+        apiKeyId,
+        current.raw,
+        {
           ...current.state,
           pendingHatch: {
             speciesId: rolled.speciesId,
@@ -496,62 +568,130 @@ export default definePlugin({
           lure: state.lure && !rolled.usedLure,
           incense: false,
           repel: null,
-        }),
+        },
         ctx.now(),
-        apiKeyId,
-      ]);
+      );
+      // Another replica rolled this egg first. Its roll is the one on the row
+      // and its frame is the one that went out; a second frame here would
+      // announce a write that did not happen.
+      if (!wrote) return;
+
+      // The write the poll used to collect. This runs unawaited from the panel's
+      // own route and lands long after that response went out — on a cold
+      // species cache, ~649 fetches later — so without a frame here an egg with
+      // the poll switched off would never open.
+      push(apiKeyId);
+    };
+
+    /**
+     * Runs an event handler's asynchronous body without letting it escape.
+     *
+     * The host calls a handler synchronously inside its own `try`, so it catches
+     * a throw and cannot catch a rejection — and storage is asynchronous now, so
+     * every one of these handlers has a body that can only reject. Without this
+     * a failed write inside an event handler is an unhandled rejection in the
+     * gateway's process, which is a far larger consequence than the missed
+     * credit that caused it.
+     *
+     * The reason is deliberately not logged: it is an error object from a write
+     * this plugin does not own, and `PluginLogFields` is a closed allowlist.
+     */
+    const detach = (label: string, run: () => Promise<void>): void => {
+      void run().catch(() => ctx.logger.warn("companion event handler failed", { event: label }));
     };
 
     if (events?.onRequestCompleted !== undefined) {
-      events.onRequestCompleted((event) => {
-        const tokens =
-          event.tokens.input +
-          event.tokens.output +
-          event.tokens.cacheRead +
-          event.tokens.cacheWrite;
-        creditTokens(storage, event.apiKeyId, Math.round(tokens * multiplier), ctx.now());
-        settleAndRecord(event.apiKeyId);
-      });
+      events.onRequestCompleted((event) =>
+        detach("companion.credit.failed", async () => {
+          const tokens =
+            event.tokens.input +
+            event.tokens.output +
+            event.tokens.cacheRead +
+            event.tokens.cacheWrite;
+          const credited = await creditTokens(
+            storage,
+            event.apiKeyId,
+            Math.round(tokens * multiplier),
+            ctx.now(),
+          );
+          const settled = await settleAndRecord(event.apiKeyId);
+          // One frame for the two writes, because a credit and what it grew into
+          // are one change as an operator experiences them — not because either is
+          // guaranteed to have happened. A failed request carries no tokens and a
+          // small enough multiplier rounds a real one away, and in both cases this
+          // handler writes nothing: the host emits `RequestCompleted` whether or
+          // not the request succeeded.
+          if (credited || settled) push(event.apiKeyId);
+        }),
+      );
     }
 
     if (events?.onLimitReached !== undefined) {
-      events.onLimitReached((event) => {
-        const key = windowKey(event);
-        const row = readCompanion(storage, event.apiKeyId);
-        if (row?.state == null) return;
+      events.onLimitReached((event) =>
+        detach("companion.candy.failed", async () => {
+          const key = windowKey(event);
+          const row = await readCompanion(storage, event.apiKeyId);
+          if (row?.state == null) return;
 
-        const decision = decideGrant({
-          window: event.window,
-          lastGrantedAt: lastGrantedAt(storage, event.apiKeyId, key),
-          now: ctx.now(),
-        });
+          const previous = await lastGrantedAt(storage, event.apiKeyId, key);
+          const decision = decideGrant({
+            window: event.window,
+            lastGrantedAt: previous,
+            now: ctx.now(),
+          });
 
-        if (!decision.grant) {
-          // Seeding is a write to the grants table alone: the window records
-          // that it has been seen, and the companion's own state is untouched.
-          if (decision.seedAt !== undefined) {
-            setGrantedAt(storage, event.apiKeyId, key, decision.seedAt);
+          if (!decision.grant) {
+            // Seeding is a write to the grants table alone: the window records
+            // that it has been seen, and the companion's own state is untouched.
+            if (decision.seedAt !== undefined) {
+              await claimGrant(storage, event.apiKeyId, key, previous, decision.seedAt);
+            }
+            return;
           }
-          return;
-        }
 
-        setGrantedAt(storage, event.apiKeyId, key, decision.at);
-        storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-          JSON.stringify({
-            ...row.state,
-            inventory: {
-              ...row.state.inventory,
-              rareCandy: row.state.inventory.rareCandy + decision.count,
-            },
-          }),
-          ctx.now(),
-          event.apiKeyId,
-        ]);
-        ctx.logger.info("companion candy granted", {
-          event: "companion.candy",
-          count: decision.count,
-        });
-      });
+          // The window is claimed before the candy is written, and only the
+          // replica that wins the claim writes any. Both halves of one payout:
+          // claiming without paying loses a candy, paying without claiming pays
+          // one per replica that saw the event.
+          if (!(await claimGrant(storage, event.apiKeyId, key, previous, decision.at))) return;
+          // Retried against a re-read save rather than abandoned, and this is the
+          // one write in the plugin that may not simply lose. The claim is already
+          // spent — a window pays once — so a swap lost to a credit landing in the
+          // same instant would drop the candy with nothing left to re-award it.
+          // Bounded, because the alternative to a bound is a loop that never ends
+          // on a key busy enough to move the save every time.
+          let paid = false;
+          for (let attempt = 0; attempt < 3 && !paid; attempt++) {
+            const current = attempt === 0 ? row : await readCompanion(storage, event.apiKeyId);
+            if (current?.state == null) return;
+            paid = await writeState(
+              storage,
+              event.apiKeyId,
+              current.raw,
+              {
+                ...current.state,
+                inventory: {
+                  ...current.state.inventory,
+                  rareCandy: current.state.inventory.rareCandy + decision.count,
+                },
+              },
+              ctx.now(),
+            );
+          }
+          if (!paid) {
+            ctx.logger.warn("companion candy lost to a contended save", {
+              event: "companion.candy.contended",
+              count: decision.count,
+            });
+            return;
+          }
+          push(event.apiKeyId);
+          ctx.logger.info("companion candy granted", {
+            event: "companion.candy",
+            count: decision.count,
+          });
+        }),
+      );
     }
 
     const routes: PluginRoute[] = [
@@ -574,7 +714,7 @@ export default definePlugin({
          * numbers are actually looked at.
          */
         handler: async () => {
-          const rows = listCompanions(storage);
+          const rows = await listCompanions(storage);
           const keys = await Promise.all(
             rows.map(async (row) => {
               const active = row.state?.active ?? null;
@@ -605,8 +745,11 @@ export default definePlugin({
         path: "/keys/:id",
         handler: async (request) => {
           const apiKeyId = request.params.id ?? "";
-          settleAndRecord(apiKeyId);
-          const row = readCompanion(storage, apiKeyId);
+          // Conditional, and that is the whole of "on every write and on no
+          // read". This route settles on the way in, so an unconditional frame
+          // here would have the panel refetch, settle, push and refetch again.
+          if (await settleAndRecord(apiKeyId)) push(apiKeyId);
+          const row = await readCompanion(storage, apiKeyId);
           if (row === null) return { status: 404, json: { error: "no companion for that key" } };
 
           // Best effort and deliberately not awaited: a prefetch is an
@@ -628,7 +771,7 @@ export default definePlugin({
           // table holds facts about a graduation, and a species' name is a fact
           // about PokéAPI.
           const named = await Promise.all(
-            readCollection(storage, apiKeyId).map(async (record) => ({
+            (await readCollection(storage, apiKeyId)).map(async (record) => ({
               ...record,
               name: await nameOf(record.speciesId),
             })),
@@ -765,7 +908,7 @@ export default definePlugin({
       {
         method: "POST",
         path: "/keys/:id/use",
-        handler: (request) => {
+        handler: async (request) => {
           // The other half of a grant. Without this route a granted candy was a
           // counter that only ever went up: the shop's rare candy applied its XP
           // and charged the wallet, and nothing anywhere read `inventory`. A
@@ -775,7 +918,7 @@ export default definePlugin({
           const item = parseHeldItem(request.body);
           if (item === null) return { status: 400, json: { error: "unknown item" } };
 
-          const result = consume(
+          const result = await consume(
             storage,
             apiKeyId,
             item,
@@ -783,7 +926,12 @@ export default definePlugin({
             ctx.now(),
           );
           if (!result.ok) return { status: 409, json: { error: result.reason } };
-          settleAndRecord(apiKeyId);
+          await settleAndRecord(apiKeyId);
+          // Unconditional: reaching here means `consume` wrote. The panel that
+          // acted already invalidates its own queries, so this frame is for
+          // every *other* tab — a bag or a wallet that still shows what was
+          // spent two minutes ago.
+          push(apiKeyId);
           return { json: { ok: true } };
         },
       },
@@ -803,9 +951,9 @@ export default definePlugin({
          * The stone is not returned. It was spent to pin, and this is simply the
          * pin ending.
          */
-        handler: (request) => {
+        handler: async (request) => {
           const apiKeyId = request.params.id ?? "";
-          const row = readCompanion(storage, apiKeyId);
+          const row = await readCompanion(storage, apiKeyId);
           if (row === null) return { status: 404, json: { error: "no companion for that key" } };
           if (row.state === null) return { status: 409, json: { error: "unreadable" } };
 
@@ -815,27 +963,34 @@ export default definePlugin({
           // out of date is told rather than shown a success that changed nothing.
           if (!active.everstone) return { status: 409, json: { error: "nothing-new" } };
 
-          storage.run("UPDATE {{companion}} SET state = ?, updated_at = ? WHERE api_key_id = ?", [
-            JSON.stringify({ ...row.state, active: { ...active, everstone: false } }),
-            ctx.now(),
+          const released = await writeState(
+            storage,
             apiKeyId,
-          ]);
+            row.raw,
+            { ...row.state, active: { ...active, everstone: false } },
+            ctx.now(),
+          );
+          // Refused rather than retried, like every other action a panel starts:
+          // the save moved between the read and the write, and the operator's
+          // next poll shows what it moved to.
+          if (!released) return { status: 409, json: { error: "stale" } };
           // Everything banked while pinned is still in `usedAtStage`, so this is
           // the moment it spends itself — possibly through several stages at
           // once, which `advance`'s transition cap already handles.
-          settleAndRecord(apiKeyId);
+          await settleAndRecord(apiKeyId);
+          push(apiKeyId);
           return { json: { ok: true } };
         },
       },
       {
         method: "POST",
         path: "/keys/:id/purchase",
-        handler: (request) => {
+        handler: async (request) => {
           const apiKeyId = request.params.id ?? "";
           const entry = parseShopEntry(request.body);
           if (entry === null) return { status: 400, json: { error: "unknown shop entry" } };
 
-          const result = purchase(
+          const result = await purchase(
             storage,
             apiKeyId,
             entry,
@@ -843,6 +998,9 @@ export default definePlugin({
             ctx.now(),
           );
           if (!result.ok) return { status: 409, json: { error: result.reason } };
+          // A refusal is the one path here that wrote nothing, and it returned
+          // above. The wallet has moved, so every other tab needs to know.
+          push(apiKeyId);
           return { json: { ok: true, wallet: wallet(result.row) } };
         },
       },
