@@ -184,6 +184,18 @@ strings and a wallet renders as `NaN`.
   read-back that made it necessary. It was a true statement about a mechanism that should not
   have existed: the same inference that produced the harmless false positive produced the
   harmful false negative, and `RETURNING` produces neither.
+- `purchase` kept the read-back for a commit longer than everything else did, because the edit
+  that was supposed to replace it was written against a line the formatter had already
+  rewrapped: it did not apply, the failure was swallowed by a later error in the same batch,
+  and every test still passed — the inference is only wrong when somebody writes in between.
+  It survived on the one path where being wrong costs a wallet. Found by re-checking each
+  finding against the code rather than against the memory of having fixed it.
+- The SQL was driven once through the host's **real** `PluginRepo` rather than the mirror in
+  `test/helpers/storage.ts` — migrations 1 to 7 through the actual guard, `RETURNING` on the
+  `UPDATE` and on both conflict clauses, and a counter and an instant past `int4` round-tripped.
+  It cannot be kept as a test in either repository: the host may not depend on a plugin, and a
+  plugin cannot import the unpublished `@omni/store`. That gap is why the mirror exists and why
+  it has to be re-run by hand when either side moves.
 - Three of the findings above — the column widths, the false negative, and the Dex id — were
   found by review with runnable probes rather than by any suite here, because all three are
   invisible on SQLite or need two writers. Two are now pinned by `test/fleet.test.ts` (a
